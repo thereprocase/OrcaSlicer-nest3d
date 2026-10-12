@@ -12,12 +12,13 @@
 //
 // The placement search is greedy first-fit-decreasing over a constant number
 // of part orderings, with an exhaustive scan of grid positions per candidate.
-// Packing grows outward from an anchor point and prefers positions where a
-// part touches what is already placed. Copies of one shape (Part::shape_key)
-// grow outward from an anchor point and are additionally tried laid out on the
-// densest lattice found for one copy or an interlocked pair; unique parts keep
-// the pile's bounding box small. Cost is polynomial (see docs/HLSD/nest3d.md);
-// no step enumerates permutations or subsets.
+// A part goes into the smallest free region the pile already encloses that
+// holds it; otherwise the pile grows from an anchor point, keeping its
+// bounding box small and preferring positions where a part touches what is
+// already placed. Copies of one shape (Part::shape_key) are additionally tried
+// laid out on the densest lattice found for one copy or an interlocked pair.
+// Cost is polynomial (see docs/HLSD/nest3d.md); no step enumerates
+// permutations or subsets.
 //
 // This header is deliberately free of libslic3r types so the core can be
 // unit-tested without the rest of the slicer; Nest3DArrange.hpp adapts it to
@@ -145,20 +146,34 @@ struct Stats
 };
 
 // Builds a height map from a closed or open triangle soup. The map covers the
-// XY bounding box of the triangles, expanded by `inflate_mm` on every side,
-// and every cell touched by a triangle receives that triangle's z-range
-// within the cell. When `fill_to_bed` is set (the part prints with support),
-// every non-empty column is extended down to z = 0.
+// XY bounding box of the triangles, expanded by `inflate_mm` on every side.
+// Every cell touched by a triangle receives that triangle's z-range within the
+// cell, and every cell closer than `inflate_mm` to the geometry inside such a
+// cell receives that cell's z-range, so parts grown by r1 and r2 whose maps
+// share no cell keep at least r1 + r2 apart. Distances are measured from the
+// extent of the geometry inside each cell along the axes and diagonals, so the
+// clearance is not rounded up to whole cells. When `fill_to_bed` is set (the
+// part prints with support), every non-empty column is extended down to z = 0.
 HeightMap rasterize(const std::vector<Triangle> &tris, double cell_mm, double inflate_mm, bool fill_to_bed);
 
-// Grows every non-empty column by `radius_mm` in XY: each cell that comes within
-// the radius of a non-empty cell takes the union of their z-spans. The growth is
-// conservative, so geometry anywhere inside a cell keeps at least `radius_mm`
-// of clearance. Used for spacing and brims; brim-style growth only for the first
-// layer is done with `bottom_only_mm` > 0: cells within `bottom_only_radius_mm`
-// of the first-layer footprint receive [0, bottom_only_mm]. Vertical clearance
-// is applied at placement by Params::vertical_gap.
+// Grows every non-empty column of a finished map by `radius_mm` in XY: each cell
+// that comes within the radius of a non-empty cell takes the union of their
+// z-spans. Measured between whole cells, so geometry anywhere inside a cell keeps
+// at least `radius_mm` of clearance, at the price of up to a cell more than
+// rasterize() grows. Brim-style growth only for the first layer is done with
+// `bottom_only_mm` > 0: cells within `bottom_only_radius_mm` of the first-layer
+// footprint receive [0, bottom_only_mm]. Vertical clearance is applied at
+// placement by Params::vertical_gap.
 HeightMap dilate(const HeightMap &m, double radius_mm, double bottom_only_radius_mm = 0.0, double bottom_only_mm = 0.0);
+
+// Grid and search settings of an effort level (0 fast, 1 balanced, 2 thorough) on a bed of
+// bed_w x bed_h mm.
+struct Effort
+{
+    double cell_mm   = 0.5;
+    int    orderings = 3;
+};
+Effort effort_settings(int effort, double bed_w, double bed_h);
 
 // Z angles current + offset for every offset, normalised to [0, 2 pi) and sorted. Copies whose
 // current angles differ by a multiple of an evenly spaced offset list get the same angles in the

@@ -30,9 +30,6 @@ using arrangement::ArrangePolygons;
 
 namespace {
 
-constexpr double EFFORT_CELL_MM[]   = {1.0, 0.6, 0.4};
-constexpr int    EFFORT_ORDERINGS[] = {1, 3, 6};
-constexpr double MAX_BED_CELLS      = 600.;  // per side; bounds the cost of one placement scan
 constexpr size_t MAX_LAY_FLAT       = 5;
 constexpr double OVERHANG_TOLERANCE = 1.1;   // a lay-flat pose may add up to 10% overhang area
 constexpr double BED_CONTACT_MM     = 0.1;   // facets this close to the bottom rest on the bed
@@ -215,7 +212,7 @@ HeightMap footprint(const ItemGeometry &g, const Pose &pose, double angle, const
         for (int k = 0; k < 3; ++k)
             tris[i / 3].v[i % 3][k] = float(v[k]);
     }
-    return dilate(rasterize(tris, cell, 0., g.fill_to_bed), inflation);
+    return rasterize(tris, cell, inflation, g.fill_to_bed);
 }
 
 } // namespace
@@ -228,19 +225,19 @@ Stats arrange_polygons(ArrangePolygons                  &selected,
                        const DynamicPrintConfig         &config,
                        int                               max_plates)
 {
-    const int         effort = std::clamp(settings.effort, 0, 2);
     const BoundingBox bed_bb(bed);
     const Vec2d       bed_min = unscaled(bed_bb.min);
 
     Params p;
     p.bed_w          = unscaled(bed_bb.size().x());
     p.bed_h          = unscaled(bed_bb.size().y());
-    p.cell_mm        = std::max(EFFORT_CELL_MM[effort], std::max(p.bed_w, p.bed_h) / MAX_BED_CELLS);
+    const Effort effort = effort_settings(settings.effort, p.bed_w, p.bed_h);
+    p.cell_mm        = effort.cell_mm;
     p.max_height     = params.printable_height;
     p.vertical_gap   = settings.vertical_gap_mm;
     p.allow_stacking = settings.allow_stacking;
     p.mix_groups     = false;
-    p.orderings      = EFFORT_ORDERINGS[effort];
+    p.orderings      = effort.orderings;
     p.max_plates     = max_plates;
     p.align_x        = params.do_final_align ? params.align_center.x() : -1.;
     p.align_y        = params.do_final_align ? params.align_center.y() : -1.;

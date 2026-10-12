@@ -12,6 +12,7 @@
 #include <iostream>
 #include <random>
 #include <set>
+#include <tuple>
 #include <utility>
 #include <vector>
 
@@ -75,8 +76,49 @@ Mesh polyomino(std::initializer_list<std::pair<int, int>> squares, float unit)
     return m;
 }
 
-// A copy of `mesh` on 0.5 mm cells, offered at `rotations` quarter turns, with 0.5 mm of
-// dilation so that copies keep 1 mm apart.
+// Closed prism over a convex counter-clockwise polygon, from z0 to z1.
+Mesh prism(const std::vector<std::pair<float, float>> &poly, float z0, float z1)
+{
+    auto tri = [](std::pair<float, float> a, float za, std::pair<float, float> b, float zb, std::pair<float, float> c, float zc) {
+        return Triangle{{{a.first, a.second, za}, {b.first, b.second, zb}, {c.first, c.second, zc}}};
+    };
+    Mesh m;
+    for (size_t i = 1; i + 1 < poly.size(); ++i) {
+        m.push_back(tri(poly[0], z0, poly[i + 1], z0, poly[i], z0));
+        m.push_back(tri(poly[0], z1, poly[i], z1, poly[i + 1], z1));
+    }
+    for (size_t i = 0; i < poly.size(); ++i) {
+        const auto &a = poly[i], &b = poly[(i + 1) % poly.size()];
+        m.push_back(tri(a, z0, b, z0, b, z1));
+        m.push_back(tri(a, z0, b, z1, a, z1));
+    }
+    return m;
+}
+
+// Round ring about the origin, 10 mm tall, built from 48 quads.
+Mesh ring(float inner, float outer)
+{
+    Mesh m;
+    for (int k = 0; k < 48; ++k) {
+        const double a0 = 2. * Pi * k / 48, a1 = 2. * Pi * (k + 1) / 48;
+        m = join({m, prism({{float(inner * std::cos(a0)), float(inner * std::sin(a0))}, {float(outer * std::cos(a0)), float(outer * std::sin(a0))},
+                            {float(outer * std::cos(a1)), float(outer * std::sin(a1))}, {float(inner * std::cos(a1)), float(inner * std::sin(a1))}},
+                           0, 10)});
+    }
+    return m;
+}
+
+// `steps` Z angles evenly spaced over a full turn, as the arrange dialog offers them.
+std::vector<double> turns(int steps)
+{
+    std::vector<double> offsets;
+    for (int k = 0; k < steps; ++k)
+        offsets.push_back(2. * Pi * k / steps);
+    return candidate_angles(0., offsets);
+}
+
+// A copy of `mesh` on 0.5 mm cells, offered at `rotations` quarter turns, grown by 0.5 mm so that
+// copies keep 1 mm apart.
 Part copy_of(int id, const Mesh &mesh, int rotations, int shape_key)
 {
     Part p;
@@ -84,7 +126,7 @@ Part copy_of(int id, const Mesh &mesh, int rotations, int shape_key)
     p.shape_key = shape_key;
     Mesh m      = mesh;
     for (int r = 0; r < rotations; ++r) {
-        p.candidates.push_back({dilate(rasterize(m, 0.5, 0., false), 0.5), r * 0.5 * Pi});
+        p.candidates.push_back({rasterize(m, 0.5, 0.5, false), r * 0.5 * Pi});
         for (Triangle &t : m)
             for (auto &v : t.v)
                 std::swap(v[0], v[1]), v[0] = -v[0];
@@ -92,9 +134,9 @@ Part copy_of(int id, const Mesh &mesh, int rotations, int shape_key)
     return p;
 }
 
-// A copy of `mesh` on 0.5 mm cells, offered at each of `angles` (radians about the origin), with
-// 0.5 mm of dilation so that copies keep 1 mm apart.
-Part copy_at(int id, const Mesh &mesh, const std::vector<double> &angles, int shape_key)
+// A copy of `mesh` on `cell` mm cells, offered at each of `angles` (radians about the origin),
+// grown by 0.5 mm so that copies keep 1 mm apart.
+Part copy_at(int id, const Mesh &mesh, const std::vector<double> &angles, int shape_key, double cell = 0.5)
 {
     Part p;
     p.id        = id;
@@ -107,9 +149,18 @@ Part copy_at(int id, const Mesh &mesh, const std::vector<double> &angles, int sh
                 const float x = v[0], y = v[1];
                 v[0] = float(c * x - s * y), v[1] = float(s * x + c * y);
             }
-        p.candidates.push_back({dilate(rasterize(m, 0.5, 0., false), 0.5), a});
+        p.candidates.push_back({rasterize(m, cell, 0.5, false), a});
     }
     return p;
+}
+
+// `n` copies of `part`, with ids from part.id on.
+std::vector<Part> copies(const Part &part, int n)
+{
+    std::vector<Part> out(size_t(n), part);
+    for (int i = 0; i < n; ++i)
+        out[size_t(i)].id = part.id + i;
+    return out;
 }
 
 // Bounding-box area of the parts placed on plate 0, mm^2.
@@ -160,25 +211,53 @@ int overlapping_cells(const std::vector<Part> &parts, const std::vector<Placemen
 
 TEST_CASE("A cube rasterizes to full-height columns over its footprint", "[Nest3D]")
 {
-    const float     side = 20.f, inflate = 2.f;
-    const HeightMap m    = rasterize(box(5, 5, 0, 5 + side, 5 + side, side), 1., inflate, false);
-    REQUIRE(m.width == int(side + 2 * inflate));
-    REQUIRE(m.height == int(side + 2 * inflate));
-    CHECK_THAT(m.origin_x, WithinAbs(5. - inflate, 1e-9));
+    const float     side = 20.f;
+    const HeightMap m    = rasterize(box(5, 5, 0, 5 + side, 5 + side, side), 1., 0., false);
+    REQUIRE(m.width == int(side));
+    REQUIRE(m.height == int(side));
+    CHECK_THAT(m.origin_x, WithinAbs(5., 1e-9));
+    for (const Span &s : m.cells) {
+        CHECK_THAT(s.lo, WithinAbs(0., 1e-4));
+        CHECK_THAT(s.hi, WithinAbs(side, 1e-4));
+    }
+}
 
-    int occupied = 0;
+TEST_CASE("Growth claims the cells within the clearance of the geometry, not of whole cells", "[Nest3D]")
+{
+    // A 10 mm cube grown by 3.5 mm on 1 mm cells. The map starts 3.5 mm before the cube, so its
+    // sides lie half way through cells 3 and 13, and a cell is claimed when it comes within 3.5 mm
+    // of the cube itself. That leaves out just the four corner cells, 2.5 mm off both sides
+    // (3.54 mm away); growing from the whole cells the sides cross would claim the corners too and
+    // reach a cell beyond the map.
+    const HeightMap m = rasterize(box(0, 0, 0, 10, 10, 5), 1., 3.5, false);
+    REQUIRE(m.width == 17);
+    REQUIRE(m.height == 17);
+    CHECK_THAT(m.origin_x, WithinAbs(-3.5, 1e-9));
+    int empty = 0;
     for (int y = 0; y < m.height; ++y)
         for (int x = 0; x < m.width; ++x) {
-            const Span &s      = m.at(x, y);
-            bool        inside = x >= inflate && x < inflate + side && y >= inflate && y < inflate + side;
-            CHECK(s.empty() == !inside);
-            if (inside) {
-                ++occupied;
-                CHECK_THAT(s.lo, WithinAbs(0., 1e-4));
-                CHECK_THAT(s.hi, WithinAbs(side, 1e-4));
-            }
+            const double gx = std::max({0., 3.5 - (x + 1.), x - 13.5}), gy = std::max({0., 3.5 - (y + 1.), y - 13.5});
+            CHECK(m.at(x, y).empty() == (std::hypot(gx, gy) >= 3.5));
+            empty += m.at(x, y).empty();
         }
-    CHECK(occupied == int(side * side));
+    CHECK(empty == 4);
+}
+
+TEST_CASE("Parts grown on coarse cells keep their spacing without rounding it up", "[Nest3D]")
+{
+    // Two 10 mm cubes grown by 0.5 mm on 1 mm cells claim 11 mm each, so they fit side by side on
+    // a 22 mm bed at exactly 1 mm apart. Growing whole cells instead would claim 12 mm each.
+    std::vector<Part> parts(2);
+    for (int i = 0; i < 2; ++i) {
+        parts[i].id = i;
+        parts[i].candidates.push_back({rasterize(box(0, 0, 0, 10, 10, 5), 1., 0.5, false)});
+    }
+    Params p     = bed(22, 11);
+    p.max_plates = 1;
+    const auto out = arrange(parts, {}, p);
+    REQUIRE(out[0].plate == 0);
+    REQUIRE(out[1].plate == 0);
+    CHECK_THAT(std::abs(out[0].x - out[1].x), WithinAbs(11., 1e-9));
 }
 
 TEST_CASE("A mesh of vertical walls only still marks the cells under the walls", "[Nest3D]")
@@ -282,9 +361,7 @@ TEST_CASE("Copies of a tetromino fill most of the bed's area bound", "[Nest3D]")
                      : shape == 1 ? polyomino({{0, 0}, {1, 0}, {1, 1}, {2, 1}}, 10.f)
                                   : polyomino({{0, 0}, {1, 0}, {2, 0}, {2, 1}}, 10.f);
     const int  bound = 31;
-    std::vector<Part> parts;
-    for (int i = 0; i < bound + 4; ++i)
-        parts.push_back(copy_of(i, mesh, 4, 7));
+    const std::vector<Part> parts = copies(copy_of(0, mesh, 4, 7), bound + 4);
     Params p     = bed(120, 120);
     p.cell_mm    = 0.5;
     p.max_plates = 1;
@@ -296,14 +373,132 @@ TEST_CASE("Copies of a tetromino fill most of the bed's area bound", "[Nest3D]")
     CHECK(overlapping_cells(parts, out, p.cell_mm) == 0);
 }
 
+TEST_CASE("Copies of a tetromino fill the bed with the default arrange settings", "[Nest3D]")
+{
+    // As the arrange dialog sets it up by default: balanced effort and 8 rotation steps, and fast
+    // effort's 1 mm cells, here with 1 mm spacing. By the bound above, a 160 mm bed holds at most
+    // 25600 / 451 = 56 copies. Spacing rounded up to whole cells on 0.6 and 1 mm grids gives 38 to 44.
+    const int  shape = GENERATE(0, 1, 2);
+    const int  level = GENERATE(0, 1);
+    const Mesh mesh  = shape == 0 ? polyomino({{0, 0}, {1, 0}, {2, 0}, {1, 1}}, 10.f)
+                     : shape == 1 ? polyomino({{0, 0}, {1, 0}, {1, 1}, {2, 1}}, 10.f)
+                                  : polyomino({{0, 0}, {1, 0}, {2, 0}, {2, 1}}, 10.f);
+    const Effort      effort = effort_settings(level, 160, 160);
+    const std::vector<Part> parts = copies(copy_at(0, mesh, turns(8), 0, effort.cell_mm), 60);
+    Params p     = bed(160, 160);
+    p.cell_mm    = effort.cell_mm;
+    p.orderings  = effort.orderings;
+    p.max_plates = 1;
+    Stats      stats;
+    const auto out    = arrange(parts, {}, p, &stats);
+    const int  placed = int(parts.size()) - stats.unplaced;
+    INFO("shape " << shape << ", effort " << level << ": " << placed << " of 56");
+    CHECK(placed >= (level == 1 ? 45 : 43)); // 80% and 77% of the bound
+    CHECK(overlapping_cells(parts, out, p.cell_mm) == 0);
+}
+
+TEST_CASE("Sawtooth strips mesh on 1 mm cells", "[Nest3D]")
+{
+    // A 40 x 5 mm strip with four 5 mm teeth, offered as is and turned half a turn. Meshed 1 mm
+    // apart, a pair spans 45 x 16.4 mm (the 45 degree flanks sit 1.41 mm apart vertically), which
+    // with 0.5 mm of growth on each side fits a 47 x 19 mm bed; side by side or stacked unmeshed it
+    // does not (81 or 21 mm). Spacing rounded up to whole cells would keep the teeth 2 mm apart and
+    // the pair 1 mm too tall.
+    std::vector<std::pair<float, float>> base{{0, 0}, {40, 0}, {40, 5}, {0, 5}};
+    Mesh strip = prism(base, 0, 5);
+    for (int t = 0; t < 4; ++t)
+        strip = join({strip, prism({{10.f * t, 5}, {10.f * t + 10, 5}, {10.f * t + 5, 10}}, 0, 5)});
+    std::vector<Part> parts{copy_at(0, strip, {0., Pi}, 0, 1.), copy_at(1, strip, {0., Pi}, 0, 1.)};
+    Params            p = bed(47, 19);
+    p.cell_mm    = 1.;
+    p.max_plates = 1;
+    const auto out = arrange(parts, {}, p);
+    CHECK(out[0].plate == 0);
+    CHECK(out[1].plate == 0);
+    CHECK(overlapping_cells(parts, out, p.cell_mm) == 0);
+}
+
+TEST_CASE("Small parts fill the holes of rings before the open bed", "[Nest3D][Regression]")
+{
+    // Two rings with a 30 mm hole and eight 8 mm pegs on a bed with plenty of room around them.
+    // Each hole holds four pegs 1 mm apart. Placed by bounding box and contact alone, the pegs
+    // settle in the crevices beside the rings, where they touch more.
+    const Mesh        r = ring(15.f, 25.f), peg = box(0, 0, 0, 8, 8, 6);
+    std::vector<Part>       parts = copies(copy_at(0, r, turns(4), 0), 2);
+    const std::vector<Part> pegs  = copies(copy_at(2, peg, turns(8), 1), 8);
+    parts.insert(parts.end(), pegs.begin(), pegs.end());
+    Params p     = bed(150, 150);
+    p.cell_mm    = 0.5;
+    p.max_plates = 1;
+    const auto out = arrange(parts, {}, p);
+    CHECK(overlapping_cells(parts, out, p.cell_mm) == 0);
+    for (int i = 2; i < 10; ++i) {
+        REQUIRE(out[i].plate == 0);
+        // Peg centre in world coordinates, from its reference point (corner) and rotation.
+        const double c = std::cos(out[i].rotation_z), s = std::sin(out[i].rotation_z);
+        const double px = out[i].x + 4. * c - 4. * s, py = out[i].y + 4. * s + 4. * c;
+        const double d = std::min(std::hypot(px - out[0].x, py - out[0].y), std::hypot(px - out[1].x, py - out[1].y));
+        INFO("peg " << i << " centre " << d << " mm from the nearest ring centre");
+        CHECK(d < 15.);
+    }
+}
+
+TEST_CASE("With stacking, a ring's hole under a table top is still a pocket for small parts", "[Nest3D][Regression]")
+{
+    // Two rings with a 30 mm hole, a 60 mm table whose 20 mm high top covers one of them, and
+    // eight 8 mm pegs, 6 mm tall, that fit under the top with the 2 mm clearance. Each hole holds
+    // four pegs. Read as walls, the table top would close the covered hole.
+    const Mesh table = join({box(0, 0, 20, 60, 60, 22), box(0, 0, 0, 5, 5, 20), box(55, 0, 0, 60, 5, 20), box(0, 55, 0, 5, 60, 20),
+                             box(55, 55, 0, 60, 60, 20)});
+    std::vector<Part> parts = copies(copy_at(0, ring(15.f, 25.f), turns(4), 0), 2);
+    parts.push_back(copy_at(2, table, turns(4), 1));
+    const std::vector<Part> pegs = copies(copy_at(3, box(0, 0, 0, 8, 8, 6), turns(8), 2), 8);
+    parts.insert(parts.end(), pegs.begin(), pegs.end());
+    for (Part &part : parts)
+        part.priority = part.id < 2 ? 2. : part.id == 2 ? 1. : 0.; // rings, then the table, then the pegs
+    Params p         = bed(200, 200);
+    p.cell_mm        = 0.5;
+    p.max_plates     = 1;
+    p.allow_stacking = true;
+    p.vertical_gap   = 2.;
+    const auto out = arrange(parts, {}, p);
+    REQUIRE(out[2].plate == 0);
+    for (int i = 3; i < 11; ++i) {
+        REQUIRE(out[i].plate == 0);
+        const double c = std::cos(out[i].rotation_z), s = std::sin(out[i].rotation_z);
+        const double px = out[i].x + 4. * c - 4. * s, py = out[i].y + 4. * s + 4. * c;
+        const double d = std::min(std::hypot(px - out[0].x, py - out[0].y), std::hypot(px - out[1].x, py - out[1].y));
+        INFO("peg " << i << " centre " << d << " mm from the nearest ring centre");
+        CHECK(d < 15.);
+    }
+}
+
+TEST_CASE("Small parts fill a large enclosed region without leaving it", "[Nest3D][Regression]")
+{
+    // A 100 mm square frame with 8 mm walls and 60 small unique rectangles. All of them fit inside
+    // the frame, so the pile is the frame. The pocket search scans this region for every part and
+    // stops once no position further from its corner can win, which keeps this case fast.
+    const Mesh frame = join({box(0, 0, 0, 100, 8, 5), box(0, 92, 0, 100, 100, 5), box(0, 8, 0, 8, 92, 5), box(92, 8, 0, 100, 92, 5)});
+    std::vector<Part> parts{copy_at(0, frame, {0.}, -1)};
+    for (int i = 1; i <= 60; ++i)
+        parts.push_back(copy_at(i, box(0, 0, 0, 4.f + (i % 7) * 0.7f, 3.f + (i % 5) * 0.9f, 5), turns(8), -1));
+    Params p     = bed(150, 150);
+    p.cell_mm    = 0.5;
+    p.max_plates = 1;
+    const auto out = arrange(parts, {}, p);
+    for (const Placement &pl : out)
+        REQUIRE(pl.plate == 0);
+    const HeightMap &f = parts[0].candidates.front().map;
+    CHECK_THAT(plate_bbox_area(parts, out), WithinAbs(f.width * f.height * p.cell_mm * p.cell_mm, 1e-6));
+    CHECK(overlapping_cells(parts, out, p.cell_mm) == 0);
+}
+
 TEST_CASE("Copies that overflow a plate fill the first plate as fully as a single-plate arrange", "[Nest3D]")
 {
     // 40 T tetrominoes overflow a 120 mm bed, which holds at most 31 (see above). Parts that do
     // not fit go to the next plate, so the first plate can hold as many as when it is the only one.
     const Mesh        t = polyomino({{0, 0}, {1, 0}, {2, 0}, {1, 1}}, 10.f);
-    std::vector<Part> parts;
-    for (int i = 0; i < 40; ++i)
-        parts.push_back(copy_of(i, t, 4, 0));
+    const std::vector<Part> parts = copies(copy_of(0, t, 4, 0), 40);
     Params p     = bed(120, 120);
     p.cell_mm    = 0.5;
     p.max_plates = 1;
@@ -350,9 +545,7 @@ TEST_CASE("Copies an arrange left at different quarter turns are still copies wh
     // so a second arrange packs them as copies again and places as many.
     const Mesh                l = polyomino({{0, 0}, {1, 0}, {2, 0}, {2, 1}}, 10.f);
     const std::vector<double> quarter{0., 0.5 * Pi, Pi, 1.5 * Pi};
-    std::vector<Part>         parts;
-    for (int i = 0; i < 35; ++i)
-        parts.push_back(copy_at(i, l, candidate_angles(0., quarter), 0));
+    const std::vector<Part>   parts = copies(copy_at(0, l, candidate_angles(0., quarter), 0), 35);
     Params p     = bed(120, 120);
     p.cell_mm    = 0.5;
     p.max_plates = 1;
@@ -369,9 +562,7 @@ TEST_CASE("Copies an arrange left at different quarter turns are still copies wh
         for (size_t k = 0; k < mine.size(); ++k)
             CHECK_THAT(mine[k], WithinAbs(angles[k], 1e-9));
     }
-    std::vector<Part> again;
-    for (int i = 0; i < 35; ++i)
-        again.push_back(copy_at(i, l, angles, 0));
+    const std::vector<Part> again = copies(copy_at(0, l, angles, 0), 35);
     Stats second;
     arrange(again, {}, p, &second);
     CHECK(second.unplaced == first.unplaced);
@@ -434,6 +625,25 @@ TEST_CASE("A short part fits under a table top only with stacking and enough cle
         p.allow_stacking = false;
         CHECK(arrange(parts, {}, p)[1].plate == -1);
     }
+}
+
+TEST_CASE("With stacking and no vertical clearance, parts resting on the bed still go largest first", "[Nest3D]")
+{
+    // Sixteen 9 mm cubes listed before two 49 x 99 mm plates, on a 120 x 100 mm bed with a single
+    // ordering. Nothing fits under a part resting on the bed, so the plates go first, side by side,
+    // and the cubes fill the strip beside them. Cubes first would spread over the bed's middle and
+    // push a plate onto a second bed.
+    std::vector<Part> parts;
+    for (int i = 0; i < 18; ++i)
+        parts.push_back(copy_at(i, i < 16 ? box(0, 0, 0, 9, 9, 5) : box(0, 0, 0, 49, 99, 5), {0.}, -1, 1.));
+    Params p         = bed(120, 100);
+    p.orderings      = 1;
+    p.allow_stacking = true;
+    p.vertical_gap   = 0.;
+    Stats stats;
+    arrange(parts, {}, p, &stats);
+    CHECK(stats.unplaced == 0);
+    CHECK(stats.plates_used == 1);
 }
 
 TEST_CASE("Parts taller than the printable height are left unplaced", "[Nest3D]")
@@ -546,8 +756,8 @@ TEST_CASE("The result does not depend on the order parallel tasks run in", "[Nes
 {
     // Unique parts plus copies, which also exercise the lattice search and seeding.
     std::vector<Part> parts = random_parts(30, 7);
-    for (int i = 0; i < 8; ++i)
-        parts.push_back(copy_of(100 + i, polyomino({{0, 0}, {1, 0}, {2, 0}, {2, 1}}, 8.f), 2, 0));
+    for (const Part &copy : copies(copy_of(100, polyomino({{0, 0}, {1, 0}, {2, 0}, {2, 1}}, 8.f), 2, 0), 8))
+        parts.push_back(copy);
     Params                  p     = bed(150, 150);
     p.orderings = 3;
     const auto serial = arrange(parts, {}, p);
@@ -563,6 +773,34 @@ TEST_CASE("The result does not depend on the order parallel tasks run in", "[Nes
         CHECK_THAT(serial[i].y, WithinAbs(reversed[i].y, 1e-12));
         CHECK_THAT(serial[i].rotation_z, WithinAbs(reversed[i].rotation_z, 1e-12));
     }
+}
+
+TEST_CASE("The result does not depend on the order the parts are listed in", "[Nest3D]")
+{
+    // Boxes and L-shapes of one height whose sides take few values, so that the size keys tie
+    // between different shapes, plus a group of copies; listed forwards and backwards with the
+    // same ids.
+    std::vector<Part> parts;
+    for (int i = 0; i < 24; ++i) {
+        const float a = 10.f + 6.f * (i % 4), b = 10.f + 6.f * (i / 4 % 3);
+        const Mesh  m = i % 5 == 0 ? join({box(0, 0, 0, a, 6, 5), box(0, 6, 0, 6, b, 5)}) : box(0, 0, 0, a, b, 5);
+        parts.push_back(copy_at(i, m, turns(4), -1, 1.));
+    }
+    for (const Part &copy : copies(copy_at(100, box(0, 0, 0, 6, 6, 5), turns(4), 0, 1.), 8))
+        parts.push_back(copy);
+    const std::vector<Part> reversed(parts.rbegin(), parts.rend());
+    Params                  p = bed(150, 150);
+    p.orderings               = 3;
+    const auto a = arrange(parts, {}, p), b = arrange(reversed, {}, p);
+    // Copies are interchangeable, so compare the placements of each shape as a set.
+    auto spots = [](const std::vector<Part> &ps, const std::vector<Placement> &out) {
+        std::set<std::tuple<int, int, long, long, long>> s;
+        for (size_t i = 0; i < ps.size(); ++i)
+            s.insert({ps[i].shape_key < 0 ? ps[i].id : -1 - ps[i].shape_key, out[i].plate, std::lround(out[i].x * 1e6),
+                      std::lround(out[i].y * 1e6), std::lround(out[i].rotation_z * 1e6)});
+        return s;
+    };
+    CHECK(spots(parts, a) == spots(reversed, b));
 }
 
 TEST_CASE("A mix of unique parts packs into a compact pile", "[Nest3D][Regression]")
@@ -584,6 +822,32 @@ TEST_CASE("A mix of unique parts packs into a compact pile", "[Nest3D][Regressio
     CHECK(plate_bbox_area(parts, out) <= 1.4 * footprint);
 }
 
+TEST_CASE("A mix of copies packs into a compact pile", "[Nest3D][Regression]")
+{
+    // Like the unique mix above, with every part present two or three times as copies, scored by
+    // the bounding box like unique parts: the pile stays within 1.28 times the parts' footprint (it
+    // takes 1.19 to 1.23). Growing each group of copies evenly around the anchor gives 1.23 to 1.33.
+    const unsigned          seed   = GENERATE(13u, 24u, 26u);
+    const std::vector<Part> unique = random_parts(8, seed);
+    std::vector<Part>       parts;
+    for (size_t k = 0; k < unique.size(); ++k)
+        for (size_t n = 0; n < 2 + k % 2; ++n) {
+            parts.push_back(unique[k]);
+            parts.back().id        = int(parts.size());
+            parts.back().shape_key = int(k);
+        }
+    Params p     = bed(256, 256);
+    p.max_plates = 1;
+    const auto out       = arrange(parts, {}, p);
+    double     footprint = 0.;
+    for (size_t i = 0; i < parts.size(); ++i) {
+        REQUIRE(out[i].plate == 0);
+        footprint += double(placed_cells(parts[i], out[i], p.cell_mm).size());
+    }
+    INFO("seed " << seed << ": bbox " << plate_bbox_area(parts, out) << " mm^2, footprint " << footprint << " mm^2");
+    CHECK(plate_bbox_area(parts, out) <= 1.28 * footprint);
+}
+
 // Hidden: prints timings for growing part counts on a 256 mm bed.
 TEST_CASE("Arranging random boxes and L-shapes scales polynomially", "[Nest3D][.][Benchmark]")
 {
@@ -600,9 +864,7 @@ TEST_CASE("Arranging random boxes and L-shapes scales polynomially", "[Nest3D][.
     }
     // Copies of an L tetromino of 10 mm squares filling one plate.
     for (int n : {50, 150}) {
-        std::vector<Part> parts;
-        for (int i = 0; i < n; ++i)
-            parts.push_back(copy_of(i, polyomino({{0, 0}, {1, 0}, {2, 0}, {2, 1}}, 10.f), 4, 0));
+        const std::vector<Part> parts = copies(copy_of(0, polyomino({{0, 0}, {1, 0}, {2, 0}, {2, 1}}, 10.f), 4, 0), n);
         Params p     = bed(256, 256);
         p.cell_mm    = 0.5;
         p.max_plates = 1;

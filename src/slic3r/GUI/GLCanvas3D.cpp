@@ -6775,7 +6775,7 @@ void GLCanvas3D::_render_arrange_menu(float left, float right, float bottom, flo
         const std::vector<std::string> efforts = {_u8L("Fast"), _u8L("Balanced"), _u8L("Thorough")};
         if (imgui->combo(_L("Effort"), efforts, settings_out.nest3d_effort, 0, 0.f, imgui->scaled(6.f)))
             appcfg->set("arrange", nest3d_keys[5], std::to_string(settings_out.nest3d_effort));
-        tooltip(_L("Finer grids and more packing orders find tighter arrangements at the cost of time."));
+        tooltip(_L("Balanced uses a finer grid than Fast, and Thorough tries more packing orders than Balanced. Higher effort takes longer."));
         imgui->disabled_end();
     }
 

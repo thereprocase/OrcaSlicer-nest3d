@@ -23,8 +23,16 @@ them filled; the model only ever over-estimates the space a part takes.
 - **Spacing.** Every map is grown in XY by the item's inflation, the same value the polygon
   arranger uses (`update_selected_items_inflation` / `update_unselected_items_inflation`: the
   user's spacing, or the brim and support allowance when spacing is automatic). The growth
-  covers every cell that comes within the inflation of an occupied cell, so two parts always
-  keep at least the sum of their inflations apart, at the price of up to a cell more.
+  claims every cell that comes closer than the inflation to the part, so two parts whose maps
+  share no cell keep at least the sum of their inflations apart: a point between two parts
+  closer than that lies within the inflation of both. Distances are measured from the extent
+  of the geometry inside each occupied cell along the axes and the diagonals, which is exact
+  for edges in those directions, so the clearance is not rounded up to whole cells. The map
+  starts one inflation before the part, so an axis-parallel edge of a part whose sizes are
+  multiples of the cell, grown by a multiple of half a cell, keeps exactly the requested
+  spacing; elsewhere, as for parts at arbitrary sizes and angles, a gap costs up to a cell more.
+  Only cells near the part's outline are grown: a cell whose eight neighbours hold its interval
+  and are filled by the part claims nothing beyond what they claim.
 - **Support.** A part that prints with support (`enable_support`) has every column filled down
   to the bed, because the support tower below it occupies that space.
 - **Fixed items.** Unselected instances are rasterized from their meshes in their current pose.
@@ -73,24 +81,50 @@ size key), and each part tries every candidate at every grid position of every o
 plate order, keeping the best-scoring fit; a part that fits nowhere opens the next plate, up to
 the plate limit, and is otherwise reported unplaced.
 
-- **Score.** The pile grows from an anchor: the point the polygon arranger aligns its pile to
-  (`best_object_pos`, the bed centre by default). A position scores an area, minus 16 mm^2 per mm
-  of the part's outline that touches an occupied cell or the bed edge. For a copy (see below) the
-  area is that of the smallest anchor-centred rectangle that holds the parts placed so far plus
-  this one: it puts the first copy on the anchor and makes the pile grow evenly outward, so no
-  wall pins the first copy where its partner cannot reach it. For a unique part it is the plain
+- **Pockets.** A part first tries the free regions the pile already encloses: the 4-connected
+  components of free cells inside the bounding box of the parts placed so far that do not reach
+  its border, such as the hole of a ring or the bay of a C-clip closed by a neighbour. A part
+  placed there leaves the pile's extent unchanged and uses space only a part that small could
+  use. It goes to the smallest pocket that holds it (best fit), in the pose that claims the
+  fewest cells, as close to the pocket's min corner as it fits, which fills a pocket from one
+  side and leaves the rest of it in one piece. Contact does not count here: the staircase edge of
+  a part turned 45 degrees touches more cells than a straight one, and preferring it turns small
+  parts askew in round holes, where fewer of them fit. Pockets are found with a union-find over
+  the free runs of each row of the bounding box, once per placement. With "Nest under overhangs"
+  on, they are regions of the bed: a cell with room under its occupant counts as free, so a
+  ring's hole under a table top is still a pocket, and the collision test decides what fits
+  under the top. A pocket is scanned row by row from its min corner, and the scan stops once
+  the distance from that corner exceeds that of a fit already found, so a small part in a large
+  pocket tests only the positions nearer the corner than the first one where it fits.
+- **Score.** Otherwise the pile grows from an anchor: the point the polygon arranger aligns its
+  pile to (`best_object_pos`, the bed centre by default). A position scores the area of the
   bounding box of the pile plus the part, which lets the pile grow lopsided where that is more
-  compact; on random sets of 15 unique parts the anchor-centred rectangle leaves the pile 13%
-  larger on median (3% for 30 parts). Many positions tie on area, and contact picks the one where
-  the part nests against what is there. Remaining ties go to the position nearest the anchor. A
-  lay-flat pose with more overhang scales the area by its penalty. Both areas are products of one
-  convex term per axis, which is what lets the scan below stop early.
+  compact, minus 16 mm^2 per mm of the part's outline that touches an occupied cell or the bed
+  edge. Many positions tie on area, and contact picks the one where the part nests against what
+  is there. Remaining ties go to the position nearest the anchor. A lay-flat pose with more
+  overhang scales the area by its penalty. Copies are scored like unique parts: growing each
+  group of copies evenly around the anchor instead left mixed piles 12% larger on median (on 24
+  random bags of rings, clips, stars, combs, brackets and pegs; up to 2.8 times on bags with few
+  parts) and placed no more copies on fill-the-bed sets, where the lattices below do the work.
+  The area is a product of one term per axis, convex in the position, which is what lets the
+  scan below stop early.
+- **Order.** The size keys are the occupied cells, the height, the longer side, the volume, the
+  sum of the sides and the bounding-box area. With "Nest under overhangs" on, the first key
+  counts only the cells with no room under them (those whose column starts within the vertical
+  clearance of the bed, a clearance of 0 included), so a part that leaves room below it (a
+  table) comes after the parts that could go there and can be placed over them. On 24 random
+  bags with stacking this changes 9 piles, each through a pass with this key: 8 come out 6% to
+  11% smaller and one 2% larger, 2.7% smaller on average over all 24. Ties on a pass's key fall
+  to the other keys, then the shape key and the id, so the order of the selection does not
+  matter: with input order breaking ties, shuffling the input of two mixed bags spread their
+  piles over 7% and 11%.
 - **Pruning.** Contact can lower a score by at most the part's outline length, and by at most the
   number of occupied cells around the part's rectangle, which a summed-area table of the plate
   gives in O(1). Positions that cannot beat the best score found so far are skipped before the
   collision test. The scan goes outward from the rows and columns where the area is smallest,
   nearest the anchor, and stops on each side once the area alone loses. Pruning never changes
-  the result.
+  the result. After a placement only the rows the part covers are recounted; the rows above take
+  the change in their cumulative count.
 - **Copies.** Instances of one object posed alike share a shape key (the same transform apart from
   the XY offset and Z angle, the same candidate Z angles and spacing), so their candidates are
   identical. Each group of copies gets *clusters*: one copy in a candidate pose, and the tightest
@@ -103,21 +137,27 @@ the plate limit, and is otherwise reported unplaced.
   touches. A basis is accepted when no lattice vector within the cluster's size collides, and the
   cluster's bounding-box lattice is the fallback. In the seeded pass, the first copy of a group to
   reach a plate lays a lattice there. The lattice runs through the position where the whole
-  cluster scores best. Lattices are tried densest per copy first, a penalised pose's lattice
+  cluster scores best, scored by the smallest anchor-centred rectangle holding the pile and the
+  cluster, which puts the first cluster on the anchor so that no wall pins it where the lattice
+  cannot grow around it. Lattices are tried densest per copy first, a penalised pose's lattice
   counting as less dense by its penalty, as in the score. When no lattice holds all copies that
   way (the copies fill the plate), the cosets of every cluster's lattice are counted (at most
   16384 of them, evenly spread, for very large clusters), and the one that fits the most copies
-  wins, because the lattice phase decides how much the bed edges cut off. Copies take the sites
-  nearest the anchor, and the normal search places any copies left over.
+  wins, because the lattice phase decides how much the bed edges cut off. A site whose rectangle
+  holds no occupied cell, read from the summed-area table, needs no collision test. Copies take
+  the sites nearest the anchor, and the normal search places any copies left over.
 - **Passes.** Each distinct part ordering gets a pass: 1, 3 or 6 orderings with the Fast, Balanced
   and Thorough effort settings, and orderings that coincide, as they do for copies, run once. A
   further pass seeds copies on lattices. If these leave parts unplaced or need more than one
   plate, a last pass grows the pile from the bed's min corner, for parts that only fit pushed into
   opposite corners. The best result wins: fewest unplaced parts, then fewest plates, then the most
   parts on the first plate, then on the second, and so on, so that parts overflowing one plate
-  leave it as full as a single-plate arrange would, then the smallest total bounding-box area,
-  each plate's scaled by its parts' mean penalty. The pile is then centred on the anchor, as the
-  polygon arranger centres its pile. With final alignment off, every pass grows from the min
+  leave it as full as a single-plate arrange would, then the smallest total cost. A plate costs
+  its bounding-box area, scaled by its parts' mean penalty, plus the free area left in its
+  pockets: that area lies inside the bounding box already and counts once more as waste, the
+  measure the pocket search minimises, so a pass that fills its pockets beats one whose bounding
+  box is smaller by less than the area it left empty. The pile is then centred on the anchor, as
+  the polygon arranger centres its pile. With final alignment off, every pass grows from the min
   corner and the pile stays there.
 
 Parts that the polygon arranger would refuse to put together never share a plate: high- and
@@ -131,10 +171,28 @@ Every step is polynomial; nothing enumerates permutations or subsets. With `O` p
 orderings plus a lattice-seeded and a corner-grown pass), `N` parts, `L` open plates, `C`
 candidates per part, `P` grid positions per plate and `A` cells per part map, placement costs
 `O(O * N * L * C * P * A / 64)`: a position costs O(1) when the bounds prune it, otherwise a
-collision test and a contact count, both 64 cells at a time. Keeping the plate's summed-area table
-current costs `O(P)` per placed part. Rasterizing costs `O(C * T)` per part of `T` triangles. The
-effort setting chooses a cell size of 1, 0.6 or 0.4 mm, coarsened so the bed is at most 600 cells
-per side, which bounds `P`. Parts and candidates are prepared in parallel with TBB.
+collision test and a contact count, both 64 cells at a time. The pocket search tests at most the
+positions inside the pile's bounding box, the same bound, and in a pocket larger than the part
+only those nearer its corner than the first fit. Keeping the plate's summed-area table current
+costs `O(P)` per placed part, and finding its pockets `O(P / 64 + R)` for `R` free runs in the
+bounding box. Rasterizing costs `O(C * T)` per part of `T` triangles, plus `O(C * (A + B * g^2))`
+to grow a map with `B` cells near its outline by `g` cells. Parts and candidates are prepared in
+parallel with TBB.
+
+The effort setting chooses the cell size and the number of orderings: Fast 1 mm and 1 ordering,
+Balanced 0.5 mm and 3, Thorough 0.5 mm and 6. On beds longer than 720 cells the cell grows with
+the bed, which bounds `P`. Cells of 1 and 0.5 mm divide whole and half millimetres, so an
+axis-parallel edge at such a size and spacing falls on a cell boundary and keeps its spacing
+exactly. On a fill-the-bed benchmark (eight shapes that tile the plane, sizes in whole
+millimetres, 256 mm bed, 1 mm spacing), 0.6 mm cells place up to 10% fewer parts than 0.5 mm
+cells and 0.43 mm cells up to 6% fewer. With the shapes scaled off that grid (by 1.037 or
+1.113), turned 17 degrees, or both, 0.43, 0.5 and 0.6 mm cells place 74.8%, 74.6% and 72.8% of
+the area bound on average, so the choice of 0.5 mm costs little where sizes are arbitrary.
+0.25 mm cells took 4 to 8 times as long for at most 4% more parts and 2% smaller mixed piles, so
+Thorough spends its time on orderings instead. On a 510 mm bed, the 0.71 mm cells Balanced uses
+there place 2% to 5% fewer parts than 0.5 mm cells in 37% to 62% less time. The default of 8
+rotation steps places as many tetrominoes as 4 and more of a part that tiles at 45 degrees (a
+chevron: 96 against 90 of a bound of 116).
 
 For a group of copies whose clusters span `W x H` cells with `r` runs of cells per row:
 

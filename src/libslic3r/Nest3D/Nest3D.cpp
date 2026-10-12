@@ -56,8 +56,9 @@ constexpr double NoScore   = std::numeric_limits<double>::infinity();
 constexpr int    Mixed     = -2;  // plate group when its fixed parts span several groups
 // Scored area, in mm^2, that one mm of contact outweighs. Small next to the area growth of moving
 // a part by a cell, so contact mostly decides between positions of equal area. Chosen by sweeps
-// over 0..128 on fill-the-bed and mixed sets; on fill-the-bed with beds of 180 to 350 mm and 1 or
-// 2 mm spacing, 16 places at least as many parts as 4, 8 or 32 in 77 of 80 cases.
+// over 0..128 on fill-the-bed and mixed sets: on fill-the-bed with beds of 140 to 350 mm, 16
+// places at least as many parts as 4 or 8 and mostly more than 32; on random mixed bags, 4 to 16
+// leave piles within 1% of each other.
 constexpr double ContactMM = 16.;
 constexpr size_t MaxBasis  = 2048; // lattice basis vectors tried per cluster, shortest first
 // Candidates of a group of copies that lattices are built from: enough for the four quarter turns
@@ -75,6 +76,13 @@ int popcount(uint64_t v)
     return int((v * 0x0101010101010101ull) >> 56);
 }
 
+// Index of the lowest set bit of v != 0 (std::countr_zero is C++20).
+int lowest_bit(uint64_t v) { return popcount((v & (~v + 1)) - 1); }
+
+// True when nothing fits under a column starting at height lo: it starts within the vertical gap
+// of the bed, a zero gap included.
+bool on_floor(float lo, double vertical_gap) { return lo <= vertical_gap + 1e-3; }
+
 // A candidate reduced to its occupied cells: the tight rectangle of non-empty
 // cells and one 64-bit occupancy bitset per row of it.
 struct Shape
@@ -90,6 +98,7 @@ struct Shape
     int                   halo_cells = 0;
     std::array<int, 4>    edge{}; // halo cells left of, right of, below and above the tight rect
     int                   cells = 0;
+    int                   floor_cells = 0; // cells with nothing fitting under them (see on_floor())
     float                 top = 0.f;
     double                volume = 0.;
     bool                  usable = false;
@@ -100,7 +109,7 @@ struct Shape
     }
 };
 
-Shape make_shape(const HeightMap &m, double max_height)
+Shape make_shape(const HeightMap &m, double max_height, double vertical_gap)
 {
     Shape s;
     s.map    = &m;
@@ -114,6 +123,7 @@ Shape make_shape(const HeightMap &m, double max_height)
                 s.top = std::max(s.top, c.hi);
                 s.volume += double(c.hi - c.lo) * m.cell_mm * m.cell_mm;
                 ++s.cells;
+                s.floor_cells += on_floor(c.lo, vertical_gap);
             }
     if (s.cells == 0 || s.top > max_height)
         return s;
@@ -146,20 +156,36 @@ struct Board
     int                   filled = 0; // non-empty cells
     std::vector<Span>     occ;
     std::vector<uint64_t> bits;
+    // With stacking, the cells with nothing fitting under them (see on_floor()), laid out like
+    // `bits`; empty without stacking, where every occupied cell blocks its column.
+    std::vector<uint64_t> floor;
+    double                vertical_gap = 0.;
     std::vector<int>      sums; // (w + 1) x (h + 1): non-empty cells below and left of each corner
 
-    Board(int w_, int h_)
-        : w(w_), h(h_), words((w_ + 63) / 64 + 2), occ(size_t(w_) * h_), bits(size_t(h_) * words, 0), sums(size_t(w_ + 1) * (h_ + 1), 0)
+    Board(int w_, int h_, bool stacking = false, double vertical_gap_ = 0.)
+        : w(w_), h(h_), words((w_ + 63) / 64 + 2), occ(size_t(w_) * h_), bits(size_t(h_) * words, 0)
+        , floor(stacking ? bits.size() : 0, 0), vertical_gap(vertical_gap_), sums(size_t(w_ + 1) * (h_ + 1), 0)
     {}
 
-    // Brings the summed-area table up to date from row y0 on.
-    void update_sums(int y0)
+    // Brings the summed-area table up to date after rows [y0, y1) changed: those rows are recounted,
+    // and every row above takes the change in their cumulative count, a plain vector add.
+    void update_sums(int y0, int y1)
     {
-        for (int y = std::max(y0, 0); y < h; ++y)
+        y0 = std::max(y0, 0), y1 = std::min(y1, h);
+        int *const       top = &sums[size_t(y1) * (w + 1)];
+        std::vector<int> delta(top, top + w + 1);
+        for (int y = y0; y < y1; ++y)
             for (int x = 0, row = 0; x < w; ++x) {
                 row += (bits[size_t(y) * words + x / 64 + 1] >> (x % 64)) & 1;
                 sums[size_t(y + 1) * (w + 1) + x + 1] = sums[size_t(y) * (w + 1) + x + 1] + row;
             }
+        for (int x = 0; x <= w; ++x)
+            delta[size_t(x)] = top[x] - delta[size_t(x)];
+        for (int y = y1 + 1; y <= h; ++y) {
+            int *row = &sums[size_t(y) * (w + 1)];
+            for (int x = 0; x <= w; ++x)
+                row[x] += delta[size_t(x)];
+        }
     }
 
     // Non-empty cells in [x0, x1) x [y0, y1), clipped to the bed.
@@ -172,19 +198,37 @@ struct Board
 
     void add(int x, int y, const Span &s)
     {
-        occ[size_t(y) * w + x].add(s.lo, s.hi);
-        uint64_t &word = bits[size_t(y) * words + x / 64 + 1];
+        Span &c = occ[size_t(y) * w + x];
+        c.add(s.lo, s.hi);
+        const size_t   i   = size_t(y) * words + x / 64 + 1;
         const uint64_t bit = uint64_t(1) << (x % 64);
-        filled += (word & bit) == 0;
-        word |= bit;
+        filled += (bits[i] & bit) == 0;
+        bits[i] |= bit;
+        if (!floor.empty() && on_floor(c.lo, vertical_gap))
+            floor[i] |= bit;
     }
 
-    // Occupancy of the 64 cells of row y starting at cell x, -64 <= x <= w.
-    uint64_t read(int y, int x) const
+    // Occupancy of the 64 cells of row y starting at cell x, -64 <= x <= w; with `at_floor`, only
+    // of the cells with nothing fitting under them.
+    uint64_t read(int y, int x, bool at_floor = false) const
     {
-        const uint64_t *row = &bits[size_t(y) * words];
+        const uint64_t *row = &(at_floor && !floor.empty() ? floor : bits)[size_t(y) * words];
         const int       pos = x + 64, i = pos / 64, sh = pos % 64;
         return sh ? (row[i] >> sh) | (row[i + 1] << (64 - sh)) : row[i];
+    }
+
+    // First cell x' in [x, x_end) of row y that is occupied (or free, with `occupied` false), as
+    // read(); x_end if none.
+    int next(int y, int x, int x_end, bool occupied, bool at_floor = false) const
+    {
+        for (; x < x_end; x += 64) {
+            uint64_t v = occupied ? read(y, x, at_floor) : ~read(y, x, at_floor);
+            if (x_end - x < 64)
+                v &= (uint64_t(1) << (x_end - x)) - 1;
+            if (v)
+                return x + lowest_bit(v);
+        }
+        return x_end;
     }
 
     // True when `s`, with its tight rect at bed cell (tx, ty), collides with nothing.
@@ -232,7 +276,7 @@ struct Board
             for (int x = 0; x < s.w; ++x)
                 if (const Span &c = s.map->at(s.x0 + x, s.y0 + y); !c.empty())
                     add(tx + x, ty + y, c);
-        update_sums(ty);
+        update_sums(ty, ty + s.h);
     }
 };
 
@@ -454,6 +498,88 @@ struct Rect
     }
 };
 
+// Free regions that the parts placed by a run enclose: the 4-connected components of free cells
+// inside their bounding box that do not reach its border. A part placed in one leaves the pile's
+// extent unchanged and takes space that only parts small enough could ever use. With stacking,
+// cells with room under them count as free (see Board::floor), so that a hole under a table top
+// is still a pocket; Board::fits() decides what fits there.
+struct Pockets
+{
+    struct Run
+    {
+        int x0, x1, id; // [x0, x1) of a free run, its component
+    };
+    struct Region
+    {
+        Rect box;
+        int  cells = 0;
+        bool open  = false; // reaches the bounding box's border
+    };
+    Rect                y_range;    // the bounding box scanned
+    std::vector<size_t> row_begin;  // per row of it, index of its first run; one more at the end
+    std::vector<Run>    runs;
+    std::vector<Region> regions;    // connected components, indexed by Run::id
+
+    // Free runs per row, joined to the runs they overlap in the row below by a union-find:
+    // O(rows * (row words + runs)).
+    Pockets(const Board &b, const Rect &bb) : y_range(bb)
+    {
+        std::vector<int> parent;
+        auto find = [&](int i) {
+            while (parent[size_t(i)] != i)
+                i = parent[size_t(i)] = parent[size_t(parent[size_t(i)])];
+            return i;
+        };
+        for (int y = bb.y0; y < bb.y1; ++y) {
+            row_begin.push_back(runs.size());
+            const size_t below = row_begin.size() > 1 ? row_begin[row_begin.size() - 2] : runs.size();
+            size_t       k     = below;
+            for (int x = b.next(y, bb.x0, bb.x1, false, true); x < bb.x1; x = b.next(y, x, bb.x1, false, true)) {
+                const int end = b.next(y, x, bb.x1, true, true), id = int(parent.size());
+                parent.push_back(id);
+                runs.push_back({x, end, id});
+                for (; k < row_begin.back() && runs[k].x1 <= x; ++k) {}
+                for (size_t j = k; j < row_begin.back() && runs[j].x0 < end; ++j)
+                    parent[size_t(find(id))] = find(runs[j].id);
+                x = end;
+            }
+        }
+        row_begin.push_back(runs.size());
+        std::vector<int> region(parent.size(), -1); // per root
+        for (size_t r = 0; r + 1 < row_begin.size(); ++r)
+            for (size_t i = row_begin[r]; i < row_begin[r + 1]; ++i) {
+                Run      &run  = runs[i];
+                const int y    = bb.y0 + int(r);
+                int      &root = region[size_t(find(run.id))];
+                if (root < 0)
+                    root = int(regions.size()), regions.emplace_back();
+                run.id    = root;
+                Region &g = regions[size_t(root)];
+                g.box     = g.box.united({run.x0, y, run.x1, y + 1});
+                g.cells += run.x1 - run.x0;
+                g.open |= run.x0 == bb.x0 || run.x1 == bb.x1 || y == bb.y0 || y == bb.y1 - 1;
+            }
+    }
+
+    // Free cells in the pockets: space the pile encloses and leaves unused.
+    long enclosed() const
+    {
+        long n = 0;
+        for (const Region &g : regions)
+            n += g.open ? 0 : g.cells;
+        return n;
+    }
+
+    // Region holding free cell (x, y) of the scanned box, free as Board::next() reads it at the floor.
+    int region_at(int x, int y) const
+    {
+        const size_t r = size_t(y - y_range.y0);
+        auto it = std::upper_bound(runs.begin() + long(row_begin[r]), runs.begin() + long(row_begin[r + 1]), x,
+                                   [](int v, const Run &run) { return v < run.x0; });
+        return runs[size_t(it - runs.begin()) - 1].id;
+    }
+};
+
 // Where a part landed: candidate index and bed cell of its shape's tight rect.
 struct Spot { int cand = -1, x = 0, y = 0; };
 
@@ -465,6 +591,7 @@ struct Plate
     Board            board;
     Rect             bbox;   // of the parts placed by this run
     std::vector<int> placed; // part indices
+    std::shared_ptr<const Pockets> pockets; // of the current board, built on demand
 };
 
 struct Hit
@@ -488,7 +615,8 @@ struct Pass
     std::vector<Plate> plates;
     int                unplaced = 0, plates_used = 0;
     std::vector<int>   fill;      // parts placed by this run per plate, without trailing empty plates
-    double             cost = 0.; // per plate, bbox area times its parts' cell-weighted score multiplier
+    double             cost = 0.; // per plate, bbox area times its parts' cell-weighted score multiplier,
+                                  // plus the free area left in its pockets
     bool               lattice = false; // copies were laid on a lattice
     bool               better_than(const Pass &o) const
     {
@@ -537,7 +665,7 @@ public:
         m_options.resize(parts.size());
         for (size_t i = 0; i < parts.size(); ++i) {
             for (const Candidate &c : parts[i].candidates)
-                m_shapes[i].emplace_back(make_shape(c.map, p.max_height));
+                m_shapes[i].emplace_back(make_shape(c.map, p.max_height, p.vertical_gap));
             for (size_t c = 0; c < parts[i].candidates.size(); ++c)
                 m_options[i].push_back({&m_shapes[i][c], 1. + std::max(0., parts[i].candidates[c].penalty)});
         }
@@ -746,22 +874,26 @@ private:
                     if (const Span &c = s.map->at(s.x0 + x, s.y0 + y); !c.empty())
                         k.map->at(m.dx + x, m.dy + y) = c; // the members share no cell
         }
-        k.shape  = make_shape(*k.map, m_p.max_height);
+        k.shape  = make_shape(*k.map, m_p.max_height, m_p.vertical_gap);
         k.factor = 0.5 * (m_options[size_t(i)][size_t(fit.ca)].factor + m_options[size_t(i)][size_t(fit.cb)].factor);
         const Runs r = runs_of(k.shape);
         find_lattice(k, collisions(r, k.shape.w, r, k.shape.w));
     }
 
-    // Part order for greedy pass k: priority first, then one size key per pass.
+    // Part order for greedy pass k: priority first, then one size key per pass. Ties fall to the
+    // other size keys, then the shape key and id, so that the order does not follow the input
+    // order (the selection order in the GUI), which moves mixed piles by several percent.
     std::vector<int> order(int k) const
     {
-        auto key = [&](int i) -> double {
+        auto key = [&](int i, int j) -> double {
             const std::vector<Shape> &ss = m_shapes[i];
             if (ss.empty())
                 return 0.;
             const Shape &s = ss.front();
-            switch (k) {
-            case 0: return s.cells;
+            switch (j) {
+            // With stacking, a part that leaves room below it comes after the parts that could
+            // fill that room, so it can be placed over them.
+            case 0: return m_p.allow_stacking ? s.floor_cells : s.cells;
             case 1: return s.top;
             case 2: return std::max(s.w, s.h);
             case 3: return s.volume;
@@ -774,7 +906,10 @@ private:
         std::stable_sort(idx.begin(), idx.end(), [&](int a, int b) {
             if (m_parts[a].priority != m_parts[b].priority)
                 return m_parts[a].priority > m_parts[b].priority;
-            return key(a) > key(b);
+            for (int j : {k, 0, 1, 2, 3, 4, 5})
+                if (const double ka = key(a, j), kb = key(b, j); ka != kb)
+                    return ka > kb;
+            return std::make_pair(m_parts[a].shape_key, m_parts[a].id) < std::make_pair(m_parts[b].shape_key, m_parts[b].id);
         });
         return idx;
     }
@@ -782,7 +917,7 @@ private:
     // Bed mask and obstacles of plate `index`.
     Board fixed_board(int index) const
     {
-        Board b(m_w, m_h);
+        Board b(m_w, m_h, m_p.allow_stacking, m_p.vertical_gap);
         for (int y = 0; y < m_h; ++y)
             for (int x = 0; x < m_w; ++x)
                 if (size_t i = size_t(y) * m_w + x; i < m_p.bed_mask.size() && m_p.bed_mask[i])
@@ -807,7 +942,7 @@ private:
                             b.add(bx, by, s);
                 }
         }
-        b.update_sums(0);
+        b.update_sums(0, m_h);
         return b;
     }
 
@@ -831,13 +966,12 @@ private:
 
     // Best position on `plate` over `options`. The score is an area times the option's factor (a 0.1
     // penalty competes as if the area were 10% larger), minus ContactMM per mm of the shape's
-    // outline that touches occupied cells or the bed edge. With `centred` the area is that of the
-    // smallest anchor-centred rectangle holding this run's parts on the plate and this one: the
-    // packing grows outward from the anchor, so no wall pins the first copy where its partner cannot
-    // reach it. Else it is their plain bounding box, which lets a pile of unique parts grow
-    // lopsided where that is more compact. Contact decides between positions of equal area, which
-    // is where parts interlock. Ties go to the position nearest the anchor, then the lowest y, x
-    // and option.
+    // outline that touches occupied cells or the bed edge. The area is that of the bounding box of
+    // this run's parts on the plate and this one, which lets the pile grow lopsided where that is
+    // more compact; with `centred` it is that of the smallest anchor-centred rectangle holding them,
+    // which places a lattice's cluster on the anchor (see seed()). Contact decides between positions
+    // of equal area, which is where parts interlock. Ties go to the position nearest the anchor,
+    // then the lowest y, x and option.
     // Contact is at most the halo size, and at most the occupied cells around the shape's rect
     // (read in O(1) from the summed-area table) plus its wall contact. Rows and positions whose
     // score cannot reach the best even with that much contact are skipped before the collision
@@ -923,8 +1057,80 @@ private:
         return {best < 0 ? -1 : best / n_bands, best < 0 ? Hit{} : hits[best]};
     }
 
+    // Best position over `options` inside a pocket of `plate` (see Pockets), or -1. The score is the
+    // pocket's area, scaled by the option's factor as in search(), plus the cells the option claims:
+    // the part goes to the smallest pocket that holds it (best fit), in the pose that claims the
+    // least space, nearest the pocket's min corner, which fills a pocket from one side and leaves
+    // its free space in one piece. Contact plays no part: the staircase edge of a part turned 45
+    // degrees touches more cells than a straight one, which would turn small parts askew in round
+    // holes, where fewer of them fit. A pocket placement never grows the pile, so it is tried before
+    // search(). Positions are scanned row by row from the pocket's min corner, and the scan of a
+    // pocket stops once its distance from that corner exceeds that of a fit as good, so in a large
+    // pocket only the positions nearer its corner than the first fit are tested. Cost: per option,
+    // a collision test at most at every position of the pockets' boxes, which lie inside the
+    // plate's bounding box.
+    std::pair<int, Hit> pocket_search(const std::vector<Option> &options, Plate &plate) const
+    {
+        if (plate.bbox.empty())
+            return {-1, Hit{}};
+        if (!plate.pockets)
+            plate.pockets = std::make_shared<const Pockets>(plate.board, plate.bbox);
+        const Pockets &pk = *plate.pockets;
+        auto holds = [](const Pockets::Region &g, const Shape &s) {
+            return !g.open && g.cells >= s.cells && g.box.x1 - g.box.x0 >= s.w && g.box.y1 - g.box.y0 >= s.h;
+        };
+        if (std::none_of(pk.regions.begin(), pk.regions.end(), [&](const Pockets::Region &g) {
+                return std::any_of(options.begin(), options.end(), [&](const Option &o) { return o.shape->usable && holds(g, *o.shape); });
+            }))
+            return {-1, Hit{}};
+        std::vector<Hit> hits(options.size());
+        m_parallel_for(options.size(), [&](size_t o) {
+            const Shape &s = *options[o].shape;
+            if (!s.usable || stopped())
+                return;
+            // The shape's first cell, in its bottom row: a connected shape lies in that cell's pocket.
+            int first = 0;
+            while (!s.test(first, 0))
+                ++first;
+            Hit best;
+            for (const Pockets::Region &g : pk.regions) {
+                if (!holds(g, s))
+                    continue;
+                const int    id    = int(&g - pk.regions.data());
+                const double score = g.cells * options[o].factor + s.cells;
+                if (score > best.score)
+                    continue;
+                // The distance from the corner only grows along a row and from row to row.
+                auto loses = [&](double dist) { return score == best.score && dist > best.dist; };
+                for (int ty = g.box.y0; ty <= g.box.y1 - s.h; ++ty) {
+                    const double cy = ty - g.box.y0;
+                    if (loses(cy * cy))
+                        break;
+                    for (int tx = g.box.x0; tx <= g.box.x1 - s.w; ++tx) {
+                        const double cx = tx - g.box.x0;
+                        if (loses(cx * cx + cy * cy))
+                            break;
+                        if (plate.board.next(ty, tx + first, tx + first + 1, true, true) == tx + first ||
+                            pk.region_at(tx + first, ty) != id ||
+                            (plate.board.count(tx, ty, tx + s.w, ty + s.h) > 0 && !plate.board.fits(s, tx, ty, m_p)))
+                            continue;
+                        if (const Hit hit{score, cx * cx + cy * cy, ty, tx}; hit.better_than(best))
+                            best = hit;
+                    }
+                }
+            }
+            hits[o] = best;
+        });
+        int best = -1;
+        for (size_t o = 0; o < hits.size(); ++o)
+            if (hits[o].score < NoScore && (best < 0 || hits[o].better_than(hits[size_t(best)])))
+                best = int(o);
+        return {best, best < 0 ? Hit{} : hits[size_t(best)]};
+    }
+
     void place(int i, int cand, int x, int y, Plate &plate, Pass &pass) const
     {
+        plate.pockets.reset();
         const Shape &s = m_shapes[i][cand];
         plate.board.place(s, x, y);
         plate.bbox  = plate.bbox.united({x, y, x + s.w, y + s.h});
@@ -942,7 +1148,9 @@ private:
             for (const Cluster::Member &m : k.members) {
                 const Shape &s  = m_shapes[size_t(i)][size_t(m.cand)];
                 const int    sx = int(ox + x) + m.dx, sy = int(oy + y) + m.dy;
-                n += sx >= 0 && sy >= 0 && sx + s.w <= m_w && sy + s.h <= m_h && plate.board.fits(s, sx, sy, m_p);
+                // A rect free of occupied cells, read from the summed-area table, needs no collision test.
+                n += sx >= 0 && sy >= 0 && sx + s.w <= m_w && sy + s.h <= m_h &&
+                     (plate.board.count(sx, sy, sx + s.w, sy + s.h) == 0 || plate.board.fits(s, sx, sy, m_p));
             }
             return n < cap;
         });
@@ -1039,8 +1247,9 @@ private:
     }
 
     // First-fit greedy over `order`: the first open plate with room wins, else a new plate. With
-    // seeding, the first copy of a group to reach a plate lays the group's lattice there. Copies
-    // grow from the anchor, unique parts keep the bounding box small (see search()).
+    // seeding, the first copy of a group to reach a plate lays the group's lattice there. A part
+    // goes into a pocket of the pile when one holds it (see pocket_search()), else where it keeps
+    // the bounding box smallest (see search()).
     Pass greedy(const std::vector<int> &order, bool seeding, int &done, int total)
     {
         Pass pass;
@@ -1060,10 +1269,11 @@ private:
                 return false;
             if (g >= 0 && seeding && seeded.insert({g, plate.index}).second && seed(i, m_groups[size_t(g)], plate, pass, rank) > 0)
                 return true;
-            if (auto [cand, hit] = search(m_options[size_t(i)], plate, g >= 0); cand >= 0) {
-                place(i, cand, hit.x, hit.y, plate, pass);
-                return true;
-            }
+            for (bool pocket : {true, false})
+                if (auto [cand, hit] = pocket ? pocket_search(m_options[size_t(i)], plate) : search(m_options[size_t(i)], plate, false); cand >= 0) {
+                    place(i, cand, hit.x, hit.y, plate, pass);
+                    return true;
+                }
             if (g >= 0)
                 full.insert({g, plate.index});
             return false;
@@ -1098,8 +1308,11 @@ private:
                 cells += n, weighted += n * m_options[size_t(i)][size_t(pass.spots[size_t(i)].cand)].factor;
             }
             pass.fill.push_back(int(plate.placed.size()));
+            // Free area left in pockets is inside the bounding box already and counts once more as
+            // waste, the measure pocket_search() minimises: a pass that fills its pockets beats one
+            // whose bounding box is smaller by less than the area it left empty in them.
             if (cells > 0)
-                ++pass.plates_used, pass.cost += double(plate.bbox.area()) * weighted / double(cells);
+                ++pass.plates_used, pass.cost += double(plate.bbox.area()) * weighted / double(cells) + double(Pockets(plate.board, plate.bbox).enclosed());
         }
         while (!pass.fill.empty() && pass.fill.back() == 0)
             pass.fill.pop_back();
@@ -1165,6 +1378,11 @@ HeightMap rasterize(const std::vector<Triangle> &tris, double cell_mm, double in
     HeightMap m(cells(max_x - min_x), cells(max_y - min_y), cell_mm);
     m.origin_x = min_x - inflate_mm;
     m.origin_y = min_y - inflate_mm;
+    // Per occupied cell, the extent of the geometry inside it along x, y, x + y and x - y (min and max
+    // each, cell-local): an octagon holding it. Growth measures from that rather than from the whole
+    // cell, so the clearance is not rounded up to whole cells, along axis-parallel and diagonal edges.
+    const double grow = std::max(0., inflate_mm) / cell_mm;
+    std::vector<std::array<float, 8>> extent(grow > 0. ? m.cells.size() : 0, {1.f, 0.f, 1.f, 0.f, 2.f, 0.f, 1.f, -1.f});
 
     for (const Triangle &t : tris) {
         // Work in cell units so cell (i, j) is the unit square at (i, j).
@@ -1211,6 +1429,76 @@ HeightMap rasterize(const std::vector<Triangle> &tris, double cell_mm, double in
                 Span &s = m.at(cx, cy);
                 for (int k = 0; k < n; ++k)
                     s.add(float(b[k].z), float(b[k].z));
+                if (grow > 0.) {
+                    std::array<float, 8> &e = extent[size_t(cy) * m.width + cx];
+                    for (int k = 0; k < n; ++k) {
+                        const float v[4] = {float(b[k].x - cx), float(b[k].y - cy), float(b[k].x - cx + b[k].y - cy), float(b[k].x - cx - b[k].y + cy)};
+                        for (int a = 0; a < 4; ++a)
+                            e[2 * a] = std::min(e[2 * a], v[a]), e[2 * a + 1] = std::max(e[2 * a + 1], v[a]);
+                    }
+                }
+            }
+    }
+    if (grow > 0.) {
+        // Every cell closer than `grow` to the octagon of an occupied cell takes that cell's span.
+        // The distance between them is at least their gap along each of the four directions, and
+        // at least the distance between the octagon's bounding box and the cell; the larger of these
+        // lower bounds is exact for axis-parallel and diagonal edges. The geometry lies on the map's
+        // grid from inflate_mm in, so on a part whose sizes are multiples of the cell an edge keeps
+        // exactly inflate_mm.
+        // Offsets whose target cell lies within `grow` of the whole source cell are claimed and those
+        // farther than `grow` from it are not, whatever the octagon, so only the ring between needs
+        // the octagon test; a target whose span already holds the source's needs nothing. A cell
+        // whose 8 neighbours hold its span and are filled by geometry claims nothing they do not:
+        // every target beyond them is nearer to one of them by at least a cell. So only cells near
+        // the outline grow, for O(cells + outline cells * grow^2).
+        struct Offset { int dx, dy; bool always; };
+        std::vector<Offset> offsets;
+        const int           r = int(std::ceil(grow));
+        for (int dy = -r; dy <= r; ++dy)
+            for (int dx = -r; dx <= r; ++dx) {
+                // Distances from the target cell to the source cell's nearest and farthest points.
+                const double nx = std::max(std::abs(dx) - 1, 0), ny = std::max(std::abs(dy) - 1, 0);
+                if (nx * nx + ny * ny < grow * grow + 1e-6)
+                    offsets.push_back({dx, dy, double(dx) * dx + double(dy) * dy < grow * grow - 1e-6});
+            }
+        const HeightMap src = m;
+        auto holds  = [](const Span &t, const Span &s) { return t.lo <= s.lo && t.hi >= s.hi; };
+        auto filled = [&](int x, int y) {
+            const std::array<float, 8> &e = extent[size_t(y) * m.width + x];
+            const float                 eps = 1e-4f;
+            return e[0] <= eps && e[1] >= 1.f - eps && e[2] <= eps && e[3] >= 1.f - eps && e[4] <= eps && e[5] >= 2.f - eps &&
+                   e[6] <= eps - 1.f && e[7] >= 1.f - eps;
+        };
+        auto inner = [&](int x, int y, const Span &s) {
+            if (x == 0 || y == 0 || x + 1 == m.width || y + 1 == m.height)
+                return false;
+            for (int dy = -1; dy <= 1; ++dy)
+                for (int dx = -1; dx <= 1; ++dx)
+                    if ((dx || dy) && !(holds(src.at(x + dx, y + dy), s) && filled(x + dx, y + dy)))
+                        return false;
+            return true;
+        };
+        auto gap = [](double lo, double hi, double e_lo, double e_hi) { return std::max({0., lo - e_hi, e_lo - hi}); };
+        for (int sy = 0; sy < m.height; ++sy)
+            for (int sx = 0; sx < m.width; ++sx) {
+                const Span &s = src.at(sx, sy);
+                if (s.empty() || inner(sx, sy, s))
+                    continue;
+                const std::array<float, 8> &e = extent[size_t(sy) * m.width + sx];
+                for (const Offset &o : offsets) {
+                    if (!m.in_bounds(sx + o.dx, sy + o.dy))
+                        continue;
+                    Span &t = m.at(sx + o.dx, sy + o.dy);
+                    if (holds(t, s))
+                        continue;
+                    // The target cell is [dx, dx + 1] x [dy, dy + 1] in the source cell's frame.
+                    const int    dx = o.dx, dy = o.dy;
+                    const double gx = gap(dx, dx + 1, e[0], e[1]), gy = gap(dy, dy + 1, e[2], e[3]);
+                    const double gu = gap(dx + dy, dx + dy + 2, e[4], e[5]), gv = gap(dx - dy - 1, dx - dy + 1, e[6], e[7]);
+                    if (o.always || std::max(gx * gx + gy * gy, 0.5 * std::max(gu * gu, gv * gv)) < grow * grow - 1e-9)
+                        t.add(s.lo, s.hi);
+                }
             }
     }
     if (fill_to_bed)
@@ -1259,6 +1547,26 @@ HeightMap dilate(const HeightMap &m, double radius_mm, double bottom_only_radius
                     out.at(x + g + dx, y + g + dy).add(0.f, float(bottom_only_mm));
         }
     return out;
+}
+
+Effort effort_settings(int effort, double bed_w, double bed_h)
+{
+    // Cells of 1 and 1/2 mm divide whole and half millimetres, so an axis-parallel edge at such a
+    // size and spacing falls on a cell boundary and keeps its spacing exactly (see rasterize());
+    // elsewhere a gap costs up to a cell more. On fill-the-bed sets with 1 mm spacing and sizes in
+    // whole millimetres, 0.6 and 0.43 mm cells place up to 10% and 6% fewer parts than 0.5 mm
+    // cells. With the sizes scaled off that grid (by 1.037 or 1.113), the parts turned 17 degrees,
+    // or both, 0.43, 0.5 and 0.6 mm cells place 74.8%, 74.6% and 72.8% of the area bound on
+    // average, so 0.5 mm cells lose little where sizes are arbitrary. Thorough tries more
+    // orderings on the same cells: 0.25 mm cells took 4 to 8 times as long for at most 4% more
+    // parts on fill-the-bed sets and 2% on mixed ones. Past MaxBedCells per side the cell grows
+    // with the bed, which bounds the cost of a scan: on a 510 mm bed, 0.71 mm cells place 2% to 5%
+    // fewer parts than 0.5 mm cells in 37% to 62% less time.
+    constexpr double Cell[]      = {1., 0.5, 0.5};
+    constexpr int    Orderings[] = {1, 3, 6};
+    constexpr double MaxBedCells = 720.;
+    effort = std::clamp(effort, 0, 2);
+    return {std::max(Cell[effort], std::max(bed_w, bed_h) / MaxBedCells), Orderings[effort]};
 }
 
 std::vector<double> candidate_angles(double current, const std::vector<double> &offsets)
