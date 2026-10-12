@@ -14,9 +14,10 @@
 // of part orderings, with an exhaustive scan of grid positions per candidate.
 // Packing grows outward from an anchor point and prefers positions where a
 // part touches what is already placed. Copies of one shape (Part::shape_key)
-// are additionally tried laid out on the densest lattice found for one copy
-// or an interlocked pair. Cost is polynomial (see docs/HLSD/nest3d.md); no
-// step enumerates permutations or subsets.
+// grow outward from an anchor point and are additionally tried laid out on the
+// densest lattice found for one copy or an interlocked pair; unique parts keep
+// the pile's bounding box small. Cost is polynomial (see docs/HLSD/nest3d.md);
+// no step enumerates permutations or subsets.
 //
 // This header is deliberately free of libslic3r types so the core can be
 // unit-tested without the rest of the slicer; Nest3DArrange.hpp adapts it to
@@ -85,8 +86,8 @@ struct Part
     double                 priority = 0.0; // higher is placed earlier, before size ordering
     int                    compat_group = 0; // parts in different groups never share a plate
                                              // unless Params::mix_groups is set
-    int                    shape_key = -1;   // parts with the same key >= 0 have identical candidates
-                                             // (copies of one object); -1: unique
+    int                    shape_key = -1;   // parts with the same key >= 0 have identical candidates, in
+                                             // the same order (copies of one object); -1: unique
 };
 
 // A part already on a plate that must not move (unselected items, wipe tower,
@@ -129,6 +130,7 @@ struct Params
     // Runs fn(i) for i in [0, n). Defaults to a serial loop; the adapter
     // injects a TBB-backed version.
     std::function<void(size_t n, const std::function<void(size_t)> &fn)> parallel_for;
+    // Polled between parts and inside parallel tasks, so it must be thread-safe.
     std::function<bool()>                 should_stop;
     std::function<void(int done, int total)> progress;
 };
@@ -157,6 +159,11 @@ HeightMap rasterize(const std::vector<Triangle> &tris, double cell_mm, double in
 // of the first-layer footprint receive [0, bottom_only_mm]. Vertical clearance
 // is applied at placement by Params::vertical_gap.
 HeightMap dilate(const HeightMap &m, double radius_mm, double bottom_only_radius_mm = 0.0, double bottom_only_mm = 0.0);
+
+// Z angles current + offset for every offset, normalised to [0, 2 pi) and sorted. Copies whose
+// current angles differ by a multiple of an evenly spaced offset list get the same angles in the
+// same order, so they can share a Part::shape_key.
+std::vector<double> candidate_angles(double current, const std::vector<double> &offsets);
 
 // Arranges `parts` around fixed `obstacles`. Returns one Placement per part,
 // in input order.

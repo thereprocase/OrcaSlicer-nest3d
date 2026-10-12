@@ -184,20 +184,23 @@ std::vector<Pose> item_poses(const ItemGeometry &g, bool reorient)
     return poses;
 }
 
+// Candidate Z angles in canonical order (see candidate_angles()).
 std::vector<double> z_rotations(const ArrangePolygon &ap, const arrangement::ArrangeParams &params, int steps)
 {
-    if (!params.allow_rotations)
-        return {ap.rotation};
-    std::vector<double> out;
+    std::vector<double> offsets{0.};
     // Every item carries the default {0.}, which the legacy arranger ignores too; a longer
     // list restricts the item to those rotations.
-    if (ap.allowed_rotations.size() > 1)
-        for (double r : ap.allowed_rotations)
-            out.push_back(ap.rotation + r);
-    else
-        for (int i = 0; i < steps; ++i)
-            out.push_back(ap.rotation + 2. * PI * i / steps);
-    return out;
+    if (params.allow_rotations && ap.allowed_rotations.size() > 1)
+        offsets = ap.allowed_rotations;
+    else if (params.allow_rotations)
+        for (int i = 1; i < steps; ++i)
+            offsets.push_back(2. * PI * i / steps);
+    return candidate_angles(ap.rotation, offsets);
+}
+
+bool same_angles(const std::vector<double> &a, const std::vector<double> &b)
+{
+    return a.size() == b.size() && std::equal(a.begin(), a.end(), b.begin(), [](double x, double y) { return std::abs(x - y) < 1e-6; });
 }
 
 // Column grid of the item in `pose`, turned by `angle` about the reference point and moved by
@@ -289,31 +292,36 @@ Stats arrange_polygons(ArrangePolygons                  &selected,
         parts[i].priority     = selected[i].priority;
         parts[i].compat_group = group_of(selected[i]);
     }
-    // Instances of one object posed alike, at the same Z angle and spacing, get identical
-    // candidates, so the engine may pack them as copies. A key is the index of the first such item.
-    std::vector<Transform3d> pose_of(selected.size(), Transform3d::Identity());
-    std::vector<size_t>      firsts;
+    // Instances of one object posed alike, with the same candidate Z angles and spacing, get
+    // identical candidates, so the engine may pack them as copies. Copies an earlier arrange left
+    // at angles a rotation step apart have the same angles; a key's items all take its first
+    // item's angles, so that rounding never splits them. A key is the index of its first item.
+    std::vector<Transform3d>         pose_of(selected.size(), Transform3d::Identity());
+    std::vector<std::vector<double>> angles(selected.size());
+    std::vector<size_t>              firsts;
     for (size_t i = 0; i < selected.size(); ++i) {
         const ArrangePolygon &ap = selected[i];
+        angles[i] = z_rotations(ap, params, std::max(settings.rotation_steps, 1));
         if (ap.instance == nullptr)
             continue;
         pose_of[i]   = arrange_pose(*ap.instance).get_matrix();
         const auto it = std::find_if(firsts.begin(), firsts.end(), [&](size_t j) {
             const ArrangePolygon &o = selected[j];
-            return o.instance->get_object() == ap.instance->get_object() && o.rotation == ap.rotation && o.inflation == ap.inflation &&
-                   o.allowed_rotations == ap.allowed_rotations && pose_of[j].isApprox(pose_of[i], 1e-9);
+            return o.instance->get_object() == ap.instance->get_object() && o.inflation == ap.inflation &&
+                   same_angles(angles[j], angles[i]) && pose_of[j].isApprox(pose_of[i], 1e-9);
         });
         parts[i].shape_key = int(it - firsts.begin());
         if (it == firsts.end())
             firsts.push_back(i);
+        else
+            angles[i] = angles[*it];
     }
     tbb::parallel_for(size_t(0), selected.size(), [&](size_t i) {
         const ArrangePolygon &ap = selected[i];
         const ItemGeometry    g  = item_geometry(ap, config, ap.height);
         poses[i] = item_poses(g, settings.reorient && ap.instance != nullptr);
-        const std::vector<double> angles = z_rotations(ap, params, std::max(settings.rotation_steps, 1));
         for (size_t k = 0; k < poses[i].size(); ++k)
-            for (double angle : angles)
+            for (double angle : angles[i])
                 parts[i].candidates.push_back(
                     {footprint(g, poses[i][k], angle, Vec2d::Zero(), p.cell_mm, unscaled(ap.inflation)), angle, int(k), poses[i][k].penalty});
     });
