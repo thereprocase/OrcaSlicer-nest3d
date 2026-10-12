@@ -1542,6 +1542,21 @@ void GLCanvas3D::load_arrange_settings()
     load_bool("enable_rotation_fff_seq_print", m_arrange_settings_fff_seq_print.enable_rotation);
     load_bool("enable_rotation_sla",           m_arrange_settings_sla.enable_rotation);
 
+    for (auto [postfix, settings] : {std::make_pair("_fff", &m_arrange_settings_fff),
+                                     std::make_pair("_fff_seq_print", &m_arrange_settings_fff_seq_print),
+                                     std::make_pair("_sla", &m_arrange_settings_sla)}) {
+        const std::string pf    = postfix;
+        float             steps = float(settings->nest3d_rotation_steps), effort = float(settings->nest3d_effort);
+        load_bool(("nest3d_enabled" + pf).c_str(), settings->nest3d_enabled);
+        load_bool(("nest3d_stacking" + pf).c_str(), settings->nest3d_stacking);
+        load_float(("nest3d_vertical_gap" + pf).c_str(), settings->nest3d_vertical_gap);
+        load_bool(("nest3d_reorient" + pf).c_str(), settings->nest3d_reorient);
+        load_float(("nest3d_rotation_steps" + pf).c_str(), steps);
+        load_float(("nest3d_effort" + pf).c_str(), effort);
+        settings->nest3d_rotation_steps = std::clamp(int(steps), 1, 72);
+        settings->nest3d_effort         = std::clamp(int(effort), 0, 2);
+    }
+
     // These two keys carry no postfix, so the one stored value covers both FFF modes.
     load_bool("allow_multi_materials_on_same_plate", m_arrange_settings_fff.allow_multi_materials_on_same_plate);
     load_bool("allow_multi_materials_on_same_plate", m_arrange_settings_fff_seq_print.allow_multi_materials_on_same_plate);
@@ -6696,6 +6711,74 @@ void GLCanvas3D::_render_arrange_menu(float left, float right, float bottom, flo
         if (settings_out.enable_rotation == true) { imgui->disabled_end(); }
     }
 
+    // Shape-true 3D nesting. Its column model assumes layer-by-layer printing, so the arrange job
+    // falls back to the outline arranger when printing by object.
+    const std::string nest3d_keys[] = {"nest3d_enabled" + postfix, "nest3d_stacking" + postfix, "nest3d_vertical_gap" + postfix,
+                                       "nest3d_reorient" + postfix, "nest3d_rotation_steps" + postfix, "nest3d_effort" + postfix};
+    {
+        const float wrap_width = imgui->scaled(18.f);
+        auto        tooltip    = [&](const wxString &text) {
+            if (ImGui::IsItemHovered())
+                imgui->tooltip(text, wrap_width);
+        };
+        const bool nesting = settings_out.nest3d_enabled && !seq_print;
+
+        ImGui::Separator();
+        imgui->text(_L("Shape-true 3D nesting"));
+        imgui->disabled_begin(seq_print);
+        if (imgui->bbl_checkbox(_L("Nest by 3D shape"), settings_out.nest3d_enabled))
+            appcfg->set("arrange", nest3d_keys[0], settings_out.nest3d_enabled);
+        tooltip(_L("Arrange parts by their real 3D shape instead of their outline, so parts can fill each other's holes and concave areas."));
+        imgui->disabled_end();
+
+        imgui->disabled_begin(!nesting);
+        if (imgui->bbl_checkbox(_L("Nest under overhangs"), settings_out.nest3d_stacking))
+            appcfg->set("arrange", nest3d_keys[1], settings_out.nest3d_stacking);
+        tooltip(_L("Let short parts sit under the unsupported overhangs of taller parts. Parts that print with support keep the space below them free."));
+        imgui->disabled_end();
+        if (seq_print)
+            imgui->text_wrapped(_L("Not available when printing by object: each object is finished before the next one starts."), wrap_width);
+        else if (!nesting)
+            imgui->text_wrapped(_L("Turn on nesting by 3D shape to use this."), wrap_width);
+
+        imgui->disabled_begin(!nesting || !settings_out.nest3d_stacking);
+        ImGui::AlignTextToFramePadding();
+        imgui->text(_L("Vertical clearance (mm)"));
+        ImGui::SameLine();
+        ImGui::PushItemWidth(1.5f * slider_icon_width);
+        if (ImGui::BBLDragFloat("##nest3d_vertical_gap", &settings_out.nest3d_vertical_gap, 0.05f, 0.0f, 0.0f, "%.2f")) {
+            settings_out.nest3d_vertical_gap = std::max(0.f, settings_out.nest3d_vertical_gap);
+            appcfg->set("arrange", nest3d_keys[2], float_to_string_decimal_point(settings_out.nest3d_vertical_gap));
+        }
+        ImGui::PopItemWidth();
+        tooltip(_L("Minimum height between the top of a part and the overhang above it."));
+        imgui->disabled_end();
+
+        imgui->disabled_begin(!nesting);
+        if (imgui->bbl_checkbox(_L("Try lay-flat orientations"), settings_out.nest3d_reorient))
+            appcfg->set("arrange", nest3d_keys[3], settings_out.nest3d_reorient);
+        tooltip(_L("Also try resting each part on its largest flat faces when that does not add much overhang."));
+
+        if (settings_out.enable_rotation) {
+            ImGui::AlignTextToFramePadding();
+            imgui->text(_L("Rotation steps"));
+            ImGui::SameLine();
+            ImGui::PushItemWidth(imgui->scaled(5.f));
+            if (ImGui::InputInt("##nest3d_rotation_steps", &settings_out.nest3d_rotation_steps, 1, 4)) {
+                settings_out.nest3d_rotation_steps = std::clamp(settings_out.nest3d_rotation_steps, 1, 72);
+                appcfg->set("arrange", nest3d_keys[4], std::to_string(settings_out.nest3d_rotation_steps));
+            }
+            ImGui::PopItemWidth();
+            tooltip(_L("Number of evenly spaced rotations tried for each part. More steps pack tighter and take longer."));
+        }
+
+        const std::vector<std::string> efforts = {_u8L("Fast"), _u8L("Balanced"), _u8L("Thorough")};
+        if (imgui->combo(_L("Effort"), efforts, settings_out.nest3d_effort, 0, 0.f, imgui->scaled(6.f)))
+            appcfg->set("arrange", nest3d_keys[5], std::to_string(settings_out.nest3d_effort));
+        tooltip(_L("Finer grids and more packing orders find tighter arrangements at the cost of time."));
+        imgui->disabled_end();
+    }
+
     ImGui::Separator();
     ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(15.0f, 10.0f));
     if (imgui->button(_L("Arrange"))) {
@@ -6720,6 +6803,8 @@ void GLCanvas3D::_render_arrange_menu(float left, float right, float bottom, flo
         appcfg->erase("arrange", rot_key);
         appcfg->erase("arrange", multi_material_key);
         appcfg->erase("arrange", avoid_extrusion_key);
+        for (const std::string &key : nest3d_keys)
+            appcfg->erase("arrange", key);
     }
     ImGui::PopStyleVar(1);
     imgui->end();

@@ -19,6 +19,7 @@
 namespace Slic3r {
 
 class BoundingBox;
+class ModelInstance;
 
 namespace arrangement {
 
@@ -83,6 +84,8 @@ struct ArrangePolygon {
     double    height{ 0 };         // item height
     double    brim_width{ 0 };     // brim width
     std::string name;
+    // The instance this item stands for, if any. Only the shape-true arranger (Nest3D) reads it.
+    ModelInstance *instance{ nullptr };
 
     // If empty, any rotation is allowed (currently unsupported)
     // If only a zero is there, no rotation is allowed

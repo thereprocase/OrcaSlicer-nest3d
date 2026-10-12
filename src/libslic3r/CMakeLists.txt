@@ -369,6 +369,10 @@ set(lisbslic3r_sources
     MutablePolygon.cpp
     MutablePolygon.hpp
     MutablePriorityQueue.hpp
+    Nest3D/Nest3D.cpp
+    Nest3D/Nest3D.hpp
+    Nest3D/Nest3DArrange.cpp
+    Nest3D/Nest3DArrange.hpp
     NormalUtils.cpp
     NormalUtils.hpp
     NSVGUtils.cpp

@@ -611,6 +611,13 @@ public:
         //BBS: add more arrangeSettings
         bool is_seq_print        = false;
         bool  align_to_y_axis    = false;
+        // Shape-true 3D nesting, see nest3d::ArrangeSettings
+        bool  nest3d_enabled        = false;
+        bool  nest3d_stacking       = false;
+        float nest3d_vertical_gap   = 2.f;
+        bool  nest3d_reorient       = false;
+        int   nest3d_rotation_steps = 8;
+        int   nest3d_effort         = 1;
     };
 
     struct OrientSettings
