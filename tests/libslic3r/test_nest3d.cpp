@@ -879,9 +879,18 @@ ArrangeParams quiet_params()
     return params;
 }
 
-// Arranges every instance of `model` on one plate of `bed` as the arrange job hands them over,
-// spaced `Spacing` apart, and applies the result to the model.
-ArrangePolygons arrange_model(Slic3r::Model &model, const Slic3r::Points &bed, const ArrangeParams &params, const ArrangeSettings &settings)
+// An instance's mesh as the arranged model prints it.
+indexed_triangle_set printed_mesh(const Slic3r::ModelInstance &mi)
+{
+    indexed_triangle_set its = mi.get_object()->raw_indexed_triangle_set();
+    its_transform(its, mi.get_matrix(), /*fix_left_handed=*/true);
+    return its;
+}
+
+// Arranges every instance of `model` on up to `max_plates` plates (the arrange job's limit by default) of `bed` as the arrange job
+// hands them over, spaced `Spacing` apart, and applies the result to the model. Every placed
+// instance must print inside the bed, whichever arranger produced the result.
+ArrangePolygons arrange_model(Slic3r::Model &model, const Slic3r::Points &bed, const ArrangeParams &params, const ArrangeSettings &settings, int max_plates = 64)
 {
     const Slic3r::DynamicPrintConfig config = Slic3r::DynamicPrintConfig::full_print_config();
     ArrangePolygons                  items;
@@ -891,18 +900,18 @@ ArrangePolygons arrange_model(Slic3r::Model &model, const Slic3r::Points &bed, c
             items.back().inflation = Slic3r::scaled(0.5 * Spacing);
             items.back().itemid    = int(items.size()) - 1;
         }
-    arrange_polygons(items, {}, bed, params, settings, config, 1);
-    for (ArrangePolygon &ap : items)
+    arrange_polygons(items, {}, bed, params, settings, config, max_plates);
+    const Slic3r::Polygons bed_with_tolerance = Slic3r::offset(Slic3r::Polygons{Slic3r::Polygon(bed)}, float(Slic3r::scaled(1e-3)));
+    for (ArrangePolygon &ap : items) {
         ap.apply();
+        if (!ap.is_arranged())
+            continue;
+        for (const Slic3r::Vec3f &v : printed_mesh(*ap.instance).vertices) {
+            INFO("vertex " << v.x() << ", " << v.y());
+            CHECK(bed_with_tolerance.front().contains(Slic3r::Point(Slic3r::scaled(v.x()), Slic3r::scaled(v.y()))));
+        }
+    }
     return items;
-}
-
-// An instance's mesh as the arranged model prints it.
-indexed_triangle_set printed_mesh(const Slic3r::ModelInstance &mi)
-{
-    indexed_triangle_set its = mi.get_object()->raw_indexed_triangle_set();
-    its_transform(its, mi.get_matrix(), /*fix_left_handed=*/true);
-    return its;
 }
 
 // Vertices of the arranged instances on the plate that print outside the bed [0, w] x [0, h].
@@ -1011,6 +1020,26 @@ TEST_CASE("Instances an arrange left at different quarter turns pack as copies a
     }
     CHECK(spots[0].size() >= 22);
     CHECK(spots[1] == spots[0]);
+}
+
+TEST_CASE("An arrange that leaves parts unplaced yields to the outline arranger when it places them", "[Nest3D][Regression]")
+{
+    // Two 20 mm cubes need a plate each on a 25 mm bed. Capped at one plate, shape-true nesting
+    // leaves one out, which the outline arranger does not.
+    Slic3r::Model        model;
+    Slic3r::ModelObject *o = add_object(model, cube(20, 20, 5));
+    o->add_instance();
+    o->add_instance();
+    ArrangeSettings settings;
+    settings.effort             = 0;
+    const ArrangePolygons items = arrange_model(model, rect_bed(25, 25), quiet_params(), settings, 1);
+    int                   plates = 0;
+    for (const ArrangePolygon &ap : items) {
+        CHECK(ap.is_arranged());
+        plates = std::max(plates, ap.bed_idx + 1);
+    }
+    INFO("plates " << plates);
+    CHECK(plates > 1);
 }
 
 TEST_CASE("Parts on a round bed stay inside its outline", "[Nest3D]")

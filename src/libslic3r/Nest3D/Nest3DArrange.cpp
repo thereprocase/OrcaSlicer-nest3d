@@ -9,6 +9,7 @@
 #include <utility>
 #include <vector>
 
+#include <boost/log/trivial.hpp>
 #include <Eigen/Geometry>
 #include <tbb/parallel_for.h>
 
@@ -393,6 +394,17 @@ void apply_placements(ArrangePolygons &selected, const std::vector<Placement> &p
     }
 }
 
+// What the guard in arrange_polygons() ranks a result by: fewer unplaced items first, then fewer plates.
+std::pair<int, int> cost(const ArrangePolygons &items)
+{
+    int unplaced = 0, plates = 0;
+    for (const ArrangePolygon &ap : items) {
+        unplaced += !ap.is_arranged();
+        plates = std::max(plates, ap.bed_idx + 1);
+    }
+    return {unplaced, plates};
+}
+
 } // namespace
 
 std::vector<double> candidate_angles(double current, const std::vector<double> &offsets)
@@ -422,7 +434,22 @@ void arrange_polygons(ArrangePolygons                  &selected,
     std::vector<std::vector<Pose>> poses;
     const std::vector<Part>        parts     = build_parts(selected, params, settings, config, p.cell_mm, groups, poses);
     const std::vector<Obstacle>    obstacles = build_obstacles(fixed, params, config, bed_min, p.cell_mm, max_plates, groups);
+    const ArrangePolygons original = selected;
     apply_placements(selected, nest3d::arrange(parts, obstacles, p), poses, bed_min);
+
+    // Shape-true packing is a heuristic that can lose to the outline arranger on some inputs, and a
+    // result needing more plates or leaving more parts out must never replace it. A single full
+    // plate cannot be beaten, so the outline arranger only runs when something is off plate 0.
+    const auto [unplaced, plates] = cost(selected);
+    if (unplaced == 0 && plates <= 1)
+        return;
+    ArrangePolygons stock = original;
+    arrangement::arrange(stock, fixed, bed, params);
+    const bool stock_wins = cost(stock) < std::make_pair(unplaced, plates);
+    BOOST_LOG_TRIVIAL(info) << "arrange: nest3d used " << plates << " plates with " << unplaced << " unplaced, "
+                            << (stock_wins ? "the outline arranger did better and is kept" : "kept over the outline arranger");
+    if (stock_wins)
+        selected = std::move(stock);
 }
 
 }} // namespace Slic3r::nest3d
