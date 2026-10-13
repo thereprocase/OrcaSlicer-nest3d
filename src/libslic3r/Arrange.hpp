@@ -84,7 +84,8 @@ struct ArrangePolygon {
     double    height{ 0 };         // item height
     double    brim_width{ 0 };     // brim width
     std::string name;
-    // The instance this item stands for, if any. Only the shape-true arranger (Nest3D) reads it.
+    // Source instance, null for the wipe tower and other virtual items. An arranger that works on
+    // the 3D shape reads its mesh, and its setter may apply a pose beyond the 2D move through it.
     ModelInstance *instance{ nullptr };
 
     // If empty, any rotation is allowed (currently unsupported)

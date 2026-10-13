@@ -12,6 +12,7 @@
 #include "libslic3r/Arrange.hpp"
 #include "libslic3r/BoundingBox.hpp"
 #include "libslic3r/IMEXArrange.hpp"
+#include "libslic3r/Nest3D/Nest3D.hpp"
 #include "libslic3r/Nest3D/Nest3DArrange.hpp"
 
 namespace Slic3r {
@@ -108,7 +109,6 @@ double bed_stride_x(const Plater* plater);
 double bed_stride_y(const Plater* plater);
 
 arrangement::ArrangeParams init_arrange_params(Plater *p);
-nest3d::ArrangeSettings    init_nest3d_settings(Plater *p);
 
 }} // namespace Slic3r::GUI
 

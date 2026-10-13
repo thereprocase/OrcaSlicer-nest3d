@@ -1494,6 +1494,10 @@ public:
     Polygon convex_hull_2d();
     void invalidate_convex_hull_2d();
 
+    // The instance transform without its offset and Z rotation: the pose arrange works in, onto
+    // which ArrangePolygon::rotation and ::translation apply.
+    Geometry::Transformation get_arrange_transformation() const;
+
     // Getting the input polygon for arrange
     // We use void* as input type to avoid including Arrange.hpp in Model.hpp.
     void get_arrange_polygon(void *arrange_polygon, const Slic3r::DynamicPrintConfig &config = Slic3r::DynamicPrintConfig()) const;

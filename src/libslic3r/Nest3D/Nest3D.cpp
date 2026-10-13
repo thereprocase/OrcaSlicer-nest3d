@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <array>
 #include <atomic>
+#include <bitset>
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
@@ -46,35 +47,23 @@ int clip(const ClipPoly &in, int n, ClipPoly &out, bool on_y, double bound, doub
     return m;
 }
 
-const Span FullSpan{std::numeric_limits<float>::lowest(), std::numeric_limits<float>::max()};
-
 // ---------------------------------------------------------------------------
 // Arrangement
 // ---------------------------------------------------------------------------
 
 constexpr double NoScore   = std::numeric_limits<double>::infinity();
 constexpr int    Mixed     = -2;  // plate group when its fixed parts span several groups
-// Scored area, in mm^2, that one mm of contact outweighs. Small next to the area growth of moving
-// a part by a cell, so contact mostly decides between positions of equal area. Chosen by sweeps
-// over 0..128 on fill-the-bed and mixed sets: on fill-the-bed with beds of 140 to 350 mm, 16
-// places at least as many parts as 4 or 8 and mostly more than 32; on random mixed bags, 4 to 16
-// leave piles within 1% of each other.
+// Scored area, in mm^2, that one mm of contact outweighs: small next to the area growth of moving
+// a part by a cell, so contact mostly decides between positions of equal area.
 constexpr double ContactMM = 16.;
 constexpr size_t MaxBasis  = 2048; // lattice basis vectors tried per cluster, shortest first
 // Candidates of a group of copies that lattices are built from: enough for the four quarter turns
-// of a part, while the cost stays the same for 8 or 432 candidates.
+// of a part, and independent of the candidate count.
 constexpr size_t MaxLatticeCandidates = 4;
 constexpr long long MaxCosets = 16384; // lattice phases counted when seeding copies that fill a plate
 constexpr double Pi = 3.14159265358979323846;
 
-// std::popcount is C++20.
-int popcount(uint64_t v)
-{
-    v = v - ((v >> 1) & 0x5555555555555555ull);
-    v = (v & 0x3333333333333333ull) + ((v >> 2) & 0x3333333333333333ull);
-    v = (v + (v >> 4)) & 0x0f0f0f0f0f0f0f0full;
-    return int((v * 0x0101010101010101ull) >> 56);
-}
+int popcount(uint64_t v) { return int(std::bitset<64>(v).count()); }
 
 // Index of the lowest set bit of v != 0 (std::countr_zero is C++20).
 int lowest_bit(uint64_t v) { return popcount((v & (~v + 1)) - 1); }
@@ -101,6 +90,7 @@ struct Shape
     int                   floor_cells = 0; // cells with nothing fitting under them (see on_floor())
     float                 top = 0.f;
     double                volume = 0.;
+    double                factor = 1.; // score multiplier from the candidate's penalty
     bool                  usable = false;
 
     bool test(int x, int y) const
@@ -257,6 +247,13 @@ struct Board
         return true;
     }
 
+    // As fits(), for a position that may leave the bed. A rect free of occupied cells, read from
+    // the summed-area table, needs no collision test.
+    bool fits_in_bed(const Shape &s, int tx, int ty, const Params &p) const
+    {
+        return tx >= 0 && ty >= 0 && tx + s.w <= w && ty + s.h <= h && (count(tx, ty, tx + s.w, ty + s.h) == 0 || fits(s, tx, ty, p));
+    }
+
     // Cells of the outline of `s` at (tx, ty) that touch an occupied cell.
     int contact(const Shape &s, int tx, int ty) const
     {
@@ -374,7 +371,6 @@ void reduce(Vec &u, Vec &v)
 }
 
 // Calls fn(x, y) for every point m * u + n * v in [x0, x1] x [y0, y1] until it returns false.
-// With a reduced basis the scanned coefficient box holds O(1 + area / det) points.
 template<class Fn> bool for_lattice_points(const Vec &u, const Vec &v, long long x0, long long y0, long long x1, long long y1, Fn fn)
 {
     const double d = double(cross(u, v));
@@ -418,19 +414,15 @@ struct Cluster
     };
     std::vector<Member>        members;
     std::unique_ptr<HeightMap> map;   // union of the members, when there are several
-    Shape                      shape; // union occupancy, searched like a part
-    Vec                 v1, v2;
-    long long           det = 0;    // cells per lattice site; 0: no lattice
-    double              factor = 1.; // mean score multiplier of the members' candidates
+    Shape                      shape; // union occupancy, searched like a part; its factor is the members' mean
+    Vec                        v1, v2;
+    long long                  det = 0; // cells per lattice site; 0: no lattice
 };
 
-// Densest lattice whose translates of the cluster miss each other. Basis vectors are drawn from
-// the offsets at which a translate touches the cluster (free, next to a colliding offset), the
-// MaxBasis shortest of them; every locally densest lattice has two independent touching vectors.
-// The bounding-box lattice is always valid and is the fallback. With B <= MaxBasis offsets this
-// tests O(B^2) bases, and only those denser than the best so far are validated against all
-// O(1 + W * H / det) lattice points of the collision window. `self` is the cluster's raster
-// no-fit set against itself.
+// Densest lattice whose translates of the cluster miss each other, given `self`, the cluster's
+// raster no-fit set against itself. Basis vectors are drawn from the MaxBasis shortest offsets at
+// which a translate touches the cluster: every locally densest lattice has two independent
+// touching vectors. The bounding-box lattice is always valid and is the fallback.
 void find_lattice(Cluster &k, const Offsets &self)
 {
     const int W = k.shape.w, H = k.shape.h;
@@ -462,13 +454,14 @@ struct PairFit
     double area = NoScore; // common bounding box, scaled by the candidates' mean score multiplier
     long   contact = 0;
     int    ca = -1, cb = -1, dx = 0, dy = 0;
-    bool   better_than(const PairFit &o) const { return area < o.area || (area == o.area && contact > o.contact); }
+    bool   better_than(const PairFit &o) const { return std::make_tuple(area, -contact) < std::make_tuple(o.area, -o.contact); }
 };
 
 // Tightest touching offset of b next to a, given their raster no-fit set: smallest common
 // bounding box, then most contact.
-void best_pair(const Shape &a, const Runs &ra, int ca, const Shape &b, const Runs &rb, int cb, const Offsets &nfp, double factor, PairFit &best)
+void best_pair(const Shape &a, const Runs &ra, int ca, const Shape &b, const Runs &rb, int cb, const Offsets &nfp, PairFit &best)
 {
+    const double factor = 0.5 * (a.factor + b.factor);
     for (int dy = nfp.y0 - 1; dy <= nfp.y0 + nfp.h; ++dy)
         for (int dx = nfp.x0 - 1; dx <= nfp.x0 + nfp.w; ++dx) {
             if (!nfp.touching(dx, dy))
@@ -499,10 +492,9 @@ struct Rect
 };
 
 // Free regions that the parts placed by a run enclose: the 4-connected components of free cells
-// inside their bounding box that do not reach its border. A part placed in one leaves the pile's
-// extent unchanged and takes space that only parts small enough could ever use. With stacking,
-// cells with room under them count as free (see Board::floor), so that a hole under a table top
-// is still a pocket; Board::fits() decides what fits there.
+// inside their bounding box that do not reach its border. With stacking, cells with room under
+// them count as free (see Board::floor), so that a hole under a table top is still a pocket;
+// Board::fits() decides what fits there.
 struct Pockets
 {
     struct Run
@@ -520,8 +512,7 @@ struct Pockets
     std::vector<Run>    runs;
     std::vector<Region> regions;    // connected components, indexed by Run::id
 
-    // Free runs per row, joined to the runs they overlap in the row below by a union-find:
-    // O(rows * (row words + runs)).
+    // Free runs per row, joined to the runs they overlap in the row below by a union-find.
     Pockets(const Board &b, const Rect &bb) : y_range(bb)
     {
         std::vector<int> parent;
@@ -587,7 +578,6 @@ struct Plate
 {
     int              index = 0;
     int              group = -1; // compat group of the parts on it: -1 while none, Mixed for several
-    bool             locked = false;
     Board            board;
     Rect             bbox;   // of the parts placed by this run
     std::vector<int> placed; // part indices
@@ -599,14 +589,7 @@ struct Hit
     double score = NoScore;
     double dist  = 0.; // squared distance from the shape's centre to the anchor, cells
     int    y = 0, x = 0;
-    bool   better_than(const Hit &o) const
-    {
-        if (score != o.score)
-            return score < o.score;
-        if (dist != o.dist)
-            return dist < o.dist;
-        return y < o.y || (y == o.y && x < o.x);
-    }
+    bool   better_than(const Hit &o) const { return std::tie(score, dist, y, x) < std::tie(o.score, o.dist, o.y, o.x); }
 };
 
 struct Pass
@@ -617,7 +600,6 @@ struct Pass
     std::vector<int>   fill;      // parts placed by this run per plate, without trailing empty plates
     double             cost = 0.; // per plate, bbox area times its parts' cell-weighted score multiplier,
                                   // plus the free area left in its pockets
-    bool               lattice = false; // copies were laid on a lattice
     bool               better_than(const Pass &o) const
     {
         if (unplaced != o.unplaced) return unplaced < o.unplaced;
@@ -654,27 +636,22 @@ class Arranger
 public:
     Arranger(const std::vector<Part> &parts, const std::vector<Obstacle> &obstacles, const Params &p)
         : m_parts(parts), m_obstacles(obstacles), m_p(p)
+        , m_parallel_for(p.parallel_for ? p.parallel_for : [](size_t n, const std::function<void(size_t)> &fn) { for (size_t i = 0; i < n; ++i) fn(i); })
     {
-        m_w = std::max(0, int(std::floor(p.bed_w / p.cell_mm + 1e-6)));
-        m_h = std::max(0, int(std::floor(p.bed_h / p.cell_mm + 1e-6)));
+        m_w = p.grid_cols();
+        m_h = p.grid_rows();
         m_centre = p.align_x >= 0.;
         m_anchor_x = m_centre ? std::clamp(p.align_x, 0., 1.) * m_w : 0.;
         m_anchor_y = m_centre ? std::clamp(p.align_y, 0., 1.) * m_h : 0.;
         m_lambda = ContactMM / p.cell_mm;
         m_shapes.resize(parts.size());
-        m_options.resize(parts.size());
-        for (size_t i = 0; i < parts.size(); ++i) {
-            for (const Candidate &c : parts[i].candidates)
+        for (size_t i = 0; i < parts.size(); ++i)
+            for (const Candidate &c : parts[i].candidates) {
                 m_shapes[i].emplace_back(make_shape(c.map, p.max_height, p.vertical_gap));
-            for (size_t c = 0; c < parts[i].candidates.size(); ++c)
-                m_options[i].push_back({&m_shapes[i][c], 1. + std::max(0., parts[i].candidates[c].penalty)});
-        }
+                m_shapes[i].back().factor = 1. + std::max(0., c.penalty);
+            }
         for (const Obstacle &o : obstacles)
             m_obstacle_plates = std::max(m_obstacle_plates, o.plate + 1);
-        if (p.parallel_for)
-            m_parallel_for = p.parallel_for;
-        else
-            m_parallel_for = [](size_t n, const std::function<void(size_t)> &fn) { for (size_t i = 0; i < n; ++i) fn(i); };
 
         // Copies: parts sharing a shape key and a compat group, two or more of them.
         std::map<std::pair<int, int>, std::vector<int>> copies;
@@ -698,16 +675,16 @@ public:
         // only fit pushed into opposite corners, so a pass grown from the min corner follows
         // when the others leave parts unplaced or need more than one plate. Equal results keep
         // the earlier pass.
-        struct Strategy { size_t order; int ordering; bool seeded, corner; };
+        struct Strategy { size_t order; bool seeded, corner; };
         std::vector<std::vector<int>> orders;
         std::vector<Strategy>         strategies;
         for (int k = 0; k < std::clamp(m_p.orderings, 1, 6); ++k)
             if (std::vector<int> o = order(k); std::find(orders.begin(), orders.end(), o) == orders.end())
-                orders.push_back(std::move(o)), strategies.push_back({orders.size() - 1, k, false, !m_centre});
+                orders.push_back(std::move(o)), strategies.push_back({orders.size() - 1, false, !m_centre});
         if (std::any_of(m_groups.begin(), m_groups.end(), [](const Group &g) { return !g.clusters.empty(); }))
-            strategies.push_back({0, 0, true, !m_centre});
+            strategies.push_back({0, true, !m_centre});
         if (m_centre)
-            strategies.push_back({0, 0, false, true});
+            strategies.push_back({0, false, true});
 
         Pass best;
         best.spots.resize(m_parts.size()); // all unplaced, should a stop come before any pass
@@ -730,7 +707,6 @@ public:
             align(plate, best.spots);
 
         std::vector<Placement> out(m_parts.size());
-        long                   cells = 0;
         for (size_t i = 0; i < m_parts.size(); ++i) {
             out[i].id = m_parts[i].id;
             const Spot &spot = best.spots[i];
@@ -743,28 +719,16 @@ public:
             out[i].y           = (spot.y - s.y0) * m_p.cell_mm - c.map.origin_y;
             out[i].rotation_z  = c.rotation_z;
             out[i].orientation = c.orientation;
-            cells += s.cells;
         }
         for (const Plate &plate : best.plates)
             for (int i : plate.placed)
                 out[i].plate = plate.index;
-        if (stats) {
-            stats->plates_used     = best.plates_used;
-            stats->unplaced        = best.unplaced;
-            stats->ordering_used   = best_strategy < 0 ? 0 : strategies[size_t(best_strategy)].ordering;
-            stats->lattice_used    = best.lattice;
-            stats->footprint_ratio = best.plates_used > 0 ? double(cells) / (double(m_w) * m_h * best.plates_used) : 0.;
-        }
+        if (stats)
+            *stats = {best.plates_used, best.unplaced};
         return out;
     }
 
 private:
-    struct Option
-    {
-        const Shape *shape  = nullptr;
-        double       factor = 1.; // score multiplier from the candidate penalty
-    };
-
     struct Group
     {
         std::vector<int>     parts;    // identical copies, input order
@@ -782,65 +746,78 @@ private:
         return -1;
     }
 
-    // Per group of copies: a cluster of one copy in each of its MaxLatticeCandidates candidates that
-    // fill their rect best (weighted by penalty), and one of the tightest pair of such a candidate
-    // with itself or its half turn, each with its densest lattice. Candidates are tasks reduced in
-    // task order, so the result does not depend on scheduling. Cost per group with clusters of
-    // W x H cells: at most 2 * MaxLatticeCandidates raster no-fit sets plus MaxLatticeCandidates + 1
-    // lattice searches (see find_lattice), whatever the number of candidates.
+    // Candidates of group g that lattices are built from: the MaxLatticeCandidates usable ones that
+    // fill their rect best (weighted by penalty), one per distinct shape, in candidate order, which
+    // breaks ties between equally dense lattices.
+    std::vector<int> lattice_candidates(const Group &g) const
+    {
+        const std::vector<Shape> &ss = m_shapes[size_t(g.parts.front())];
+        std::vector<int>          cs;
+        for (size_t c = 0; c < ss.size(); ++c)
+            if (ss[c].usable)
+                cs.push_back(int(c));
+        auto fill = [&](int c) { const Shape &s = ss[size_t(c)]; return s.cells / (double(s.w) * s.h * s.factor); };
+        std::stable_sort(cs.begin(), cs.end(), [&](int a, int b) { return fill(a) > fill(b); });
+        // A symmetric part repeats its shape at several angles; one of them is enough.
+        std::vector<int> picked;
+        for (int c : cs)
+            if (picked.size() < MaxLatticeCandidates && std::none_of(picked.begin(), picked.end(), [&](int p) {
+                    const Shape &a = ss[size_t(p)], &b = ss[size_t(c)];
+                    return a.w == b.w && a.h == b.h && a.bits == b.bits && a.factor == b.factor;
+                }))
+                picked.push_back(c);
+        std::sort(picked.begin(), picked.end());
+        return picked;
+    }
+
+    // Per group of copies: a cluster of one copy in each of its lattice candidates, and one of the
+    // tightest pair of such a candidate with itself or its half turn, each with its densest lattice.
+    // Candidates are tasks reduced in task order, so the result does not depend on scheduling.
     void build_clusters()
     {
         struct Task { size_t g; int c; };
         std::vector<Task> tasks;
-        for (size_t g = 0; g < m_groups.size(); ++g) {
-            const int                  i  = m_groups[g].parts.front();
-            const std::vector<Option> &os = m_options[size_t(i)];
-            std::vector<int>           cs;
-            for (size_t c = 0; c < os.size(); ++c)
-                if (os[c].shape->usable)
-                    cs.push_back(int(c));
-            auto fill = [&](int c) { const Shape &s = *os[size_t(c)].shape; return s.cells / (double(s.w) * s.h * os[size_t(c)].factor); };
-            std::stable_sort(cs.begin(), cs.end(), [&](int a, int b) { return fill(a) > fill(b); });
-            // A symmetric part repeats its shape at several angles; one of them is enough.
-            std::vector<int> picked;
-            for (int c : cs)
-                if (picked.size() < MaxLatticeCandidates && std::none_of(picked.begin(), picked.end(), [&](int p) {
-                        const Shape &a = *os[size_t(p)].shape, &b = *os[size_t(c)].shape;
-                        return a.w == b.w && a.h == b.h && a.bits == b.bits && os[size_t(p)].factor == os[size_t(c)].factor;
-                    }))
-                    picked.push_back(c);
-            // In candidate order, which breaks ties between equally dense lattices.
-            std::sort(picked.begin(), picked.end());
-            for (int c : picked)
+        for (size_t g = 0; g < m_groups.size(); ++g)
+            for (int c : lattice_candidates(m_groups[g]))
                 tasks.push_back({g, c});
-        }
         std::vector<Cluster> singles(tasks.size());
         std::vector<PairFit> pairs(tasks.size());
         m_parallel_for(tasks.size(), [&](size_t t) {
             if (stopped())
                 return;
-            const int                  i  = m_groups[tasks[t].g].parts.front(), c = tasks[t].c;
-            const std::vector<Option> &os = m_options[size_t(i)];
-            const Shape               &s  = *os[size_t(c)].shape;
+            const int                 i  = m_groups[tasks[t].g].parts.front(), c = tasks[t].c;
+            const std::vector<Shape> &ss = m_shapes[size_t(i)];
+            const Shape              &s  = ss[size_t(c)];
             singles[t].members = {{c, 0, 0}};
             singles[t].shape   = s;
-            singles[t].factor  = os[size_t(c)].factor;
             const Runs    r    = runs_of(s);
             const Offsets self = collisions(r, s.w, r, s.w);
             find_lattice(singles[t], self);
-            best_pair(s, r, c, s, r, c, self, os[size_t(c)].factor, pairs[t]);
+            best_pair(s, r, c, s, r, c, self, pairs[t]);
             if (const int h = half_turn(i, c); h >= 0) {
-                const Shape &sh = *os[size_t(h)].shape;
+                const Shape &sh = ss[size_t(h)];
                 const Runs   rh = runs_of(sh);
-                best_pair(s, r, c, sh, rh, h, collisions(r, s.w, rh, sh.w), 0.5 * (os[size_t(c)].factor + os[size_t(h)].factor), pairs[t]);
+                best_pair(s, r, c, sh, rh, h, collisions(r, s.w, rh, sh.w), pairs[t]);
             }
         });
         std::vector<PairFit> best_pairs(m_groups.size());
         for (size_t t = 0; t < tasks.size(); ++t) {
-            if (singles[t].det > 0)
-                m_groups[tasks[t].g].clusters.push_back(std::move(singles[t]));
             if (pairs[t].ca >= 0 && pairs[t].better_than(best_pairs[tasks[t].g]))
                 best_pairs[tasks[t].g] = pairs[t];
+            if (singles[t].det <= 0)
+                continue;
+            // The densest lattice need not hold the most copies on a finite bed (discs: hexagonal
+            // rows of 3, 2, 3 where a square grid takes 3 by 3), so the grid of tight rects is
+            // offered too; pick_lattice() takes it only where it holds more.
+            const Shape &s = singles[t].shape;
+            if (singles[t].det < (long long) s.w * s.h) {
+                Cluster grid;
+                grid.members = singles[t].members;
+                grid.shape   = s;
+                grid.v1 = {s.w, 0}, grid.v2 = {0, s.h}, grid.det = (long long) s.w * s.h;
+                m_groups[tasks[t].g].clusters.push_back(std::move(grid));
+            }
+            m_groups[tasks[t].g].clusters.push_back(std::move(singles[t]));
         }
         std::vector<Cluster> pair_clusters(m_groups.size());
         m_parallel_for(m_groups.size(), [&](size_t g) {
@@ -853,7 +830,7 @@ private:
                 cs.push_back(std::move(pair_clusters[g]));
             // Densest per copy first, a penalised pose's lattice counting as that much less dense.
             std::stable_sort(cs.begin(), cs.end(), [](const Cluster &a, const Cluster &b) {
-                return double(a.det) * a.factor * double(b.members.size()) < double(b.det) * b.factor * double(a.members.size());
+                return double(a.det) * a.shape.factor * double(b.members.size()) < double(b.det) * b.shape.factor * double(a.members.size());
             });
         }
     }
@@ -874,8 +851,8 @@ private:
                     if (const Span &c = s.map->at(s.x0 + x, s.y0 + y); !c.empty())
                         k.map->at(m.dx + x, m.dy + y) = c; // the members share no cell
         }
-        k.shape  = make_shape(*k.map, m_p.max_height, m_p.vertical_gap);
-        k.factor = 0.5 * (m_options[size_t(i)][size_t(fit.ca)].factor + m_options[size_t(i)][size_t(fit.cb)].factor);
+        k.shape        = make_shape(*k.map, m_p.max_height, m_p.vertical_gap);
+        k.shape.factor = 0.5 * (a.factor + b.factor);
         const Runs r = runs_of(k.shape);
         find_lattice(k, collisions(r, k.shape.w, r, k.shape.w));
     }
@@ -917,11 +894,12 @@ private:
     // Bed mask and obstacles of plate `index`.
     Board fixed_board(int index) const
     {
-        Board b(m_w, m_h, m_p.allow_stacking, m_p.vertical_gap);
+        const Span full{std::numeric_limits<float>::lowest(), std::numeric_limits<float>::max()};
+        Board      b(m_w, m_h, m_p.allow_stacking, m_p.vertical_gap);
         for (int y = 0; y < m_h; ++y)
             for (int x = 0; x < m_w; ++x)
                 if (size_t i = size_t(y) * m_w + x; i < m_p.bed_mask.size() && m_p.bed_mask[i])
-                    b.add(x, y, FullSpan);
+                    b.add(x, y, full);
         const double eps = 1e-6;
         for (const Obstacle &o : m_obstacles) {
             if (o.plate != index && o.plate >= 0)
@@ -950,44 +928,45 @@ private:
     // plates in play, and most of them never receive a part.
     Plate make_plate(int index) const
     {
-        bool locked = std::find(m_p.locked_plates.begin(), m_p.locked_plates.end(), index) != m_p.locked_plates.end();
-        int  group  = -1;
+        int group = -1;
         for (const Obstacle &o : m_obstacles)
             if (o.plate == index && o.group >= 0)
                 group = group == -1 || group == o.group ? o.group : Mixed;
-        return Plate{index, group, locked, Board(0, 0), {}, {}};
+        return Plate{index, group, Board(0, 0), {}, {}};
     }
 
     void open(Plate &plate) const
     {
-        if (!plate.locked && plate.board.w != m_w)
+        if (plate.board.w != m_w)
             plate.board = fixed_board(plate.index);
     }
 
-    // Best position on `plate` over `options`. The score is an area times the option's factor (a 0.1
-    // penalty competes as if the area were 10% larger), minus ContactMM per mm of the shape's
-    // outline that touches occupied cells or the bed edge. The area is that of the bounding box of
-    // this run's parts on the plate and this one, which lets the pile grow lopsided where that is
-    // more compact; with `centred` it is that of the smallest anchor-centred rectangle holding them,
-    // which places a lattice's cluster on the anchor (see seed()). Contact decides between positions
-    // of equal area, which is where parts interlock. Ties go to the position nearest the anchor,
-    // then the lowest y, x and option.
-    // Contact is at most the halo size, and at most the occupied cells around the shape's rect
-    // (read in O(1) from the summed-area table) plus its wall contact. Rows and positions whose
-    // score cannot reach the best even with that much contact are skipped before the collision
-    // test, and a position with nothing around it needs neither test. The area is a product of
-    // one convex term per axis (see axis_term()), so rows and columns are visited outward from
-    // where their term is smallest, so that good scores are found early, and each side stops once
-    // no position further out can win. Options and row bands are independent tasks reduced in task
-    // order, so the result does not depend on scheduling.
-    std::pair<int, Hit> search(const std::vector<Option> &options, const Plate &plate, bool centred) const
+    // Candidate shapes of part i, the options search() and pocket_search() choose from.
+    std::vector<const Shape *> shapes_of(int i) const
+    {
+        std::vector<const Shape *> out;
+        for (const Shape &s : m_shapes[size_t(i)])
+            out.push_back(&s);
+        return out;
+    }
+
+    // Best position on `plate` over `shapes`: the area of the bounding box of this run's parts on
+    // the plate and this one, times the shape's factor, minus ContactMM per mm of its outline that
+    // touches occupied cells or the bed edge; with `centred`, the area of the smallest
+    // anchor-centred rectangle holding them instead. Ties go to the position nearest the anchor,
+    // then the lowest y, x and shape. Contact is at most the halo size and at most the occupied
+    // cells around the shape's rect plus its wall contact, and each axis term of the area is convex
+    // (see axis_term()), so rows and columns are visited outward from their best position and a
+    // side stops once nothing further out can win; that pruning never changes the result. Shapes
+    // and row bands are tasks reduced in task order, so the result does not depend on scheduling.
+    std::pair<int, Hit> search(const std::vector<const Shape *> &shapes, const Plate &plate, bool centred) const
     {
         const int        n_bands = std::clamp(m_h / 32, 1, 8);
-        std::vector<Hit> hits(options.size() * n_bands);
+        std::vector<Hit> hits(shapes.size() * n_bands);
         std::atomic<double> shared{NoScore}; // best score any task has found; prunes all of them
         m_parallel_for(hits.size(), [&](size_t task) {
-            const Shape &s    = *options[task / n_bands].shape;
-            const double f    = options[task / n_bands].factor;
+            const Shape &s    = *shapes[task / n_bands];
+            const double f    = s.factor;
             const int    band = int(task % n_bands);
             // Without stacking every cell of the shape needs a free bed cell.
             if (!s.usable || s.w > m_w || s.h > m_h || (!m_p.allow_stacking && s.cells > m_w * m_h - plate.board.filled))
@@ -1057,19 +1036,14 @@ private:
         return {best < 0 ? -1 : best / n_bands, best < 0 ? Hit{} : hits[best]};
     }
 
-    // Best position over `options` inside a pocket of `plate` (see Pockets), or -1. The score is the
-    // pocket's area, scaled by the option's factor as in search(), plus the cells the option claims:
-    // the part goes to the smallest pocket that holds it (best fit), in the pose that claims the
-    // least space, nearest the pocket's min corner, which fills a pocket from one side and leaves
-    // its free space in one piece. Contact plays no part: the staircase edge of a part turned 45
-    // degrees touches more cells than a straight one, which would turn small parts askew in round
-    // holes, where fewer of them fit. A pocket placement never grows the pile, so it is tried before
-    // search(). Positions are scanned row by row from the pocket's min corner, and the scan of a
-    // pocket stops once its distance from that corner exceeds that of a fit as good, so in a large
-    // pocket only the positions nearer its corner than the first fit are tested. Cost: per option,
-    // a collision test at most at every position of the pockets' boxes, which lie inside the
-    // plate's bounding box.
-    std::pair<int, Hit> pocket_search(const std::vector<Option> &options, Plate &plate) const
+    // Best position over `shapes` inside a pocket of `plate` (see Pockets), or -1. The score is the
+    // pocket's area, scaled by the shape's factor, plus the cells the shape claims: the part goes
+    // to the smallest pocket that holds it, in the pose that claims the least space, nearest the
+    // pocket's min corner, which leaves the pocket's free space in one piece. Contact plays no
+    // part: the staircase edge of a part turned 45 degrees touches more cells than a straight one,
+    // which would turn small parts askew in round holes, where fewer of them fit. A pocket is
+    // scanned from its min corner and stops once a position is farther from it than a fit as good.
+    std::pair<int, Hit> pocket_search(const std::vector<const Shape *> &shapes, Plate &plate) const
     {
         if (plate.bbox.empty())
             return {-1, Hit{}};
@@ -1080,12 +1054,12 @@ private:
             return !g.open && g.cells >= s.cells && g.box.x1 - g.box.x0 >= s.w && g.box.y1 - g.box.y0 >= s.h;
         };
         if (std::none_of(pk.regions.begin(), pk.regions.end(), [&](const Pockets::Region &g) {
-                return std::any_of(options.begin(), options.end(), [&](const Option &o) { return o.shape->usable && holds(g, *o.shape); });
+                return std::any_of(shapes.begin(), shapes.end(), [&](const Shape *s) { return s->usable && holds(g, *s); });
             }))
             return {-1, Hit{}};
-        std::vector<Hit> hits(options.size());
-        m_parallel_for(options.size(), [&](size_t o) {
-            const Shape &s = *options[o].shape;
+        std::vector<Hit> hits(shapes.size());
+        m_parallel_for(shapes.size(), [&](size_t o) {
+            const Shape &s = *shapes[o];
             if (!s.usable || stopped())
                 return;
             // The shape's first cell, in its bottom row: a connected shape lies in that cell's pocket.
@@ -1097,7 +1071,7 @@ private:
                 if (!holds(g, s))
                     continue;
                 const int    id    = int(&g - pk.regions.data());
-                const double score = g.cells * options[o].factor + s.cells;
+                const double score = g.cells * s.factor + s.cells;
                 if (score > best.score)
                     continue;
                 // The distance from the corner only grows along a row and from row to row.
@@ -1145,73 +1119,79 @@ private:
     {
         int n = 0;
         for_lattice_points(k.v1, k.v2, 1 - k.shape.w - ox, 1 - k.shape.h - oy, m_w - 1 - ox, m_h - 1 - oy, [&](long long x, long long y) {
-            for (const Cluster::Member &m : k.members) {
-                const Shape &s  = m_shapes[size_t(i)][size_t(m.cand)];
-                const int    sx = int(ox + x) + m.dx, sy = int(oy + y) + m.dy;
-                // A rect free of occupied cells, read from the summed-area table, needs no collision test.
-                n += sx >= 0 && sy >= 0 && sx + s.w <= m_w && sy + s.h <= m_h &&
-                     (plate.board.count(sx, sy, sx + s.w, sy + s.h) == 0 || plate.board.fits(s, sx, sy, m_p));
-            }
+            for (const Cluster::Member &m : k.members)
+                n += plate.board.fits_in_bed(m_shapes[size_t(i)][size_t(m.cand)], int(ox + x) + m.dx, int(oy + y) + m.dy, m_p);
             return n < cap;
         });
         return std::min(n, cap);
     }
 
-    // Seeds the copies of part i not placed yet, i first, on one of its group's cluster lattices.
-    // Each lattice passes through the position where its whole cluster scores best; the densest
-    // lattice that holds all copies there wins, a penalised pose's lattice counting as less dense
-    // by its factor, as in search(). When none does (the copies fill the plate), the cosets of
-    // every lattice are counted (up to MaxCosets of them) and the one holding the most copies wins:
-    // the lattice phase decides how much the bed edges cut off. The sites nearest the anchor, by the square rings the
-    // anchor-centred area grows in, take the copies; each copy goes where its own map fits, so
-    // sites cut by the bed edge, obstacles or earlier parts still take what fits there.
-    // Returns the number of copies placed. Cost: per cluster one search, plus, when the plate
-    // fills, min(det, MaxCosets) cosets of O(1 + bed / det) sites each: at most O(bed cells *
-    // members) collision tests.
-    int seed(int i, const Group &g, Plate &plate, Pass &pass, const std::vector<int> &rank) const
+    // Where to lay a group's lattice on `plate` for `cap` copies of part i. Each cluster's lattice is
+    // tried through the position where the whole cluster scores best (see search() with
+    // `centred`), densest first; when that does not hold all copies (the copies fill the plate, or
+    // the centred site leaves too little room around it), its cosets, up to MaxCosets of them, are
+    // counted, as the lattice phase decides how much the bed edges cut off. Of the sites that hold
+    // all copies, the one whose copies leave the pile the smallest rectangle wins, the densest
+    // cluster and then the earliest tried on a tie: on a finite bed a less dense lattice can lay
+    // the copies more compactly. Failing that, the site holding the most copies wins.
+    struct LatticeSite
     {
-        std::vector<int> todo;
-        for (int j : g.parts)
-            if (pass.spots[size_t(j)].cand < 0 && rank[size_t(j)] >= rank[size_t(i)])
-                todo.push_back(j);
-        std::sort(todo.begin(), todo.end(), [&](int a, int b) { return rank[size_t(a)] < rank[size_t(b)]; });
-        const int cap = int(todo.size());
-
-        const Cluster *best = nullptr;
-        long long      bx = 0, by = 0;
-        int            room = 0;
+        const Cluster *cluster = nullptr;
+        long long      x = 0, y = 0; // a lattice point, bed cells
+    };
+    LatticeSite pick_lattice(int i, const Group &g, const Plate &plate, int cap) const
+    {
+        LatticeSite best;
+        int         room = 0;
+        long        area = 0; // of the pile with best's copies, once best holds them all
+        auto offer = [&](const LatticeSite &site, int n, long a) {
+            if (n == cap ? room < cap || a < area : n > room)
+                best = site, room = n, area = a;
+        };
         for (const Cluster &k : g.clusters) {
-            const auto [o, at] = search({{&k.shape, k.factor}}, plate, true);
+            const auto [o, at] = search({&k.shape}, plate, true);
             if (o < 0)
                 continue;
-            if (int n = lattice_room(i, k, plate, at.x, at.y, cap); n > room)
-                best = &k, bx = at.x, by = at.y, room = n;
-            if (room == cap)
-                break;
+            const LatticeSite site{&k, at.x, at.y};
+            const int         n = lattice_room(i, k, plate, at.x, at.y, cap);
+            offer(site, n, n == cap ? pile_area(i, site, plate, cap) : 0);
+            if (n == cap)
+                continue;
             const std::pair<long long, long long> box = coset_box(k.v1, k.v2);
-            const long long                       a   = box.first;
+            const long long                       a = box.first, c = box.second;
             // Large clusters have more cosets than are worth counting; neighbouring ones fit
             // about as many copies, so every stride-th one stands in for its neighbours.
-            const long long stride = (a * box.second + MaxCosets - 1) / MaxCosets;
-            std::vector<int> counts(size_t((a * box.second + stride - 1) / stride));
+            const long long   stride = (a * c + MaxCosets - 1) / MaxCosets;
+            std::vector<int>  counts(size_t((a * c + stride - 1) / stride));
+            std::vector<long> areas(counts.size());
+            auto coset = [&](size_t t) { return LatticeSite{&k, (long long) t * stride % a, (long long) t * stride / a}; };
             m_parallel_for(counts.size(), [&](size_t t) {
-                if (!stopped())
-                    counts[t] = lattice_room(i, k, plate, (long long) t * stride % a, (long long) t * stride / a, cap);
+                if (stopped())
+                    return;
+                const LatticeSite at = coset(t);
+                counts[t]            = lattice_room(i, k, plate, at.x, at.y, cap);
+                if (counts[t] == cap)
+                    areas[t] = pile_area(i, at, plate, cap);
             });
             for (size_t t = 0; t < counts.size(); ++t)
-                if (counts[t] > room)
-                    best = &k, bx = (long long) t * stride % a, by = (long long) t * stride / a, room = counts[t];
-            if (room == cap)
-                break;
+                offer(coset(t), counts[t], areas[t]);
         }
-        if (best == nullptr)
-            return 0;
+        return best;
+    }
 
+    // Lays up to `cap` copies of part i on the lattice sites of `at` nearest the anchor, by the
+    // square rings the anchor-centred area grows in, calling lay(cand, x, y) for each. Each copy
+    // goes where its own map fits, so sites cut by the bed edge, obstacles or earlier parts still
+    // take what fits there. Sites never collide, so a copy fits whether or not the ones before it
+    // were placed. Returns the copies laid.
+    template<class Lay> int lay_sites(int i, const LatticeSite &at, int cap, const Plate &plate, Lay lay) const
+    {
+        const Cluster &k = *at.cluster;
         struct Site { double ring, dist; int y, x; };
         std::vector<Site> sites;
-        const int         W = best->shape.w, H = best->shape.h;
-        for_lattice_points(best->v1, best->v2, 1 - W - bx, 1 - H - by, m_w - 1 - bx, m_h - 1 - by, [&](long long dx, long long dy) {
-            const int    x = int(bx + dx), y = int(by + dy);
+        const int         W = k.shape.w, H = k.shape.h;
+        for_lattice_points(k.v1, k.v2, 1 - W - at.x, 1 - H - at.y, m_w - 1 - at.x, m_h - 1 - at.y, [&](long long dx, long long dy) {
+            const int    x = int(at.x + dx), y = int(at.y + dy);
             const double cx = x + 0.5 * W - m_ax, cy = y + 0.5 * H - m_ay;
             sites.push_back({std::max(half(m_ax, x, x + W), half(m_ay, y, y + H)), cx * cx + cy * cy, y, x});
             return true;
@@ -1219,18 +1199,45 @@ private:
         std::sort(sites.begin(), sites.end(), [](const Site &a, const Site &b) {
             return std::tie(a.ring, a.dist, a.y, a.x) < std::tie(b.ring, b.dist, b.y, b.x);
         });
-        size_t next = 0;
+        int n = 0;
         for (const Site &site : sites)
-            for (const Cluster::Member &m : best->members) {
-                if (next == todo.size())
-                    break;
-                const Shape &s = m_shapes[size_t(todo[next])][size_t(m.cand)];
+            for (const Cluster::Member &m : k.members) {
+                if (n == cap)
+                    return n;
+                const Shape &s = m_shapes[size_t(i)][size_t(m.cand)];
                 const int    x = site.x + m.dx, y = site.y + m.dy;
                 if (x >= 0 && y >= 0 && x + s.w <= m_w && y + s.h <= m_h && plate.board.fits(s, x, y, m_p))
-                    place(todo[next++], m.cand, x, y, plate, pass);
+                    lay(m.cand, x, y), ++n;
             }
-        pass.lattice |= next > 1;
-        return int(next);
+        return n;
+    }
+
+    // Area of the plate's pile once `cap` copies of part i are laid at `at`, in cells.
+    long pile_area(int i, const LatticeSite &at, const Plate &plate, int cap) const
+    {
+        Rect bb = plate.bbox;
+        lay_sites(i, at, cap, plate, [&](int cand, int x, int y) {
+            const Shape &s = m_shapes[size_t(i)][size_t(cand)];
+            bb             = bb.united({x, y, x + s.w, y + s.h});
+        });
+        return bb.area();
+    }
+
+    // Seeds the copies of part i not placed yet, i first, on one of its group's cluster lattices.
+    // Returns the number of copies placed.
+    int seed(int i, const Group &g, Plate &plate, Pass &pass, const std::vector<int> &rank) const
+    {
+        std::vector<int> todo;
+        for (int j : g.parts)
+            if (pass.spots[size_t(j)].cand < 0 && rank[size_t(j)] >= rank[size_t(i)])
+                todo.push_back(j);
+        std::sort(todo.begin(), todo.end(), [&](int a, int b) { return rank[size_t(a)] < rank[size_t(b)]; });
+        const LatticeSite at = pick_lattice(i, g, plate, int(todo.size()));
+        if (!at.cluster)
+            return 0;
+        // Copies of one group share their shapes, so part i's stand in for each copy's.
+        size_t next = 0;
+        return lay_sites(i, at, int(todo.size()), plate, [&](int cand, int x, int y) { place(todo[next++], cand, x, y, plate, pass); });
     }
 
     // Polls the caller's stop request from any thread; once seen, it stays set.
@@ -1241,10 +1248,7 @@ private:
         return m_stopped;
     }
 
-    bool accepts(const Plate &plate, int i) const
-    {
-        return !plate.locked && (m_p.mix_groups || plate.group == -1 || plate.group == m_parts[i].compat_group);
-    }
+    bool accepts(const Plate &plate, int i) const { return plate.group == -1 || plate.group == m_parts[i].compat_group; }
 
     // First-fit greedy over `order`: the first open plate with room wins, else a new plate. With
     // seeding, the first copy of a group to reach a plate lays the group's lattice there. A part
@@ -1270,7 +1274,7 @@ private:
             if (g >= 0 && seeding && seeded.insert({g, plate.index}).second && seed(i, m_groups[size_t(g)], plate, pass, rank) > 0)
                 return true;
             for (bool pocket : {true, false})
-                if (auto [cand, hit] = pocket ? pocket_search(m_options[size_t(i)], plate) : search(m_options[size_t(i)], plate, false); cand >= 0) {
+                if (auto [cand, hit] = pocket ? pocket_search(shapes_of(i), plate) : search(shapes_of(i), plate, false); cand >= 0) {
                     place(i, cand, hit.x, hit.y, plate, pass);
                     return true;
                 }
@@ -1284,16 +1288,11 @@ private:
             bool placed = pass.spots[size_t(i)].cand >= 0; // seeded with an earlier copy
             for (size_t k = 0; k < pass.plates.size() && !placed; ++k)
                 placed = accepts(pass.plates[k], i) && try_plate(i, pass.plates[k]);
-            while (!placed && int(pass.plates.size()) < m_p.max_plates) {
-                Plate plate = make_plate(int(pass.plates.size()));
-                if (plate.locked) {
-                    pass.plates.emplace_back(std::move(plate));
-                    continue;
-                }
+            if (!placed && int(pass.plates.size()) < m_p.max_plates) {
                 // Keep the new plate only if the part fits on it.
+                Plate plate = make_plate(int(pass.plates.size()));
                 if ((placed = try_plate(i, plate)))
                     pass.plates.emplace_back(std::move(plate));
-                break;
             }
             if (m_p.progress)
                 m_p.progress(++done, total);
@@ -1304,8 +1303,8 @@ private:
             long   cells = 0;
             double weighted = 0.;
             for (int i : plate.placed) {
-                const int n = m_shapes[size_t(i)][size_t(pass.spots[size_t(i)].cand)].cells;
-                cells += n, weighted += n * m_options[size_t(i)][size_t(pass.spots[size_t(i)].cand)].factor;
+                const Shape &s = m_shapes[size_t(i)][size_t(pass.spots[size_t(i)].cand)];
+                cells += s.cells, weighted += s.cells * s.factor;
             }
             pass.fill.push_back(int(plate.placed.size()));
             // Free area left in pockets is inside the bounding box already and counts once more as
@@ -1321,8 +1320,7 @@ private:
 
     // Moves the plate's placed parts as one group so their bbox centres on the anchor, halving
     // the shift until it clears the bed mask and obstacles. Growth from the anchor leaves little
-    // asymmetry to remove; this mostly centres the corner-grown pass. Legacy mode (align_x < 0)
-    // keeps the corner packing.
+    // asymmetry to remove; this mostly centres the corner-grown pass.
     void align(Plate &plate, std::vector<Spot> &spots) const
     {
         if (plate.placed.empty() || !m_centre)
@@ -1347,9 +1345,9 @@ private:
     const std::vector<Part>                 &m_parts;
     const std::vector<Obstacle>             &m_obstacles;
     const Params                            &m_p;
+    std::function<void(size_t, const std::function<void(size_t)> &)> m_parallel_for;
     std::vector<std::vector<Shape>>          m_shapes;  // per part, per candidate
-    std::vector<std::vector<Option>>         m_options; // per part, per candidate
-    std::vector<Group>                       m_groups;  // never resized after construction: pair shapes point into it
+    std::vector<Group>                       m_groups;
     std::vector<int>                         m_group;   // per part: index into m_groups, -1 when unique
     int                                      m_w = 0, m_h = 0;
     bool                                     m_centre = true;              // grow from the anchor, else the min corner
@@ -1358,7 +1356,6 @@ private:
     double                                   m_lambda = 0.;        // scored cells^2 per contact cell
     int                                      m_obstacle_plates = 0;
     mutable std::atomic<bool>                m_stopped{false};
-    std::function<void(size_t, const std::function<void(size_t)> &)> m_parallel_for;
 };
 
 } // namespace
@@ -1408,12 +1405,20 @@ HeightMap rasterize(const std::vector<Triangle> &tris, double cell_mm, double in
         auto [ly, hy] = std::minmax({tri[0].y, tri[1].y, tri[2].y});
         int x0 = std::clamp(int(std::floor(lx)), 0, m.width - 1), x1 = std::clamp(int(std::floor(hx)), 0, m.width - 1);
         int y0 = std::clamp(int(std::floor(ly)), 0, m.height - 1), y1 = std::clamp(int(std::floor(hy)), 0, m.height - 1);
-        for (int cy = y0; cy <= y1; ++cy)
-            for (int cx = x0; cx <= x1; ++cx) {
+        // Clip to each column once and visit only the rows its piece reaches, down to the row whose
+        // top border it touches: a sliver such as one triangle of a cap's fan would otherwise cost
+        // its whole bounding box.
+        for (int cx = x0; cx <= x1; ++cx) {
+            ClipPoly col, tmp;
+            int nc = clip(tri, 3, tmp, false, cx, 1.);
+            nc = clip(tmp, nc, col, false, cx + 1, -1.);
+            if (nc == 0)
+                continue;
+            auto [lo, hi] = std::minmax_element(col.begin(), col.begin() + nc, [](const ClipPoint &p, const ClipPoint &q) { return p.y < q.y; });
+            const int r0 = std::clamp(int(std::ceil(lo->y)) - 1, y0, y1), r1 = std::clamp(int(std::floor(hi->y)), y0, y1);
+            for (int cy = r0; cy <= r1; ++cy) {
                 ClipPoly a, b;
-                int n = clip(tri, 3, a, false, cx, 1.);
-                n = clip(a, n, b, false, cx + 1, -1.);
-                n = clip(b, n, a, true, cy, 1.);
+                int n = clip(col, nc, a, true, cy, 1.);
                 n = clip(a, n, b, true, cy + 1, -1.);
                 if (n == 0)
                     continue;
@@ -1438,6 +1443,7 @@ HeightMap rasterize(const std::vector<Triangle> &tris, double cell_mm, double in
                     }
                 }
             }
+        }
     }
     if (grow > 0.) {
         // Every cell closer than `grow` to the octagon of an occupied cell takes that cell's span.
@@ -1450,8 +1456,8 @@ HeightMap rasterize(const std::vector<Triangle> &tris, double cell_mm, double in
         // farther than `grow` from it are not, whatever the octagon, so only the ring between needs
         // the octagon test; a target whose span already holds the source's needs nothing. A cell
         // whose 8 neighbours hold its span and are filled by geometry claims nothing they do not:
-        // every target beyond them is nearer to one of them by at least a cell. So only cells near
-        // the outline grow, for O(cells + outline cells * grow^2).
+        // every target beyond them is nearer to one of them by at least a cell, so only cells near
+        // the outline grow.
         struct Offset { int dx, dy; bool always; };
         std::vector<Offset> offsets;
         const int           r = int(std::ceil(grow));
@@ -1508,60 +1514,12 @@ HeightMap rasterize(const std::vector<Triangle> &tris, double cell_mm, double in
     return m;
 }
 
-HeightMap dilate(const HeightMap &m, double radius_mm, double bottom_only_radius_mm, double bottom_only_mm)
-{
-    // Offsets of the cells that come closer than `radius_mm` to a cell, measured between
-    // the nearest points of the two squares: geometry may reach a cell's edge, so this is
-    // the smallest disc that still guarantees the clearance.
-    auto disc = [&](double radius) {
-        std::vector<std::pair<int, int>> d;
-        const double r_cells = radius / m.cell_mm;
-        const int    r       = std::max(0, int(std::ceil(r_cells - 1e-9)));
-        for (int dy = -r; dy <= r; ++dy)
-            for (int dx = -r; dx <= r; ++dx) {
-                const int gx = std::max(std::abs(dx) - 1, 0), gy = std::max(std::abs(dy) - 1, 0);
-                if ((dx == 0 && dy == 0) || gx * gx + gy * gy < r_cells * r_cells - 1e-9)
-                    d.emplace_back(dx, dy);
-            }
-        return std::make_pair(r, d);
-    };
-    auto [r_main, main_disc] = disc(radius_mm);
-    auto [r_bottom, bottom_disc] = disc(bottom_only_mm > 0. ? bottom_only_radius_mm : 0.);
-    if (bottom_only_mm <= 0.)
-        r_bottom = 0, bottom_disc.clear();
-    const int g = std::max(r_main, r_bottom);
-
-    HeightMap out(m.width + 2 * g, m.height + 2 * g, m.cell_mm);
-    out.origin_x = m.origin_x - g * m.cell_mm;
-    out.origin_y = m.origin_y - g * m.cell_mm;
-    for (int y = 0; y < m.height; ++y)
-        for (int x = 0; x < m.width; ++x) {
-            const Span &s = m.at(x, y);
-            if (s.empty())
-                continue;
-            for (auto [dx, dy] : main_disc)
-                out.at(x + g + dx, y + g + dy).add(s.lo, s.hi);
-            // Brim-like growth starts from the first-layer footprint only.
-            if (s.lo <= bottom_only_mm)
-                for (auto [dx, dy] : bottom_disc)
-                    out.at(x + g + dx, y + g + dy).add(0.f, float(bottom_only_mm));
-        }
-    return out;
-}
-
 Effort effort_settings(int effort, double bed_w, double bed_h)
 {
     // Cells of 1 and 1/2 mm divide whole and half millimetres, so an axis-parallel edge at such a
-    // size and spacing falls on a cell boundary and keeps its spacing exactly (see rasterize());
-    // elsewhere a gap costs up to a cell more. On fill-the-bed sets with 1 mm spacing and sizes in
-    // whole millimetres, 0.6 and 0.43 mm cells place up to 10% and 6% fewer parts than 0.5 mm
-    // cells. With the sizes scaled off that grid (by 1.037 or 1.113), the parts turned 17 degrees,
-    // or both, 0.43, 0.5 and 0.6 mm cells place 74.8%, 74.6% and 72.8% of the area bound on
-    // average, so 0.5 mm cells lose little where sizes are arbitrary. Thorough tries more
-    // orderings on the same cells: 0.25 mm cells took 4 to 8 times as long for at most 4% more
-    // parts on fill-the-bed sets and 2% on mixed ones. Past MaxBedCells per side the cell grows
-    // with the bed, which bounds the cost of a scan: on a 510 mm bed, 0.71 mm cells place 2% to 5%
-    // fewer parts than 0.5 mm cells in 37% to 62% less time.
+    // size and spacing falls on a cell boundary and keeps its spacing exactly (see rasterize()).
+    // Thorough spends its extra time on orderings; finer cells cost far more for little gain. Past
+    // MaxBedCells per side the cell grows with the bed, which bounds the cost of a scan.
     constexpr double Cell[]      = {1., 0.5, 0.5};
     constexpr int    Orderings[] = {1, 3, 6};
     constexpr double MaxBedCells = 720.;
@@ -1569,26 +1527,6 @@ Effort effort_settings(int effort, double bed_w, double bed_h)
     return {std::max(Cell[effort], std::max(bed_w, bed_h) / MaxBedCells), Orderings[effort]};
 }
 
-std::vector<double> candidate_angles(double current, const std::vector<double> &offsets)
-{
-    // Angles this close count as equal, so ones a hair below a full turn wrap to 0.
-    constexpr double eps = 1e-9;
-    std::vector<double> out;
-    for (double offset : offsets) {
-        double a = std::fmod(current + offset, 2. * Pi);
-        a += a < 0. ? 2. * Pi : 0.;
-        out.push_back(a > 2. * Pi - eps ? 0. : a);
-    }
-    std::sort(out.begin(), out.end());
-    return out;
-}
-
-// Cost, with N parts, L open plates, C candidates per part, P grid positions per plate and A
-// cells per part map: every greedy pass is O(N * L * C * P * A / 64) (a position costs O(1) when
-// its score bound prunes it, else a bitset collision test and contact count), and there are at
-// most 6 orderings plus one lattice-seeded pass and one corner-grown pass. Lattices cost per
-// group of copies what build_clusters() states, independent of C. Polynomial throughout, with no
-// permutation or subset enumeration.
 std::vector<Placement> arrange(const std::vector<Part> &parts, const std::vector<Obstacle> &obstacles, const Params &params, Stats *stats)
 {
     return Arranger(parts, obstacles, params).run(stats);

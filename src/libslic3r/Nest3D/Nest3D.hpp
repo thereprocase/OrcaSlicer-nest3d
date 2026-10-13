@@ -1,29 +1,21 @@
 #pragma once
 
-// Nest3D: shape-true, height-aware auto-arrange.
+// Nest3D: shape-true, height-aware auto-arrange (see docs/HLSD/nest3d.md).
 //
-// Every part is described by a column grid ("height map"): one cell per
-// cell_mm x cell_mm square of the bed, holding the z-interval [lo, hi] that
-// the part (plus any support it generates) occupies above that square. Two
-// parts may share a cell only when their z-intervals are separated by at
-// least the vertical clearance. This lets parts nest into each other's
-// concavities and holes, and (when enabled) tuck short parts under
-// unsupported overhangs of taller ones.
+// Every part is a column grid ("height map"): one cell per cell_mm x cell_mm square of the bed,
+// holding the z-interval [lo, hi] that the part (plus any support it generates) occupies above
+// that square. Two parts may share a cell only when their z-intervals are at least
+// Params::vertical_gap apart.
 //
-// The placement search is greedy first-fit-decreasing over a constant number
-// of part orderings, with an exhaustive scan of grid positions per candidate.
-// A part goes into the smallest free region the pile already encloses that
-// holds it; otherwise the pile grows from an anchor point, keeping its
-// bounding box small and preferring positions where a part touches what is
-// already placed. Copies of one shape (Part::shape_key) are additionally tried
-// laid out on the densest lattice found for one copy or an interlocked pair.
-// Cost is polynomial (see docs/HLSD/nest3d.md); no step enumerates
-// permutations or subsets.
-//
-// This header is deliberately free of libslic3r types so the core can be
-// unit-tested without the rest of the slicer; Nest3DArrange.hpp adapts it to
-// ModelInstance / ArrangePolygon.
+// The engine uses no libslic3r types. Its core (the column rasterizer, raster no-fit sets,
+// lattice reduction and the bitset scans) has no libslic3r counterpart and runs on plain integer
+// grids, and what it duplicates is small: a bit count, pi, a two-field integer vector and a
+// rectangle. Policy that needs the model (poses, Z angles, spacing, copy keys) stays in
+// Nest3DArrange.hpp, which adapts the engine to ModelInstance / ArrangePolygon.
 
+#include <algorithm>
+#include <cmath>
+#include <cstddef>
 #include <cstdint>
 #include <functional>
 #include <limits>
@@ -86,7 +78,6 @@ struct Part
     std::vector<Candidate> candidates; // at least one
     double                 priority = 0.0; // higher is placed earlier, before size ordering
     int                    compat_group = 0; // parts in different groups never share a plate
-                                             // unless Params::mix_groups is set
     int                    shape_key = -1;   // parts with the same key >= 0 have identical candidates, in
                                              // the same order (copies of one object); -1: unique
 };
@@ -116,15 +107,13 @@ struct Params
     double max_height = std::numeric_limits<double>::max(); // printable height
     double vertical_gap = 2.0;  // min z separation for parts sharing a column
     bool   allow_stacking = false; // false: any occupied cell blocks the whole column
-    bool   mix_groups = true;
     int    orderings = 3;       // number of greedy part orderings to try (1..6)
     int    max_plates = 64;
     // Anchor the packing grows from, as a fraction of the bed; the group is finally centred on it.
     // align_x < 0 grows from the bed's min corner (bottom-left) without final alignment.
     double align_x = 0.5, align_y = 0.5;
-    std::vector<int> locked_plates;      // plates that accept no new parts
 
-    // Cells outside the printable bed shape, row-major bed_w/cell_mm columns.
+    // Cells outside the printable bed shape, row-major on the grid_cols() x grid_rows() bed grid.
     // Empty means the whole rectangle is printable.
     std::vector<uint8_t> bed_mask;
 
@@ -134,37 +123,44 @@ struct Params
     // Polled between parts and inside parallel tasks, so it must be thread-safe.
     std::function<bool()>                 should_stop;
     std::function<void(int done, int total)> progress;
+
+    // The bed grid: whole cells only, with a tolerance so a bed that is a multiple of the cell
+    // keeps its last one.
+    int grid_cols() const { return grid_cells(bed_w); }
+    int grid_rows() const { return grid_cells(bed_h); }
+
+private:
+    int grid_cells(double extent) const { return std::max(0, int(std::floor(extent / cell_mm + 1e-6))); }
+};
+
+// User-facing switches of the shape-true arranger, as the arrange dialog stores them. Values are
+// clamped where they are read in (app config, dialog); the adapter takes them as they are.
+struct ArrangeSettings
+{
+    static constexpr int MaxRotationSteps = 72;
+
+    bool  enabled         = false;
+    bool  allow_stacking  = false; // let short parts sit under unsupported overhangs
+    float vertical_gap_mm = 2.f;   // >= 0
+    bool  reorient        = false; // also try lay-flat orientations
+    int   rotation_steps  = 8;     // Z rotations tried when rotation is allowed, 1..MaxRotationSteps
+    int   effort          = 1;     // 0 fast, 1 balanced, 2 thorough
 };
 
 struct Stats
 {
-    int    plates_used = 0;
-    int    unplaced = 0;
-    double footprint_ratio = 0.0; // occupied bed area / bed area over used plates
-    int    ordering_used = 0;
-    bool   lattice_used = false; // the result lays copies of a shape on a lattice
+    int plates_used = 0;
+    int unplaced    = 0;
 };
 
-// Builds a height map from a closed or open triangle soup. The map covers the
-// XY bounding box of the triangles, expanded by `inflate_mm` on every side.
-// Every cell touched by a triangle receives that triangle's z-range within the
-// cell, and every cell closer than `inflate_mm` to the geometry inside such a
-// cell receives that cell's z-range, so parts grown by r1 and r2 whose maps
-// share no cell keep at least r1 + r2 apart. Distances are measured from the
-// extent of the geometry inside each cell along the axes and diagonals, so the
-// clearance is not rounded up to whole cells. When `fill_to_bed` is set (the
-// part prints with support), every non-empty column is extended down to z = 0.
+// Builds a height map from a closed or open triangle soup, covering its XY bounding box grown by
+// `inflate_mm` on every side. Every cell a triangle crosses takes the triangle's z-range within
+// the cell, and every cell closer than `inflate_mm` to the geometry inside such a cell takes that
+// cell's z-range, so parts grown by r1 and r2 whose maps share no cell keep at least r1 + r2
+// apart. Distances are measured from the extent of the geometry inside each cell along the axes
+// and diagonals, so the clearance is not rounded up to whole cells. With `fill_to_bed` (the part
+// prints with support) every non-empty column reaches down to z = 0.
 HeightMap rasterize(const std::vector<Triangle> &tris, double cell_mm, double inflate_mm, bool fill_to_bed);
-
-// Grows every non-empty column of a finished map by `radius_mm` in XY: each cell
-// that comes within the radius of a non-empty cell takes the union of their
-// z-spans. Measured between whole cells, so geometry anywhere inside a cell keeps
-// at least `radius_mm` of clearance, at the price of up to a cell more than
-// rasterize() grows. Brim-style growth only for the first layer is done with
-// `bottom_only_mm` > 0: cells within `bottom_only_radius_mm` of the first-layer
-// footprint receive [0, bottom_only_mm]. Vertical clearance is applied at
-// placement by Params::vertical_gap.
-HeightMap dilate(const HeightMap &m, double radius_mm, double bottom_only_radius_mm = 0.0, double bottom_only_mm = 0.0);
 
 // Grid and search settings of an effort level (0 fast, 1 balanced, 2 thorough) on a bed of
 // bed_w x bed_h mm.
@@ -174,11 +170,6 @@ struct Effort
     int    orderings = 3;
 };
 Effort effort_settings(int effort, double bed_w, double bed_h);
-
-// Z angles current + offset for every offset, normalised to [0, 2 pi) and sorted. Copies whose
-// current angles differ by a multiple of an evenly spaced offset list get the same angles in the
-// same order, so they can share a Part::shape_key.
-std::vector<double> candidate_angles(double current, const std::vector<double> &offsets);
 
 // Arranges `parts` around fixed `obstacles`. Returns one Placement per part,
 // in input order.

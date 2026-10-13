@@ -5,13 +5,16 @@
 The polygon arranger packs the 2D convex hull of every part, so a part never enters another
 part's hole, notch or concave side, and nothing ever sits under an overhang. Nest3D arranges
 parts by their real 3D shape instead. It runs in place of the polygon arranger when the user
-turns on "Nest by 3D shape" in the arrange options, and only for layer-by-layer printing on a
-flat bed. The option is off by default; with it off, arrange behaves exactly as before.
+turns on "Nest by 3D shape" in the arrange options, where it applies (see Gating). The option is
+off by default; with it off, the polygon arranger runs.
 
-The engine (`src/libslic3r/Nest3D/Nest3D.{hpp,cpp}`) depends only on the standard library and is
-unit tested on its own. The adapter (`Nest3DArrange.{hpp,cpp}`) turns `ArrangePolygon`s into engine
-parts and obstacles and writes the result back into the same fields the polygon arranger fills,
-so `ArrangeJob::finalize` and the plate bookkeeping work unchanged.
+The engine (`src/libslic3r/Nest3D/Nest3D.{hpp,cpp}`) uses no libslic3r types. Its core, the column
+rasterizer, raster no-fit sets, lattice reduction and the bitset scans, has no libslic3r
+counterpart and works on plain integer grids; what it duplicates is a bit count, pi, a two-field
+integer vector and a rectangle. Policy that needs the model (poses, Z angles, spacing, copy keys)
+belongs to the adapter (`Nest3DArrange.{hpp,cpp}`), which turns `ArrangePolygon`s into engine parts
+and obstacles and writes the result back into the same fields the polygon arranger fills, so
+`ArrangeJob::finalize` and the plate bookkeeping work unchanged.
 
 ## Model
 
@@ -50,10 +53,7 @@ interlock in plan view (one part in another's hole or notch) but never stack.
 A part may only be placed in empty space under another part, which by the model means under an
 overhang printed without support: supported parts fill their columns to the bed. The parts under
 it are shorter than the overhang by at least the vertical clearance (2 mm by default), so the
-nozzle and the fan duct pass over them while printing the overhang's first layers. Stacking is
-never used for by-object printing, where every object is finished before the next starts and
-the toolhead would sweep through the finished ones; the arrange job keeps the polygon arranger
-there.
+nozzle and the fan duct pass over them while printing the overhang's first layers.
 
 ## Candidates
 
@@ -68,8 +68,8 @@ Each part offers a constant number of candidate poses, each with its own height 
   (downward facets steeper than the object's support threshold angle, not counting those on the
   bed) is at most 10% above that of the current pose, and the increase is charged as a penalty.
 
-The pose is expressed like `ModelInstance::get_arrange_polygon`: the instance transform without
-its XY offset and Z angle. A placement's rotation and translation therefore mean what they mean
+The pose is the one `ModelInstance::get_arrange_polygon` uses, given by
+`ModelInstance::get_arrange_transformation`: the instance transform without its offset and Z angle. A placement's rotation and translation therefore mean what they mean
 for the polygon arranger. A lay-flat pose is stored as the instance's X and Y Euler angles plus
 the Z offset that puts it on the bed; the item's setter applies them after the usual move and Z
 rotation.
@@ -99,25 +99,19 @@ the plate limit, and is otherwise reported unplaced.
 - **Score.** Otherwise the pile grows from an anchor: the point the polygon arranger aligns its
   pile to (`best_object_pos`, the bed centre by default). A position scores the area of the
   bounding box of the pile plus the part, which lets the pile grow lopsided where that is more
-  compact, minus 16 mm^2 per mm of the part's outline that touches an occupied cell or the bed
-  edge. Many positions tie on area, and contact picks the one where the part nests against what
-  is there. Remaining ties go to the position nearest the anchor. A lay-flat pose with more
-  overhang scales the area by its penalty. Copies are scored like unique parts: growing each
-  group of copies evenly around the anchor instead left mixed piles 12% larger on median (on 24
-  random bags of rings, clips, stars, combs, brackets and pegs; up to 2.8 times on bags with few
-  parts) and placed no more copies on fill-the-bed sets, where the lattices below do the work.
-  The area is a product of one term per axis, convex in the position, which is what lets the
-  scan below stop early.
+  compact, minus a fixed area (`ContactMM`) per mm of the part's outline that touches an occupied
+  cell or the bed edge. Many positions tie on area, and contact picks the one where the part nests
+  against what is there. Remaining ties go to the position nearest the anchor. A lay-flat pose
+  with more overhang scales the area by its penalty. Copies are scored like unique parts; the
+  lattices below are what packs them densely. The area is a product of one term per axis, convex
+  in the position, which is what lets the scan below stop early.
 - **Order.** The size keys are the occupied cells, the height, the longer side, the volume, the
   sum of the sides and the bounding-box area. With "Nest under overhangs" on, the first key
   counts only the cells with no room under them (those whose column starts within the vertical
   clearance of the bed, a clearance of 0 included), so a part that leaves room below it (a
-  table) comes after the parts that could go there and can be placed over them. On 24 random
-  bags with stacking this changes 9 piles, each through a pass with this key: 8 come out 6% to
-  11% smaller and one 2% larger, 2.7% smaller on average over all 24. Ties on a pass's key fall
-  to the other keys, then the shape key and the id, so the order of the selection does not
-  matter: with input order breaking ties, shuffling the input of two mixed bags spread their
-  piles over 7% and 11%.
+  table) comes after the parts that could go there and can be placed over them. Ties on a pass's
+  key fall to the other keys, then the shape key and the id, so the order of the selection does
+  not change the result.
 - **Pruning.** Contact can lower a score by at most the part's outline length, and by at most the
   number of occupied cells around the part's rectangle, which a summed-area table of the plate
   gives in O(1). Positions that cannot beat the best score found so far are skipped before the
@@ -127,25 +121,33 @@ the plate limit, and is otherwise reported unplaced.
   the change in their cumulative count.
 - **Copies.** Instances of one object posed alike share a shape key (the same transform apart from
   the XY offset and Z angle, the same candidate Z angles and spacing), so their candidates are
-  identical. Each group of copies gets *clusters*: one copy in a candidate pose, and the tightest
-  pair, which is the touching offset of two copies with the smallest common bounding box, then the
-  most contact. Only the four candidates that fill their bounding rectangle best (scaled down by
-  their penalty) get clusters, and the pair is searched among each of them with itself and with
-  its half turn, so the cost stays the same whether a part has 4 or 432 candidates. The raster
-  no-fit set of a cluster against itself (every offset at which a translate collides) yields its
-  densest collision-free lattice. Basis vectors come from the offsets where a translate just
-  touches. A basis is accepted when no lattice vector within the cluster's size collides, and the
-  cluster's bounding-box lattice is the fallback. In the seeded pass, the first copy of a group to
-  reach a plate lays a lattice there. The lattice runs through the position where the whole
-  cluster scores best, scored by the smallest anchor-centred rectangle holding the pile and the
-  cluster, which puts the first cluster on the anchor so that no wall pins it where the lattice
-  cannot grow around it. Lattices are tried densest per copy first, a penalised pose's lattice
-  counting as less dense by its penalty, as in the score. When no lattice holds all copies that
-  way (the copies fill the plate), the cosets of every cluster's lattice are counted (at most
-  16384 of them, evenly spread, for very large clusters), and the one that fits the most copies
-  wins, because the lattice phase decides how much the bed edges cut off. A site whose rectangle
-  holds no occupied cell, read from the summed-area table, needs no collision test. Copies take
-  the sites nearest the anchor, and the normal search places any copies left over.
+  identical; they are rasterized once per key and shared.
+  - *Clusters.* Each group of copies gets clusters: one copy in a candidate pose, and the tightest
+    pair, which is the touching offset of two copies with the smallest common bounding box, then
+    the most contact. Only the four candidates that fill their bounding rectangle best (scaled
+    down by their penalty) get clusters, and the pair is searched among each of them with itself
+    and with its half turn, so the cost is independent of the candidate count.
+  - *Lattices.* The raster no-fit set of a cluster against itself (every offset at which a
+    translate collides) yields its densest collision-free lattice. Basis vectors come from the
+    offsets where a translate just touches. A basis is accepted when no lattice vector within the
+    cluster's size collides, and the cluster's bounding-box lattice is the fallback. A single
+    copy's bounding-box lattice is also offered on its own when it is less dense, because on a
+    finite bed the densest lattice can hold fewer copies: discs pack in hexagonal rows of 3, 2 and
+    3 where a square grid holds 3 by 3.
+  - *Seeding.* In the seeded pass, the first copy of a group to reach a plate lays a lattice
+    there. The lattice runs through the position where the whole cluster scores best, scored by
+    the smallest anchor-centred rectangle holding the pile and the cluster, which puts the first
+    cluster on the anchor so that no wall pins it where the lattice cannot grow around it.
+    Lattices are tried densest per copy first, a penalised pose's lattice counting as less dense
+    by its penalty, as in the score. When a lattice does not hold all copies that way (the copies
+    fill the plate, or the centred site leaves too little room around it), its cosets are counted,
+    evenly thinned out for very large clusters, because the lattice phase decides how much the bed
+    edges cut off. Of the sites that hold all copies, the one whose copies leave the pile the
+    smallest bounding rectangle wins, the densest lattice on a tie: four large discs fit a plate in
+    hexagonal rows and on a square grid alike, and the grid's 2 by 2 block is the smaller one.
+    When no site holds all copies, the one that fits the most wins. A site whose rectangle holds no occupied cell, read from the
+    summed-area table, needs no collision test. Copies take the sites nearest the anchor, and the
+    normal search places any copies left over.
 - **Passes.** Each distinct part ordering gets a pass: 1, 3 or 6 orderings with the Fast, Balanced
   and Thorough effort settings, and orderings that coincide, as they do for copies, run once. A
   further pass seeds copies on lattices. If these leave parts unplaced or need more than one
@@ -175,35 +177,23 @@ collision test and a contact count, both 64 cells at a time. The pocket search t
 positions inside the pile's bounding box, the same bound, and in a pocket larger than the part
 only those nearer its corner than the first fit. Keeping the plate's summed-area table current
 costs `O(P)` per placed part, and finding its pockets `O(P / 64 + R)` for `R` free runs in the
-bounding box. Rasterizing costs `O(C * T)` per part of `T` triangles, plus `O(C * (A + B * g^2))`
-to grow a map with `B` cells near its outline by `g` cells. Parts and candidates are prepared in
+bounding box. Rasterizing costs `O(C * (T + K))` per part of `T` triangles crossing `K` cells
+(a triangle is clipped once per column it spans, then once per cell it reaches in that column), plus
+`O(C * (A + B * g^2))` to grow a map with `B` cells near its outline by `g` cells. Parts and candidates are prepared in
 parallel with TBB.
 
 The effort setting chooses the cell size and the number of orderings: Fast 1 mm and 1 ordering,
-Balanced 0.5 mm and 3, Thorough 0.5 mm and 6. On beds longer than 720 cells the cell grows with
-the bed, which bounds `P`. Cells of 1 and 0.5 mm divide whole and half millimetres, so an
-axis-parallel edge at such a size and spacing falls on a cell boundary and keeps its spacing
-exactly. On a fill-the-bed benchmark (eight shapes that tile the plane, sizes in whole
-millimetres, 256 mm bed, 1 mm spacing), 0.6 mm cells place up to 10% fewer parts than 0.5 mm
-cells and 0.43 mm cells up to 6% fewer. With the shapes scaled off that grid (by 1.037 or
-1.113), turned 17 degrees, or both, 0.43, 0.5 and 0.6 mm cells place 74.8%, 74.6% and 72.8% of
-the area bound on average, so the choice of 0.5 mm costs little where sizes are arbitrary.
-0.25 mm cells took 4 to 8 times as long for at most 4% more parts and 2% smaller mixed piles, so
-Thorough spends its time on orderings instead. On a 510 mm bed, the 0.71 mm cells Balanced uses
-there place 2% to 5% fewer parts than 0.5 mm cells in 37% to 62% less time. The default of 8
-rotation steps places as many tetrominoes as 4 and more of a part that tiles at 45 degrees (a
-chevron: 96 against 90 of a bound of 116).
+Balanced 0.5 mm and 3, Thorough 0.5 mm and 6. On beds longer than `MaxBedCells` cells the cell
+grows with the bed, which bounds `P`. Cells of 1 and 0.5 mm divide whole and half millimetres, so
+an axis-parallel edge at such a size and spacing falls on a cell boundary and keeps its spacing
+exactly. Thorough spends its extra time on orderings; finer cells cost far more time for little
+gain. The default of 8 rotation steps also covers parts that tile at
+45 degrees.
 
-For a group of copies whose clusters span `W x H` cells with `r` runs of cells per row:
-
-- The clusters and pair search build at most 9 raster no-fit sets of
-  `O((W + H) * H * r^2 + W * H)` each, whatever the number of candidates `C`.
-- Each of the at most 5 lattice searches tries `O(B^2)` bases, with `B` at most 2048 touching
-  offsets, and validates only bases denser than the best so far, each against
-  `O(1 + W * H / det)` lattice points.
-- Seeding a plate costs one search per cluster. When the copies fill the plate, it also counts
-  `min(det, 16384)` cosets of `O(1 + P / det)` sites per lattice, at most `O(P)` collision tests
-  per cluster.
+A group of copies costs, whatever the number of candidates, a bounded number of raster no-fit
+sets and lattice searches over its clusters' `W x H` cells; the lattice search tries the
+`MaxBasis` shortest touching offsets and seeding counts at most `MaxCosets` cosets per lattice,
+`O(P)` collision tests per cluster (see `Nest3D.cpp`).
 
 Cancelling is polled between parts and inside the cluster and coset tasks, so it takes effect
 within one placement search or one lattice search.
@@ -212,6 +202,9 @@ within one placement search or one lattice search.
 
 `ArrangeJob::process` uses Nest3D only when it is enabled and the arrange is not by-object (the
 global sequence, or the plate's own when arranging one plate), not on a belt printer, and no
-IDEX/IQEX zone is active. Every other case runs the polygon arranger with the same inputs as
-before. The settings are stored in the `arrange` section of the app config with the same
-per-mode postfixes as the other arrange options (`_fff`, `_fff_seq_print`, `_sla`).
+IDEX/IQEX zone is active. By-object printing finishes every object before the next starts, so the
+toolhead would sweep through finished parts nested around it; belt printers and IDEX/IQEX zones
+place parts by rules of their own. Every other case runs the polygon arranger with its usual
+inputs, and logs that it did so when nesting is on. The arrange menu offers the nesting options
+only for layer-by-layer FFF printing on a flat bed, and stores them in the `arrange` section of
+the app config under the `_fff` postfix (`nest3d_enabled_fff` and so on).

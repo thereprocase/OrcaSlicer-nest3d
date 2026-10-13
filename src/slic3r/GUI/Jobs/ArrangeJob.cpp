@@ -6,7 +6,6 @@
 #include "libslic3r/PresetBundle.hpp"
 #include "libslic3r/ModelArrange.hpp"
 #include "libslic3r/IMEXArrange.hpp"
-#include "libslic3r/Nest3D/Nest3D.hpp"
 #include "libslic3r/Nest3D/Nest3DArrange.hpp"
 
 #include "slic3r/GUI/PartPlate.hpp"
@@ -579,7 +578,7 @@ void ArrangeJob::prepare()
     m_plater->get_notification_manager()->bbl_close_plateinfo_notification();
 
     params = init_arrange_params(m_plater);
-    m_nest3d = init_nest3d_settings(m_plater);
+    m_nest3d = m_plater->canvas3D()->get_arrange_settings().nest3d;
 
     //BBS update extruder params and speed table before arranging
     const Slic3r::DynamicPrintConfig& config = wxGetApp().preset_bundle->full_config();
@@ -716,9 +715,11 @@ void ArrangeJob::process(Ctl &ctl)
     // Shape-true nesting replaces the polygon arranger only where its model holds: layer-by-layer
     // printing on a flat bed without IDEX/IQEX zones.
     const bool use_nest3d = m_nest3d.enabled && !params.is_seq_print && !params.is_belt && !imex.active();
-    nest3d::Stats nest3d_stats;
+    if (m_nest3d.enabled && !use_nest3d)
+        BOOST_LOG_TRIVIAL(info) << "arrange: nesting by 3D shape is on, but the outline arranger handles "
+                                << (params.is_seq_print ? "by-object printing" : params.is_belt ? "belt printers" : "IDEX/IQEX zones");
     if (use_nest3d)
-        nest3d_stats = nest3d::arrange_polygons(m_selected, m_unselected, bedpts, params, m_nest3d, global_config, MAX_NUM_PLATES);
+        nest3d::arrange_polygons(m_selected, m_unselected, bedpts, params, m_nest3d, global_config, MAX_NUM_PLATES);
     else {
         const ArrangePolygons before = imex.active() ? m_selected : ArrangePolygons();
         arrangement::arrange(m_selected, m_unselected, bedpts, params);
@@ -750,12 +751,6 @@ void ArrangeJob::process(Ctl &ctl)
     }
 
     // finalize just here.
-    if (use_nest3d && !ctl.was_canceled()) {
-        ctl.update_status(100, nest3d_stats.unplaced > 0 ?
-            (boost::format(_u8L("Arranging done: %1% plate(s) used, %2% item(s) could not be placed.")) % nest3d_stats.plates_used % nest3d_stats.unplaced).str() :
-            (boost::format(_u8L("Arranging done: %1% plate(s) used.")) % nest3d_stats.plates_used).str());
-        return;
-    }
     ctl.update_status(100,
         ctl.was_canceled() ? _u8L("Arranging canceled.") :
         we_have_unpackable_items ? _u8L("Arranging complete, but some items were not able to be arranged. Reduce spacing and try again.") : _u8L("Arranging done."));
@@ -983,19 +978,6 @@ arrangement::ArrangeParams init_arrange_params(Plater *p)
         params.bed_shrink_y = BED_SHRINK_SEQ_PRINT;
     }
     return params;
-}
-
-nest3d::ArrangeSettings init_nest3d_settings(Plater *p)
-{
-    const GLCanvas3D::ArrangeSettings &settings = p->canvas3D()->get_arrange_settings();
-    nest3d::ArrangeSettings            out;
-    out.enabled         = settings.nest3d_enabled;
-    out.allow_stacking  = settings.nest3d_stacking;
-    out.vertical_gap_mm = settings.nest3d_vertical_gap;
-    out.reorient        = settings.nest3d_reorient;
-    out.rotation_steps  = settings.nest3d_rotation_steps;
-    out.effort          = settings.nest3d_effort;
-    return out;
 }
 
 }} // namespace Slic3r::GUI

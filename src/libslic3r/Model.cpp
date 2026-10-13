@@ -3561,15 +3561,22 @@ double ModelInstance::get_auto_brim_width() const
     return get_auto_brim_width(DeltaT, adhcoeff);
 }
 
+Geometry::Transformation ModelInstance::get_arrange_transformation() const
+{
+    Vec3d rotation = get_rotation();
+    rotation.z()   = 0.;
+    Geometry::Transformation t(m_transformation);
+    t.set_rotation(rotation);
+    t.reset_offset();
+    return t;
+}
+
 void ModelInstance::get_arrange_polygon(void *ap, const Slic3r::DynamicPrintConfig &config_global) const
 {
 //    static const double SIMPLIFY_TOLERANCE_MM = 0.1;
 
-    Vec3d rotation = get_rotation();
-    rotation.z()   = 0.;
-    Geometry::Transformation t(m_transformation);
-    t.set_offset(get_offset().z() * Vec3d::UnitZ());
-    t.set_rotation(rotation);
+    Geometry::Transformation t = get_arrange_transformation();
+    t.set_offset(Z, get_offset(Z));
     Polygon p = get_object()->convex_hull_2d(t.get_matrix());
 
 //    if (!p.points.empty()) {
