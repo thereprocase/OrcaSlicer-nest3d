@@ -135,6 +135,7 @@ arrangement::ArrangePolygon get_arrange_poly(ModelInstance* inst, const Slic3r::
 ArrangePolygon get_instance_arrange_poly(ModelInstance* instance, const Slic3r::DynamicPrintConfig& config)
 {
     ArrangePolygon ap = get_arrange_poly(PtrWrapper{ instance }, config);
+    ap.instance = instance;
 
     //BBS: add temperature information
     if (config.has("curr_bed_type")) {

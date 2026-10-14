@@ -24,6 +24,7 @@
 #include "slic3r/GUI/IMSlider.hpp"
 #include "libslic3r/Preset.hpp"
 #include "libslic3r/Model.hpp"
+#include "libslic3r/Nest3D/Nest3DArrange.hpp"
 #include <memory>
 #include "slic3r/GUI/SceneRaycaster.hpp"
 #include "slic3r/GUI/Camera.hpp"
@@ -1541,6 +1542,9 @@ void GLCanvas3D::load_arrange_settings()
     load_bool("enable_rotation_fff",           m_arrange_settings_fff.enable_rotation);
     load_bool("enable_rotation_fff_seq_print", m_arrange_settings_fff_seq_print.enable_rotation);
     load_bool("enable_rotation_sla",           m_arrange_settings_sla.enable_rotation);
+
+    load_bool("nest3d_enabled_fff", m_arrange_settings_fff.nest3d.enabled);
+    load_bool("nest3d_stacking_fff", m_arrange_settings_fff.nest3d.allow_stacking);
 
     // These two keys carry no postfix, so the one stored value covers both FFF modes.
     load_bool("allow_multi_materials_on_same_plate", m_arrange_settings_fff.allow_multi_materials_on_same_plate);
@@ -6696,6 +6700,23 @@ void GLCanvas3D::_render_arrange_menu(float left, float right, float bottom, flo
         if (settings_out.enable_rotation == true) { imgui->disabled_end(); }
     }
 
+    // Shape-true nesting is offered where ArrangeJob::process runs it, and settings_out is m_arrange_settings_fff.
+    const auto *belt = current_config.option<ConfigOptionBool>("belt_printer");
+    if (ptech == ptFFF && !seq_print && !(belt && belt->value)) {
+        nest3d::ArrangeSettings &nest3d = settings_out.nest3d;
+        ImGui::Separator();
+        if (imgui->bbl_checkbox(_L("Nest by 3D shape"), nest3d.enabled))
+            appcfg->set("arrange", "nest3d_enabled_fff", nest3d.enabled);
+        if (ImGui::IsItemHovered())
+            imgui->tooltip(_L("Arrange parts by their real 3D shape instead of their outline, so parts can fill each other's holes and concave areas."), imgui->scaled(18.f));
+        imgui->disabled_begin(!nest3d.enabled);
+        if (imgui->bbl_checkbox(_L("Nest under overhangs"), nest3d.allow_stacking))
+            appcfg->set("arrange", "nest3d_stacking_fff", nest3d.allow_stacking);
+        if (ImGui::IsItemHovered())
+            imgui->tooltip(_L("Let short parts sit under the unsupported overhangs of taller parts. Parts that print with support keep the space below them free."), imgui->scaled(18.f));
+        imgui->disabled_end();
+    }
+
     ImGui::Separator();
     ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(15.0f, 10.0f));
     if (imgui->button(_L("Arrange"))) {
@@ -6720,6 +6741,10 @@ void GLCanvas3D::_render_arrange_menu(float left, float right, float bottom, flo
         appcfg->erase("arrange", rot_key);
         appcfg->erase("arrange", multi_material_key);
         appcfg->erase("arrange", avoid_extrusion_key);
+        if (&settings_out == &m_arrange_settings_fff) { // the settings the nest3d keys load into
+            appcfg->erase("arrange", "nest3d_enabled_fff");
+            appcfg->erase("arrange", "nest3d_stacking_fff");
+        }
     }
     ImGui::PopStyleVar(1);
     imgui->end();

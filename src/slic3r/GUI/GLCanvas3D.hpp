@@ -17,6 +17,7 @@
 #include "libslic3r/Polygon.hpp"
 #include "libslic3r/Technologies.hpp"
 #include "libslic3r/Model.hpp"
+#include "libslic3r/Nest3D/Nest3DArrange.hpp"
 #include "libvgcode/include/Types.hpp"
 #include "libslic3r/libslic3r.h"
 #include "libslic3r/Line.hpp"
@@ -611,6 +612,7 @@ public:
         //BBS: add more arrangeSettings
         bool is_seq_print        = false;
         bool  align_to_y_axis    = false;
+        nest3d::ArrangeSettings nest3d; // layer-by-layer FFF printing only
     };
 
     struct OrientSettings

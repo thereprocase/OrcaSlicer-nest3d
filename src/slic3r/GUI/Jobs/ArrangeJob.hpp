@@ -12,6 +12,7 @@
 #include "libslic3r/Arrange.hpp"
 #include "libslic3r/BoundingBox.hpp"
 #include "libslic3r/IMEXArrange.hpp"
+#include "libslic3r/Nest3D/Nest3DArrange.hpp"
 
 namespace Slic3r {
 
@@ -49,6 +50,7 @@ class ArrangeJob : public Job
     ImexArrangeInput m_imex;
 
     arrangement::ArrangeParams params;
+    nest3d::ArrangeSettings    m_nest3d;
     int current_plate_index = 0;
     Polygon bed_poly;
     Plater *m_plater;

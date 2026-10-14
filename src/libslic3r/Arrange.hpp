@@ -19,6 +19,7 @@
 namespace Slic3r {
 
 class BoundingBox;
+class ModelInstance;
 
 namespace arrangement {
 
@@ -83,6 +84,7 @@ struct ArrangePolygon {
     double    height{ 0 };         // item height
     double    brim_width{ 0 };     // brim width
     std::string name;
+    ModelInstance *instance{ nullptr }; // source instance, null for virtual items; shape-true arrange reads its mesh
 
     // If empty, any rotation is allowed (currently unsupported)
     // If only a zero is there, no rotation is allowed

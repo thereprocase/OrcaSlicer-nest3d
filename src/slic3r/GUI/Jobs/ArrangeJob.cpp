@@ -6,6 +6,7 @@
 #include "libslic3r/PresetBundle.hpp"
 #include "libslic3r/ModelArrange.hpp"
 #include "libslic3r/IMEXArrange.hpp"
+#include "libslic3r/Nest3D/Nest3DArrange.hpp"
 
 #include "slic3r/GUI/PartPlate.hpp"
 #include "slic3r/GUI/GLCanvas3D.hpp"
@@ -576,6 +577,7 @@ void ArrangeJob::prepare()
     m_plater->get_notification_manager()->bbl_close_plateinfo_notification();
 
     params = init_arrange_params(m_plater);
+    m_nest3d = m_plater->canvas3D()->get_arrange_settings().nest3d;
 
     //BBS update extruder params and speed table before arranging
     const Slic3r::DynamicPrintConfig& config = wxGetApp().preset_bundle->full_config();
@@ -710,7 +712,11 @@ void ArrangeJob::process(Ctl &ctl)
     }
 
     const ArrangePolygons before = imex.active() ? m_selected : ArrangePolygons();
-    arrangement::arrange(m_selected, m_unselected, bedpts, params);
+    // Shape-true nesting holds only for layer-by-layer printing on a flat bed without IDEX/IQEX zones.
+    if (m_nest3d.enabled && !params.is_seq_print && !params.is_belt && !imex.active())
+        nest3d::arrange_polygons(m_selected, m_unselected, bedpts, params, m_nest3d, global_config, MAX_NUM_PLATES);
+    else
+        arrangement::arrange(m_selected, m_unselected, bedpts, params);
     if (!ctl.was_canceled())
         imex.finish(m_selected, before, m_unselected, params);
 
