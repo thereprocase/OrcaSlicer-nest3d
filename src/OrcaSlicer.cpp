@@ -6357,6 +6357,16 @@ int CLI::run(int argc, char **argv)
         for (size_t oidx = 0; oidx < model.objects.size(); ++oidx)
             for (size_t iidx = 0; iidx < model.objects[oidx]->instances.size(); ++iidx) {
                 AgentCLI::Placement placement{oidx, iidx, partplate_list.find_instance_belongs(int(oidx), int(iidx))};
+                // Without --arrange the plates have not taken their instances in yet: place by position.
+                if (placement.plate < 0) {
+                    const BoundingBoxf3 bbox = model.objects[oidx]->instance_bounding_box(iidx);
+                    for (int i = 0; i < partplate_list.get_plate_count() && placement.plate < 0; ++i) {
+                        const BoundingBoxf3 &plate_box = partplate_list.get_plate(i)->get_bounding_box();
+                        if (plate_box.min.x() <= bbox.min.x() && bbox.max.x() <= plate_box.max.x() &&
+                            plate_box.min.y() <= bbox.min.y() && bbox.max.y() <= plate_box.max.y())
+                            placement.plate = i;
+                    }
+                }
                 if (placement.plate >= 0) {
                     const Vec3d origin     = partplate_list.get_plate(placement.plate)->get_origin();
                     placement.plate_origin = Vec2d(origin.x(), origin.y());
