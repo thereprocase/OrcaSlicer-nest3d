@@ -4936,6 +4936,18 @@ int CLI::run(int argc, char **argv)
         }
     }
 
+    // Per-object overrides go in before arranging, as support settings change how far apart parts are kept.
+    if (const std::string object_settings = m_config.opt_string("object_settings"); !object_settings.empty()) {
+        for (Model &model : m_models) {
+            std::string error;
+            if (!AgentCLI::apply_object_settings(model, object_settings, error)) {
+                boost::nowide::cerr << "--object-settings: " << error << std::endl;
+                record_exit_reson(outfile_dir, CLI_CONFIG_FILE_ERROR, 0, cli_errors[CLI_CONFIG_FILE_ERROR], sliced_info);
+                flush_and_exit(CLI_CONFIG_FILE_ERROR);
+            }
+        }
+    }
+
     // Loop through transform options.
     bool user_center_specified = false;
     Points beds = get_bed_shape(m_print_config);

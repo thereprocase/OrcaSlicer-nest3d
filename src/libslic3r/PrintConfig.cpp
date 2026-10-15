@@ -13204,6 +13204,13 @@ CLIMiscConfigDef::CLIMiscConfigDef()
     def->min = 0;
     def->set_default_value(new ConfigOptionFloat(2.));
 
+    def = this->add("object_settings", coString);
+    def->label = L("Per-object settings");
+    def->tooltip = L("JSON file of per-object setting overrides applied before arranging and slicing, keyed by object "
+                     "name or input file name, e.g. {\"gear.stl\": {\"brim_type\": \"no_brim\"}}.");
+    def->cli_params = "settings.json";
+    def->set_default_value(new ConfigOptionString());
+
 }
 
 const CLIActionsConfigDef    cli_actions_config_def;
