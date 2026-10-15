@@ -4,7 +4,7 @@
 #   effect  - the CLI override sweep's full effect stage: every landed option
 #             re-sliced on its own to see whether it changes the G-code
 #   harness - the GUI-vs-CLI parity harness (metrics only, never fails)
-# Both test the latest successful build_all.yml Linux AppImage from main, with
+# Both test the latest successful build_all.yml Linux AppImage from the default branch, with
 # sources checked out at the commit that build was made from; a manual run can
 # name another branch, or pin one build by its run id. Nothing here gates a
 # build or a PR.
@@ -23,7 +23,7 @@ on:
       build_branch:
         description: "branch whose newest successful build_all artifact to test (a PR build is the PR merged into its base; sources are checked out at the PR head)"
         required: false
-        default: "main"
+        default: "repro-dev"
       build_run_id:
         description: "build_all run id to test instead of build_branch's newest (same PR caveat)"
         required: false
@@ -45,7 +45,7 @@ jobs:
   build:
     name: Find the build to test
     # Don't run scheduled checks on forks
-    if: github.event_name != 'schedule' || github.repository == 'OrcaSlicer/OrcaSlicer'
+    if: github.event_name != 'schedule' || github.repository == 'OrcaSlicer/OrcaSlicer' || github.repository == 'thereprocase/OrcaSlicer-nest3d'
     runs-on: ubuntu-24.04
     outputs:
       run_id: ${{ steps.find.outputs.run_id }}
@@ -55,7 +55,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
-          BRANCH: ${{ inputs.build_branch || 'main' }}
+          BRANCH: ${{ inputs.build_branch || github.event.repository.default_branch }}
           RUN_ID: ${{ inputs.build_run_id }}
           SCHEDULED: ${{ github.event_name == 'schedule' }}
         run: |
@@ -117,7 +117,7 @@ jobs:
     steps:
       - &checkout-suite
         name: Check out the test suite
-        uses: actions/checkout@v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           repository: OrcaSlicer/orca-test-repo
           ref: ${{ inputs.test_repo_ref || 'main' }}
@@ -127,7 +127,7 @@ jobs:
       # option surface come from the sources the build was made from
       - &checkout-slicer
         name: Check out OrcaSlicer at the build's commit
-        uses: actions/checkout@v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           ref: ${{ needs.build.outputs.head_sha }}
           path: slicer
@@ -158,7 +158,7 @@ jobs:
           sudo apt-get install -y --no-install-recommends \
             libopengl0 libgl1 libegl1 libwebkit2gtk-4.1-0
 
-      - uses: actions/setup-python@v6
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
         with:
           python-version: "3.12"
 
@@ -192,7 +192,7 @@ jobs:
 
       - name: Upload the override report
         if: always()
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
           name: override-report-shard${{ matrix.shard }}
           path: |
@@ -255,7 +255,7 @@ jobs:
 
       - name: Upload the scorecard and evidence
         if: always()
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
           name: parity-scorecard
           path: parity-out/

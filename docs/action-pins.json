@@ -1,0 +1,17 @@
+{
+  "EnricoMi/publish-unit-test-result-action@v2": "7622c5bf3d112a72ab4fa3951c2aa5723d8ab92d",
+  "WebFreak001/deploy-nightly@v3.2.0": "46ecbabd7fad70d3e7d2c97fe8cd54e7a52e215b",
+  "actions/cache/restore@v6": "55cc8345863c7cc4c66a329aec7e433d2d1c52a9",
+  "actions/cache/save@v6": "55cc8345863c7cc4c66a329aec7e433d2d1c52a9",
+  "actions/cache@v6": "55cc8345863c7cc4c66a329aec7e433d2d1c52a9",
+  "actions/checkout@v7": "3d3c42e5aac5ba805825da76410c181273ba90b1",
+  "actions/download-artifact@v8": "9000827ccba6bdab643e8b6fd33ac0654aef8333",
+  "actions/setup-python@v6": "ece7cb06caefa5fff74198d8649806c4678c61a1",
+  "actions/upload-artifact@v7": "cf430e030ddbb5b0abf93d22962f4752f3646cd9",
+  "flatpak/flatpak-github-actions/flatpak-builder@master": "79327416609af08178ad73b352877e51450790b3",
+  "geekyeggo/delete-artifact@v6": "176a747ab7e287e3ff4787bf8a148716375ca118",
+  "hendrikmuhs/ccache-action@v1.2.24": "f09c25b45002a07be2955cbe52e8cee55643f89d",
+  "lukka/get-cmake@latest": "a89e43e22a96abafcd7a62db652a65ecd33052c9",
+  "microsoft/setup-msbuild@v3": "30375c66a4eea26614e0d39710365f22f8b0af57",
+  "msys2/setup-msys2@v2": "ec48f7c5447b3140e2b088413ae3a55687bccb6e"
+}

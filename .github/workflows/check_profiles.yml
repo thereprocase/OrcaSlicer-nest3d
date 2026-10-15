@@ -6,6 +6,7 @@ on:
     # into a release branch would run no profile validation at all.
     branches:
     - main
+    - repro-dev
     - release/*
     paths:
     - 'resources/profiles/**'
@@ -38,7 +39,7 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
       # Deliberately not continue-on-error, unlike every check below: if the tool itself is
       # broken, nothing it then reports about the profiles is worth reading.
@@ -276,7 +277,7 @@ jobs:
 
       - name: Upload comment artifact
         if: ${{ always() && github.event_name == 'pull_request' }}
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
           name: profile-check-results
           path: ${{ runner.temp }}/profile-check-results/

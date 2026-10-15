@@ -1,3 +1,11 @@
+# Repro OrcaSlicer development fork
+
+The default [`repro-dev`](https://github.com/thereprocase/OrcaSlicer-nest3d/tree/repro-dev) branch combines Nest3D arranging, CLI automation/bridge features and GUI/CLI retraction protection. See [development build details](docs/repro-development.md) and [CLI options](docs/agent-cli.md).
+
+[![Repro builds](https://github.com/thereprocase/OrcaSlicer-nest3d/actions/workflows/build_all.yml/badge.svg?branch=repro-dev)](https://github.com/thereprocase/OrcaSlicer-nest3d/actions/workflows/build_all.yml?query=branch%3Arepro-dev) · [Repro nightly downloads](https://github.com/thereprocase/OrcaSlicer-nest3d/releases/tag/repro-nightly)
+
+The upstream project documentation follows.
+
 <div align="center">
 
 <picture>
