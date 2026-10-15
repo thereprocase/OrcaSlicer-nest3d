@@ -13161,6 +13161,14 @@ CLIMiscConfigDef::CLIMiscConfigDef()
     def->min = 0;
     def->set_default_value(new ConfigOptionFloat(0));
 
+    def = this->add("arrange_report", coString);
+    def->label = L("Arrange report");
+    def->tooltip = L("Write a JSON report of the placement to this file: per object its plate, position, rotation, "
+                     "footprint bounding box and its distances to the nearest part and excluded area, the plates "
+                     "used and the objects left unplaced.");
+    def->cli_params = "report.json";
+    def->set_default_value(new ConfigOptionString());
+
 }
 
 const CLIActionsConfigDef    cli_actions_config_def;

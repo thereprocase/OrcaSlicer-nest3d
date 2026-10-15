@@ -132,6 +132,7 @@
 #endif
 #include "slic3r/Utils/MeshInspect.hpp"
 #include "slic3r/Utils/PaintCLI.hpp"
+#include "slic3r/Utils/AgentCLI.hpp"
 #include "slic3r/GUI/PartPlate.hpp"
 #include "slic3r/GUI/BitmapCache.hpp"
 #include "slic3r/GUI/OpenGLManager.hpp"
@@ -6247,6 +6248,38 @@ int CLI::run(int argc, char **argv)
         for (auto &model : m_models)
             for (auto &o : model.objects)
                 o->ensure_on_bed();
+    }
+
+    // Report files go where --export-3mf goes: relative paths are relative to --outputdir.
+    auto cli_output_path = [&outfile_dir](const std::string &file) {
+        return (outfile_dir.empty() || boost::filesystem::path(file).is_absolute()) ? file : outfile_dir + "/" + file;
+    };
+    const AgentCLI::PlateBed plate_bed = AgentCLI::plate_bed(m_print_config);
+    if (const std::string report_file = m_config.opt_string("arrange_report"); !report_file.empty() && !m_models.empty()) {
+        const Model                         &model = m_models[0];
+        std::vector<AgentCLI::Placement>     placements;
+        for (size_t oidx = 0; oidx < model.objects.size(); ++oidx)
+            for (size_t iidx = 0; iidx < model.objects[oidx]->instances.size(); ++iidx) {
+                AgentCLI::Placement placement{oidx, iidx, partplate_list.find_instance_belongs(int(oidx), int(iidx))};
+                if (placement.plate >= 0) {
+                    const Vec3d origin     = partplate_list.get_plate(placement.plate)->get_origin();
+                    placement.plate_origin = Vec2d(origin.x(), origin.y());
+                }
+                placements.push_back(placement);
+            }
+        nlohmann::json report = AgentCLI::arrange_report(model, placements, plate_bed);
+        report["arranged"]     = oriented_or_arranged;
+        report["engine"]       = arrange_options.nest3d ? "nest3d" : "stock";
+        report["stacking"]     = arrange_options.allow_stacking;
+        report["gap_mm"]       = arrange_options.gap_mm ? nlohmann::json(*arrange_options.gap_mm) : nlohmann::json(nullptr);
+        report["plate_count"]  = partplate_list.get_plate_count();
+        boost::nowide::ofstream out(cli_output_path(report_file));
+        out << report.dump(1, '\t') << std::endl;
+        if (!out) {
+            boost::nowide::cerr << "can not write the arrange report " << report_file << std::endl;
+            record_exit_reson(outfile_dir, CLI_EXPORT_3MF_ERROR, 0, cli_errors[CLI_EXPORT_3MF_ERROR], sliced_info);
+            flush_and_exit(CLI_EXPORT_3MF_ERROR);
+        }
     }
 
     // loop through action options

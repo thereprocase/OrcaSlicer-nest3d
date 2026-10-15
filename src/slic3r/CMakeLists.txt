@@ -714,6 +714,8 @@ set(SLIC3R_GUI_SOURCES
     plugin/pluginTypes/slicingPipeline/SlicingPipelinePluginCapabilityTrampoline.hpp
     pchheader.cpp
     pchheader.hpp
+    Utils/AgentCLI.cpp
+    Utils/AgentCLI.hpp
     Utils/ASCIIFolding.cpp
     Utils/ASCIIFolding.hpp
     Utils/AstroBox.cpp
