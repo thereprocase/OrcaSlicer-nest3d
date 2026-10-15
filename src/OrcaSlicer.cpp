@@ -101,6 +101,8 @@
 #include "libslic3r/GCode.hpp"
 #include "libslic3r/Model.hpp"
 #include "libslic3r/ModelArrange.hpp"
+#include "libslic3r/Nest3D/Nest3DArrange.hpp"
+#include "libnest2d/common.hpp"
 #include "libslic3r/Platform.hpp"
 #include "libslic3r/Print.hpp"
 #include "libslic3r/SLAPrint.hpp"
@@ -1121,6 +1123,24 @@ static void load_downward_settings_list_from_config(std::string config_file, std
         }
     }
 }
+
+// Nest3D from the command line: ORCA_NEST3D=1 arranges with Nest3D, ORCA_NEST3D=stack also lets short parts
+// sit under overhangs. Same guard as the GUI: layer-by-layer printing only; otherwise the stock arranger runs.
+static void cli_arrange(arrangement::ArrangePolygons &selected, const arrangement::ArrangePolygons &unselected, const Points &beds,
+                        const arrangement::ArrangeParams &params, const DynamicPrintConfig &config)
+{
+    const char *mode = std::getenv("ORCA_NEST3D");
+    if (mode != nullptr && *mode != '\0' && std::string(mode) != "0" && !params.is_seq_print) {
+        nest3d::ArrangeSettings settings;
+        settings.enabled        = true;
+        settings.allow_stacking = std::string(mode) == "stack";
+        BOOST_LOG_TRIVIAL(info) << "arrange: Nest3D (stacking " << settings.allow_stacking << ")";
+        nest3d::arrange_polygons(selected, unselected, beds, params, settings, config, MAX_NUM_PLATES);
+    } else {
+        arrangement::arrange(selected, unselected, beds, params);
+    }
+}
+
 
 int CLI::run(int argc, char **argv)
 {
@@ -5407,7 +5427,7 @@ int CLI::run(int argc, char **argv)
 
                 //Step-3:do the arrange
                 BOOST_LOG_TRIVIAL(info) << boost::format("start plate %1%'s arranging...") % (i + 1);
-                arrangement::arrange(selected, unselected, beds, arrange_cfg);
+                cli_arrange(selected, unselected, beds, arrange_cfg, m_print_config);
                 //arrangement::arrange(unprintable, {}, beds, arrange_cfg);
                 BOOST_LOG_TRIVIAL(info) << boost::format("finished plate %1%'s arranging") % (i + 1);
 
@@ -5879,7 +5899,7 @@ int CLI::run(int argc, char **argv)
 
                 //Step-3:do the arrange
                 BOOST_LOG_TRIVIAL(info) << boost::format("start %1% th arranging...")%arrange_count;
-                arrangement::arrange(selected, unselected, beds, arrange_cfg);
+                cli_arrange(selected, unselected, beds, arrange_cfg, m_print_config);
                 arrangement::arrange(unprintable, {}, beds, arrange_cfg);
                 BOOST_LOG_TRIVIAL(info) << boost::format("finished %1% th arranging...")%arrange_count;
 
