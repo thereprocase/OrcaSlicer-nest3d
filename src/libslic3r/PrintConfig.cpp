@@ -13137,6 +13137,30 @@ CLIMiscConfigDef::CLIMiscConfigDef()
     def->label = "Allow filaments with high/low temperature to be printed together";
     def->tooltip = "Allow filaments with high/low temperature to be printed together.";
     def->set_default_value(new  ConfigOptionBool(false));
+
+    // Options for scripted and agent-driven use (docs/agent-cli.md).
+    def = this->add("arrange_engine", coString);
+    def->label = L("Arrange engine");
+    def->tooltip = L("Arranger used by --arrange: stock (the outline arranger) or nest3d (shape-true, height-aware "
+                     "packing). By-object printing always uses the stock arranger. When not given, the ORCA_NEST3D "
+                     "environment variable selects Nest3D (1, or stack to also allow stacking).");
+    def->cli_params = "stock|nest3d";
+    def->set_default_value(new ConfigOptionString("stock"));
+
+    def = this->add("nest3d_stack", coBool);
+    def->label = L("Nest3D stacking");
+    def->tooltip = L("Let Nest3D place short parts under the overhangs of taller ones. Implies --arrange-engine nest3d.");
+    def->set_default_value(new ConfigOptionBool(false));
+
+    def = this->add("arrange_gap", coFloat);
+    def->label = L("Arrange gap");
+    def->tooltip = L("Minimum distance in mm between arranged parts, and between parts and the bed's excluded areas, "
+                     "for both arrangers. Replaces the spacing derived from brim and support settings. Parts keep 2 mm "
+                     "from the bed edge, or half the gap when that is more.");
+    def->cli_params = "mm";
+    def->min = 0;
+    def->set_default_value(new ConfigOptionFloat(0));
+
 }
 
 const CLIActionsConfigDef    cli_actions_config_def;

@@ -1124,16 +1124,24 @@ static void load_downward_settings_list_from_config(std::string config_file, std
     }
 }
 
-// Nest3D from the command line: ORCA_NEST3D=1 arranges with Nest3D, ORCA_NEST3D=stack also lets short parts
-// sit under overhangs. Same guard as the GUI: layer-by-layer printing only; otherwise the stock arranger runs.
-static void cli_arrange(arrangement::ArrangePolygons &selected, const arrangement::ArrangePolygons &unselected, const Points &beds,
-                        const arrangement::ArrangeParams &params, const DynamicPrintConfig &config)
+// How the CLI arranges, read once from --arrange-engine, --nest3d-stack and --arrange-gap so every arrange
+// site agrees. ORCA_NEST3D=1 (or =stack, which also allows stacking) still selects Nest3D when
+// --arrange-engine is not given.
+struct CliArrangeOptions
 {
-    const char *mode = std::getenv("ORCA_NEST3D");
-    if (mode != nullptr && *mode != '\0' && std::string(mode) != "0" && !params.is_seq_print) {
+    bool                  nest3d         = false;
+    bool                  allow_stacking = false;
+    std::optional<double> gap_mm;
+};
+
+// Nest3D runs for layer-by-layer printing only, as in the GUI; otherwise the stock arranger runs.
+static void cli_arrange(arrangement::ArrangePolygons &selected, const arrangement::ArrangePolygons &unselected, const Points &beds,
+                        const arrangement::ArrangeParams &params, const DynamicPrintConfig &config, const CliArrangeOptions &options)
+{
+    if (options.nest3d && !params.is_seq_print) {
         nest3d::ArrangeSettings settings;
         settings.enabled        = true;
-        settings.allow_stacking = std::string(mode) == "stack";
+        settings.allow_stacking = options.allow_stacking;
         BOOST_LOG_TRIVIAL(info) << "arrange: Nest3D (stacking " << settings.allow_stacking << ")";
         nest3d::arrange_polygons(selected, unselected, beds, params, settings, config, MAX_NUM_PLATES);
     } else {
@@ -1141,6 +1149,37 @@ static void cli_arrange(arrangement::ArrangePolygons &selected, const arrangemen
     }
 }
 
+// --arrange-gap at the bed edge: parts keep the stock margin of 2 mm (1 mm of bed shrink plus 1 mm of
+// inflation), or half the gap when that is more, rather than the bed shrink plus half the gap.
+static void cli_set_arrange_gap_margin(arrangement::ArrangeParams &params, const CliArrangeOptions &options)
+{
+    if (options.gap_mm && !params.is_seq_print)
+        params.bed_shrink_x = params.bed_shrink_y = float(std::max(0., 2. - *options.gap_mm / 2.));
+}
+
+// --arrange-gap after the stock inflation: both arrangers keep two parts apart by the sum of their
+// inflations and a part off an excluded area by the sum of theirs. min_obj_distance already gave the
+// parts half the gap each (0 cannot be passed that way, 0 means "derive it"), so this sets a zero gap and
+// grows the excluded areas, which otherwise keep only 1 mm, to the other half.
+static void cli_apply_arrange_gap(arrangement::ArrangePolygons &selected, arrangement::ArrangePolygons &unselected,
+                                  arrangement::ArrangeParams &params, const CliArrangeOptions &options)
+{
+    if (!options.gap_mm)
+        return;
+    const coord_t half_gap = scaled(*options.gap_mm / 2.);
+    if (*options.gap_mm <= 0. && !params.is_seq_print) {
+        for (arrangement::ArrangePolygon &ap : selected)
+            ap.inflation = 0;
+        for (arrangement::ArrangePolygon &ap : unselected)
+            if (!ap.is_virt_object)
+                ap.inflation = 0;
+    }
+    for (arrangement::ArrangePolygon &ap : unselected)
+        if (ap.is_virt_object && !ap.is_extrusion_cali_object && !ap.is_wipe_tower)
+            ap.inflation = std::max(ap.inflation, half_gap);
+    for (arrangement::ArrangePolygon &ap : params.excluded_regions)
+        ap.inflation = std::max(ap.inflation, half_gap);
+}
 
 int CLI::run(int argc, char **argv)
 {
@@ -1541,6 +1580,42 @@ int CLI::run(int argc, char **argv)
     std::optional<bool> align_to_y_axis;
     if (m_given_option_keys.count("align_to_y_axis") > 0)
         align_to_y_axis = m_config.opt_bool("align_to_y_axis");
+
+    CliArrangeOptions arrange_options;
+    {
+        const char       *env_mode     = std::getenv("ORCA_NEST3D");
+        const std::string env          = env_mode != nullptr ? env_mode : "";
+        const bool        engine_given = m_given_option_keys.count("arrange_engine") > 0;
+        const std::string engine       = m_config.opt_string("arrange_engine");
+        const bool        stack        = m_config.opt_bool("nest3d_stack");
+        if (engine_given && engine != "stock" && engine != "nest3d") {
+            boost::nowide::cerr << "--arrange-engine must be stock or nest3d, not " << engine << std::endl;
+            record_exit_reson(outfile_dir, CLI_INVALID_PARAMS, 0, cli_errors[CLI_INVALID_PARAMS], sliced_info);
+            flush_and_exit(CLI_INVALID_PARAMS);
+        }
+        if (engine_given && engine == "stock" && stack) {
+            boost::nowide::cerr << "--nest3d-stack needs --arrange-engine nest3d" << std::endl;
+            record_exit_reson(outfile_dir, CLI_INVALID_PARAMS, 0, cli_errors[CLI_INVALID_PARAMS], sliced_info);
+            flush_and_exit(CLI_INVALID_PARAMS);
+        }
+        if (engine_given)
+            arrange_options.nest3d = engine == "nest3d" || stack;
+        else
+            arrange_options.nest3d = stack || (!env.empty() && env != "0");
+        arrange_options.allow_stacking = arrange_options.nest3d && (stack || (!engine_given && env == "stack"));
+        if (m_given_option_keys.count("arrange_gap") > 0) {
+            const double gap = m_config.opt_float("arrange_gap");
+            // Past 100 mm a gap leaves room for little more than one part per plate: read it as a typo.
+            if (!(gap >= 0. && gap <= 100.)) {
+                boost::nowide::cerr << "--arrange-gap must be between 0 and 100 mm" << std::endl;
+                record_exit_reson(outfile_dir, CLI_INVALID_PARAMS, 0, cli_errors[CLI_INVALID_PARAMS], sliced_info);
+                flush_and_exit(CLI_INVALID_PARAMS);
+            }
+            arrange_options.gap_mm = gap;
+        }
+        BOOST_LOG_TRIVIAL(info) << boost::format("arrange engine %1%, stacking %2%, gap %3%") % (arrange_options.nest3d ? "nest3d" : "stock")
+                                       % arrange_options.allow_stacking % (arrange_options.gap_mm ? std::to_string(*arrange_options.gap_mm) : "auto");
+    }
 
     ConfigOptionBool* skip_modified_gcodes_option = m_config.option<ConfigOptionBool>("skip_modified_gcodes");
     if (skip_modified_gcodes_option)
@@ -5390,11 +5465,12 @@ int CLI::run(int argc, char **argv)
                 arrange_cfg.nozzle_height = nozzle_height;
                 arrange_cfg.align_center = align_center;
                 arrange_cfg.printable_height = print_height;
-                arrange_cfg.min_obj_distance = 0;
+                arrange_cfg.min_obj_distance = arrange_options.gap_mm ? scaled(*arrange_options.gap_mm) : 0;
                 if (arrange_cfg.is_seq_print) {
                     arrange_cfg.bed_shrink_x = BED_SHRINK_SEQ_PRINT;
                     arrange_cfg.bed_shrink_y = BED_SHRINK_SEQ_PRINT;
                 }
+                cli_set_arrange_gap_margin(arrange_cfg, arrange_options);
                 if (align_to_y_axis.has_value()) {
                     arrange_cfg.align_to_y_axis = *align_to_y_axis;
                 } else if (auto printer_structure_opt = m_print_config.option<ConfigOptionEnum<PrinterStructure>>("printer_structure")) {
@@ -5409,6 +5485,7 @@ int CLI::run(int argc, char **argv)
                 beds = get_shrink_bedpts(&m_print_config, arrange_cfg);
 
                 partplate_list.preprocess_exclude_areas(arrange_cfg.excluded_regions, enable_wrapping_detect, 1, scale_(1));
+                cli_apply_arrange_gap(selected, unselected, arrange_cfg, arrange_options);
 
                 {
                     BOOST_LOG_TRIVIAL(debug) << "arrange bedpts:" << beds[0].transpose() << ", " << beds[1].transpose() << ", " << beds[2].transpose() << ", " << beds[3].transpose();
@@ -5427,7 +5504,7 @@ int CLI::run(int argc, char **argv)
 
                 //Step-3:do the arrange
                 BOOST_LOG_TRIVIAL(info) << boost::format("start plate %1%'s arranging...") % (i + 1);
-                cli_arrange(selected, unselected, beds, arrange_cfg, m_print_config);
+                cli_arrange(selected, unselected, beds, arrange_cfg, m_print_config, arrange_options);
                 //arrangement::arrange(unprintable, {}, beds, arrange_cfg);
                 BOOST_LOG_TRIVIAL(info) << boost::format("finished plate %1%'s arranging") % (i + 1);
 
@@ -5862,11 +5939,12 @@ int CLI::run(int argc, char **argv)
                 arrange_cfg.nozzle_height                       = nozzle_height;
                 arrange_cfg.align_center                        = align_center;
                 arrange_cfg.printable_height                    = print_height;
-                arrange_cfg.min_obj_distance = 0;
+                arrange_cfg.min_obj_distance = arrange_options.gap_mm ? scaled(*arrange_options.gap_mm) : 0;
                 if (arrange_cfg.is_seq_print) {
                     arrange_cfg.bed_shrink_x = BED_SHRINK_SEQ_PRINT;
                     arrange_cfg.bed_shrink_y = BED_SHRINK_SEQ_PRINT;
                 }
+                cli_set_arrange_gap_margin(arrange_cfg, arrange_options);
                 if (align_to_y_axis.has_value()) {
                     arrange_cfg.align_to_y_axis = *align_to_y_axis;
                 } else if (auto printer_structure_opt = m_print_config.option<ConfigOptionEnum<PrinterStructure>>("printer_structure")) {
@@ -5881,6 +5959,7 @@ int CLI::run(int argc, char **argv)
                 beds=get_shrink_bedpts(&m_print_config, arrange_cfg);
 
                 partplate_list.preprocess_exclude_areas(arrange_cfg.excluded_regions, enable_wrapping_detect, 1, scale_(1));
+                cli_apply_arrange_gap(selected, unselected, arrange_cfg, arrange_options);
 
                 {
                     BOOST_LOG_TRIVIAL(debug) << "arrange bedpts:" << beds[0].transpose() << ", " << beds[1].transpose() << ", " << beds[2].transpose() << ", " << beds[3].transpose();
@@ -5899,7 +5978,7 @@ int CLI::run(int argc, char **argv)
 
                 //Step-3:do the arrange
                 BOOST_LOG_TRIVIAL(info) << boost::format("start %1% th arranging...")%arrange_count;
-                cli_arrange(selected, unselected, beds, arrange_cfg, m_print_config);
+                cli_arrange(selected, unselected, beds, arrange_cfg, m_print_config, arrange_options);
                 arrangement::arrange(unprintable, {}, beds, arrange_cfg);
                 BOOST_LOG_TRIVIAL(info) << boost::format("finished %1% th arranging...")%arrange_count;
 
