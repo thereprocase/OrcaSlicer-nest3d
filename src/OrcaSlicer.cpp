@@ -242,6 +242,8 @@ typedef struct  _sliced_plate_info{
     size_t sliced_time_with_cache {0};
     size_t triangle_count{0};
     std::string warning_message;
+    // --summary / --first-layer-check: what the plate's G-code holds (AgentCLI::plate_summary).
+    nlohmann::json summary;
 }sliced_plate_info_t;
 
 typedef struct _sliced_info {
@@ -544,6 +546,8 @@ void record_exit_reson(std::string outputdir, int code, int plate_id, std::strin
             plate_json["sliced_time_with_cache"] = sliced_info.sliced_plates[index].sliced_time_with_cache;
             plate_json["triangle_count"] = sliced_info.sliced_plates[index].triangle_count;
             plate_json["warning_message"] = sliced_info.sliced_plates[index].warning_message;
+            if (!sliced_info.sliced_plates[index].summary.is_null())
+                plate_json["summary"] = sliced_info.sliced_plates[index].summary;
             j["sliced_plates"].push_back(plate_json);
         }
         for (auto& iter: key_values)
@@ -1642,6 +1646,9 @@ int CLI::run(int argc, char **argv)
             items.push_back(std::to_string(tray));
         *value = boost::algorithm::join(items, ",");
     }
+    const bool   first_layer_check      = m_config.opt_bool("first_layer_check");
+    const double first_layer_min_island = m_config.opt_float("first_layer_min_island");
+    const std::string summary_file      = m_config.opt_string("summary");
 
     ConfigOptionBool* skip_modified_gcodes_option = m_config.option<ConfigOptionBool>("skip_modified_gcodes");
     if (skip_modified_gcodes_option)
@@ -7231,6 +7238,12 @@ int CLI::run(int argc, char **argv)
                                         flush_and_exit(CLI_GCODE_PATH_IN_UNPRINTABLE_AREA);
                                     }
 
+                                    if (gcode_result) {
+                                        sliced_plate_info.summary = AgentCLI::plate_summary(index + 1, *print_fff, *gcode_result);
+                                        if (first_layer_check)
+                                            sliced_plate_info.summary["first_layer"] = AgentCLI::first_layer_check(*print_fff, plate_bed, first_layer_min_island, 2.);
+                                    }
+
 
                                     //outfile_final = (dynamic_cast<Print*>(print))->print_statistics().finalize_output_path(outfile);
                                     //m_fff_print->export_gcode(m_temp_output_path, m_gcode_result, [this](const ThumbnailsParams& params) { return this->render_thumbnails(params); });
@@ -8199,6 +8212,23 @@ int CLI::run(int argc, char **argv)
     BOOST_LOG_TRIVIAL(info) << __FUNCTION__ << ", Finished" << std::endl;
     global_current_time = (long long)Slic3r::Utils::get_current_time_utc();
     sliced_info.export_time = (size_t) (global_current_time - global_begin_time);
+
+    if (!summary_file.empty()) {
+        nlohmann::json summary{{"plates", nlohmann::json::array()}};
+        for (const sliced_plate_info_t &plate : sliced_info.sliced_plates)
+            if (!plate.summary.is_null())
+                summary["plates"].push_back(plate.summary);
+        for (const char *key : {"plate_files"})
+            if (sliced_info.extra.contains(key))
+                summary[key] = sliced_info.extra[key];
+        boost::nowide::ofstream out(cli_output_path(summary_file));
+        out << summary.dump(1, '\t') << std::endl;
+        if (!out) {
+            boost::nowide::cerr << "can not write the summary " << summary_file << std::endl;
+            record_exit_reson(outfile_dir, CLI_EXPORT_3MF_ERROR, 0, cli_errors[CLI_EXPORT_3MF_ERROR], sliced_info);
+            flush_and_exit(CLI_EXPORT_3MF_ERROR);
+        }
+    }
 
     //record the duplicate here
     if (duplicate_count > 0)

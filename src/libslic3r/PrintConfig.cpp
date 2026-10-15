@@ -13182,6 +13182,28 @@ CLIMiscConfigDef::CLIMiscConfigDef()
     def->cli_params = "\"tray1,tray2,...\"";
     def->set_default_value(new ConfigOptionString());
 
+    def = this->add("summary", coString);
+    def->label = L("Summary file");
+    def->tooltip = L("Write a JSON summary of the sliced plates to this file: estimated time, filament length and "
+                     "weight, object names and whether the G-code contains brim, skirt or support. The same summary "
+                     "is added per plate to result.json.");
+    def->cli_params = "summary.json";
+    def->set_default_value(new ConfigOptionString());
+
+    def = this->add("first_layer_check", coBool);
+    def->label = L("First layer check");
+    def->tooltip = L("Report per object its first-layer contact area and smallest island, flag islands smaller than "
+                     "--first-layer-min-island and objects closer than 2 mm to an excluded bed area. Results go to "
+                     "the plate summaries.");
+    def->set_default_value(new ConfigOptionBool(false));
+
+    def = this->add("first_layer_min_island", coFloat);
+    def->label = L("First layer minimum island");
+    def->tooltip = L("Islands of the first layer smaller than this area in mm² are flagged by --first-layer-check.");
+    def->cli_params = "mm2";
+    def->min = 0;
+    def->set_default_value(new ConfigOptionFloat(2.));
+
 }
 
 const CLIActionsConfigDef    cli_actions_config_def;
