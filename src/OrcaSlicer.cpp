@@ -185,6 +185,10 @@ using namespace Slic3r;
 
 #define MAX_CLONEABLE_SIZE 512
 
+// --send-to-bridge: the upload of a plate file failed. Kept here rather than with the shared codes in
+// libslic3r/Utils.hpp because only the command line produces it.
+#define CLI_BRIDGE_UPLOAD_FAILED -25
+
 std::map<int, std::string> cli_errors = {
     {CLI_SUCCESS, "Success."},
     {CLI_ENVIRONMENT_ERROR, "Failed setting up server environment."},
@@ -211,6 +215,7 @@ std::map<int, std::string> cli_errors = {
     {CLI_OBJECT_ORIENT_FAILED, "An error occurred when auto-orienting object(s)."},
     {CLI_MODIFIED_PARAMS_TO_PRINTER, "Found modified parameter in printer preset in the 3mf file, which should not be changed."},
         {CLI_FILE_VERSION_NOT_SUPPORTED, "Unsupported 3MF version. Please make sure the 3MF file was created with the official version of Bambu Studio, not a beta version."},
+        {CLI_BRIDGE_UPLOAD_FAILED, "Uploading a plate file to the print bridge failed. See bridge_uploads in result.json."},
     {CLI_NO_SUITABLE_OBJECTS, "One of the plate is empty or has no object fully inside it. Please check that the 3mf contains no empty plate in Orca Slicer before uploading."},
     {CLI_VALIDATE_ERROR, "There are some incorrect slicing parameters in the 3mf. Please verify the slicing of all plates in Orca Slicer before uploading."},
     {CLI_OBJECTS_PARTLY_INSIDE, "Some objects are located over the boundary of the heated bed."},
@@ -261,7 +266,7 @@ typedef struct _sliced_info {
     // Structured slicing warnings for result.json, and whether --strict was on.
     nlohmann::json      warnings = nlohmann::json::array();
     bool                strict_mode {false};
-    // Top-level result.json entries of the agent options: plate_files.
+    // Top-level result.json entries of the agent options: plate_files, bridge_uploads.
     nlohmann::json      extra = nlohmann::json::object();
 }sliced_info_t;
 std::vector<PrintBase::SlicingStatus> g_slicing_warnings;
@@ -1629,9 +1634,11 @@ int CLI::run(int argc, char **argv)
     }
 
     // Outputs for printer bridges, read up front so a malformed value fails before any slicing.
-    const bool        export_plates_separately = m_config.opt_bool("export_plates_separately");
-    std::string       ams_mapping;
-    for (const auto &[option, value] : {std::make_pair("ams_map", &ams_mapping)}) {
+    const std::string bridge_url        = m_config.opt_string("send_to_bridge");
+    const std::string bridge_token_file = m_config.opt_string("bridge_token_file");
+    const bool        export_plates_separately = m_config.opt_bool("export_plates_separately") || !bridge_url.empty();
+    std::string       ams_mapping, bridge_ams_mapping;
+    for (const auto &[option, value] : {std::make_pair("ams_map", &ams_mapping), std::make_pair("bridge_ams_map", &bridge_ams_mapping)}) {
         const std::string text = m_config.opt_string(option);
         std::vector<int>  trays;
         if (text.empty())
@@ -1645,6 +1652,13 @@ int CLI::run(int argc, char **argv)
         for (int tray : trays)
             items.push_back(std::to_string(tray));
         *value = boost::algorithm::join(items, ",");
+    }
+    if (bridge_ams_mapping.empty())
+        bridge_ams_mapping = ams_mapping;
+    if (!bridge_url.empty() && (bridge_token_file.empty() || bridge_ams_mapping.empty() || m_given_option_keys.count("export_3mf") == 0)) {
+        boost::nowide::cerr << "--send-to-bridge needs --export-3mf, --bridge-token-file and --ams-map or --bridge-ams-map" << std::endl;
+        record_exit_reson(outfile_dir, CLI_INVALID_PARAMS, 0, cli_errors[CLI_INVALID_PARAMS], sliced_info);
+        flush_and_exit(CLI_INVALID_PARAMS);
     }
     const bool   first_layer_check      = m_config.opt_bool("first_layer_check");
     const double first_layer_min_island = m_config.opt_float("first_layer_min_island");
@@ -6329,7 +6343,7 @@ int CLI::run(int argc, char **argv)
     };
     const AgentCLI::PlateBed plate_bed = AgentCLI::plate_bed(m_print_config);
     // The tray list is per filament, so a list of another length maps some filament to the wrong tray.
-    for (const std::string *mapping : {&ams_mapping}) {
+    for (const std::string *mapping : {&ams_mapping, &bridge_ams_mapping}) {
         const size_t filaments = m_print_config.option<ConfigOptionStrings>("filament_colour", true)->values.size();
         if (!mapping->empty() && size_t(std::count(mapping->begin(), mapping->end(), ',') + 1) != filaments) {
             boost::nowide::cerr << "the AMS mapping " << *mapping << " needs one tray per filament, " << filaments << " here" << std::endl;
@@ -8214,6 +8228,22 @@ int CLI::run(int argc, char **argv)
         if (export_plates_separately)
             sliced_info.extra["plate_files"] = plate_files;
 
+        if (!bridge_url.empty()) {
+            nlohmann::json uploads;
+            std::string    error;
+            if (plate_files.empty())
+                error = "no sliced plate to send";
+            const bool sent = !plate_files.empty() &&
+                              AgentCLI::send_to_bridge(bridge_url, bridge_token_file, bridge_ams_mapping, plate_files, uploads, error);
+            sliced_info.extra["bridge_uploads"] = uploads;
+            if (!sent) {
+                boost::nowide::cerr << "--send-to-bridge: " << error << std::endl;
+                release_PlateData_list(plate_data_list);
+                record_exit_reson(outfile_dir, CLI_BRIDGE_UPLOAD_FAILED, 0, cli_errors[CLI_BRIDGE_UPLOAD_FAILED], sliced_info);
+                flush_and_exit(CLI_BRIDGE_UPLOAD_FAILED);
+            }
+        }
+
         for (unsigned int i = 0; i < thumbnails.size(); i++)
             thumbnails[i]->reset();
         for (unsigned int i = 0; i < no_light_thumbnails.size(); i++)
@@ -8259,7 +8289,7 @@ int CLI::run(int argc, char **argv)
         for (const sliced_plate_info_t &plate : sliced_info.sliced_plates)
             if (!plate.summary.is_null())
                 summary["plates"].push_back(plate.summary);
-        for (const char *key : {"plate_files"})
+        for (const char *key : {"plate_files", "bridge_uploads"})
             if (sliced_info.extra.contains(key))
                 summary[key] = sliced_info.extra[key];
         boost::nowide::ofstream out(cli_output_path(summary_file));

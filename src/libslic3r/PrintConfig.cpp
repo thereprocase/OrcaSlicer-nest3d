@@ -13211,6 +13211,26 @@ CLIMiscConfigDef::CLIMiscConfigDef()
     def->cli_params = "settings.json";
     def->set_default_value(new ConfigOptionString());
 
+    def = this->add("send_to_bridge", coString);
+    def->label = L("Send to bridge");
+    def->tooltip = L("After exporting, upload each single-plate .gcode.3mf to this URL as a multipart POST (fields file "
+                     "and ams_mapping) with a bearer token read from --bridge-token-file. Implies "
+                     "--export-plates-separately.");
+    def->cli_params = "url";
+    def->set_default_value(new ConfigOptionString());
+
+    def = this->add("bridge_token_file", coString);
+    def->label = L("Bridge token file");
+    def->tooltip = L("File holding the bearer token for --send-to-bridge. The token is never printed or logged.");
+    def->cli_params = "path";
+    def->set_default_value(new ConfigOptionString());
+
+    def = this->add("bridge_ams_map", coString);
+    def->label = L("Bridge AMS mapping");
+    def->tooltip = L("ams_mapping field sent with --send-to-bridge: comma-separated 0-based tray indices, one per "
+                     "filament. Defaults to --ams-map.");
+    def->cli_params = "\"tray1,tray2,...\"";
+    def->set_default_value(new ConfigOptionString());
 }
 
 const CLIActionsConfigDef    cli_actions_config_def;
