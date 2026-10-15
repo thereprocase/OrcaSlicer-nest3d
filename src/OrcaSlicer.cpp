@@ -257,6 +257,8 @@ typedef struct _sliced_info {
     // Structured slicing warnings for result.json, and whether --strict was on.
     nlohmann::json      warnings = nlohmann::json::array();
     bool                strict_mode {false};
+    // Top-level result.json entries of the agent options: plate_files.
+    nlohmann::json      extra = nlohmann::json::object();
 }sliced_info_t;
 std::vector<PrintBase::SlicingStatus> g_slicing_warnings;
 
@@ -547,6 +549,8 @@ void record_exit_reson(std::string outputdir, int code, int plate_id, std::strin
 
         j["warnings"]    = sliced_info.warnings;
         j["strict_mode"] = sliced_info.strict_mode;
+        for (const auto &[key, value] : sliced_info.extra.items())
+            j[key] = value;
 
         boost::nowide::ofstream c;
         c.open(result_file, std::ios::out | std::ios::trunc);
@@ -1617,6 +1621,9 @@ int CLI::run(int argc, char **argv)
         BOOST_LOG_TRIVIAL(info) << boost::format("arrange engine %1%, stacking %2%, gap %3%") % (arrange_options.nest3d ? "nest3d" : "stock")
                                        % arrange_options.allow_stacking % (arrange_options.gap_mm ? std::to_string(*arrange_options.gap_mm) : "auto");
     }
+
+    // Outputs for printer bridges, read up front so a malformed value fails before any slicing.
+    const bool        export_plates_separately = m_config.opt_bool("export_plates_separately");
 
     ConfigOptionBool* skip_modified_gcodes_option = m_config.option<ConfigOptionBool>("skip_modified_gcodes");
     if (skip_modified_gcodes_option)
@@ -8077,6 +8084,44 @@ int CLI::run(int argc, char **argv)
             }
         }
 
+        // Single-plate jobs for printers and bridges that take one plate per file: each sliced plate becomes
+        // plate 1 of its own <stem>-plate<N>.gcode.3mf, saved without the model as the GUI's "Export plate
+        // sliced file" does. Written before the project, whose export moves the G-code paths into the archive.
+        std::vector<std::string> plate_files;
+        if (export_plates_separately) {
+            boost::filesystem::path project_path(export_3mf_file);
+            std::string             stem = project_path.filename().string();
+            for (const char *suffix : {".gcode.3mf", ".3mf"})
+                if (boost::algorithm::iends_with(stem, suffix)) {
+                    stem.resize(stem.size() - strlen(suffix));
+                    break;
+                }
+            for (int i = 0; i < int(plate_data_list.size()); i++) {
+                const PlateData *source = plate_data_list[i];
+                if (!source->is_sliced_valid || source->gcode_file.empty())
+                    continue;
+                auto single = std::make_unique<PlateData>(*source);
+                single->plate_index = 0;
+                PlateDataPtrs single_list{single.get()};
+                auto one = [i](const std::vector<ThumbnailData *> &all) {
+                    return i < int(all.size()) ? std::vector<ThumbnailData *>{all[i]} : std::vector<ThumbnailData *>{};
+                };
+                std::vector<ThumbnailData *> plate_thumbnail = one(thumbnails), plate_no_light = one(no_light_thumbnails),
+                                             plate_top = one(top_thumbnails), plate_pick = one(pick_thumbnails), no_calibration;
+                std::vector<PlateBBoxData *> plate_bbox;
+                if (i < int(plate_bboxes.size()))
+                    plate_bbox.push_back(plate_bboxes[i]);
+                std::string plate_file = (project_path.parent_path() / (stem + "-plate" + std::to_string(i + 1) + ".gcode.3mf")).string();
+                if (!this->export_project(&m_models[0], plate_file, single_list, project_presets, plate_thumbnail, plate_no_light, plate_top,
+                                          plate_pick, no_calibration, plate_bbox, &m_print_config, true, 0)) {
+                    release_PlateData_list(plate_data_list);
+                    record_exit_reson(outfile_dir, CLI_EXPORT_3MF_ERROR, i + 1, cli_errors[CLI_EXPORT_3MF_ERROR], sliced_info);
+                    flush_and_exit(CLI_EXPORT_3MF_ERROR);
+                }
+                plate_files.push_back(plate_file);
+            }
+        }
+
         if (!this->export_project(&m_models[0], export_3mf_file, plate_data_list, project_presets, thumbnails, no_light_thumbnails, top_thumbnails, pick_thumbnails,
                                 calibration_thumbnails, plate_bboxes, &m_print_config, minimum_save, plate_to_slice - 1))
         {
@@ -8084,6 +8129,8 @@ int CLI::run(int argc, char **argv)
             record_exit_reson(outfile_dir, CLI_EXPORT_3MF_ERROR, 0, cli_errors[CLI_EXPORT_3MF_ERROR], sliced_info);
             flush_and_exit(CLI_EXPORT_3MF_ERROR);
         }
+        if (export_plates_separately)
+            sliced_info.extra["plate_files"] = plate_files;
 
         for (unsigned int i = 0; i < thumbnails.size(); i++)
             thumbnails[i]->reset();

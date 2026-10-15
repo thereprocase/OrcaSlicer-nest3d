@@ -13169,6 +13169,12 @@ CLIMiscConfigDef::CLIMiscConfigDef()
     def->cli_params = "report.json";
     def->set_default_value(new ConfigOptionString());
 
+    def = this->add("export_plates_separately", coBool);
+    def->label = L("Export plates separately");
+    def->tooltip = L("With --export-3mf on a sliced project, also write one single-plate <name>-plate<N>.gcode.3mf per "
+                     "sliced plate next to it, with that plate numbered 1 inside the file.");
+    def->set_default_value(new ConfigOptionBool(false));
+
 }
 
 const CLIActionsConfigDef    cli_actions_config_def;
