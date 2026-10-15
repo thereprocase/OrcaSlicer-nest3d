@@ -6282,6 +6282,11 @@ int CLI::run(int argc, char **argv)
         }
     }
 
+    // Whitespace only: a bridge that validates the start G-code line by line looks for tool selects at the
+    // start of a line, and the stock Bambu start G-code indents them.
+    if (auto *start_gcode = m_print_config.option<ConfigOptionString>("machine_start_gcode"))
+        start_gcode->value = AgentCLI::unindent_tool_selects(start_gcode->value);
+
     // loop through action options
     bool export_to_3mf = false, load_slicedata = false, export_slicedata = false, export_slicedata_error = false;
     bool no_check = false;
@@ -7381,6 +7386,13 @@ int CLI::run(int argc, char **argv)
         const BBLPrinterAgent bbl_agent;
 #endif /* SLIC3R_GUI */
 
+        // A printer, and a bridge sending to one, check the job's printer model. Without a machine_full
+        // profile for it (a fresh --datadir) fall back to the model id the vendor profile gives, as the GUI does.
+        if (printer_model_id.empty())
+            if (const auto *printer_model_opt = m_print_config.option<ConfigOptionString>("printer_model"))
+                printer_model_id = AgentCLI::printer_model_id(printer_model_opt->value);
+        const size_t project_filament_count = m_print_config.option<ConfigOptionStrings>("filament_colour", true)->values.size();
+
         for (int i = 0; i < plate_data_list.size(); i++) {
             PlateData *plate_data = plate_data_list[i];
             bool skip_this_plate = ((plate_to_slice != 0) && (plate_to_slice != (i + 1)))?true:false;
@@ -7388,6 +7400,16 @@ int CLI::run(int argc, char **argv)
             plate_data->skipped_objects = plate_skipped_objects[i];
             if (!printer_model_id.empty())
                 plate_data->printer_model_id = printer_model_id;
+            // One filament_maps slot per project filament, which the <filament> ids index; a printer
+            // bridge checks each filament against its slot.
+            // A plate can use a filament id past the project's list when --load-filaments names one preset twice.
+            size_t filament_slots = project_filament_count;
+            for (const FilamentInfo &filament : plate_data->slice_filaments_info)
+                filament_slots = std::max(filament_slots, size_t(filament.id + 1));
+            if (plate_data->filament_maps.empty())
+                plate_data->filament_maps = m_print_config.option<ConfigOptionInts>("filament_map", true)->values;
+            if (filament_slots > 0 && plate_data->filament_maps.size() != filament_slots)
+                plate_data->filament_maps.resize(filament_slots, 1);
             if (!nozzle_diameter_str.empty())
                 plate_data->nozzle_diameters = nozzle_diameter_str;
 
