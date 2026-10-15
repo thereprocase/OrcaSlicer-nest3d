@@ -157,6 +157,8 @@ def check_gap(report, gap):
         if obj["nearest_exclusion_mm"] is not None:
             check(obj["nearest_exclusion_mm"] >= gap - DISTANCE_TOLERANCE,
                   f'{name} is {obj["nearest_exclusion_mm"]} mm from the excluded area, gap {gap}')
+        # The stock 2 mm bed margin, or half the gap when that is more.
+        check(obj["bed_edge_mm"] >= max(2., gap / 2) - DISTANCE_TOLERANCE, f'{name} is {obj["bed_edge_mm"]} mm from the bed edge')
 
 
 def test_arrange_report_and_gap(root, notes):
@@ -290,6 +292,24 @@ def l_bracket_stl(path):
     return path
 
 
+def box_stl(path, lo, hi):
+    """An axis-aligned box from corner `lo` to corner `hi`, outward-facing."""
+    (x0, y0, z0), (x1, y1, z1) = lo, hi
+    quads = [((x0, y0, z0), (x0, y1, z0), (x1, y1, z0), (x1, y0, z0)), ((x0, y0, z1), (x1, y0, z1), (x1, y1, z1), (x0, y1, z1)),
+             ((x0, y0, z0), (x1, y0, z0), (x1, y0, z1), (x0, y0, z1)), ((x0, y1, z0), (x0, y1, z1), (x1, y1, z1), (x1, y1, z0)),
+             ((x0, y0, z0), (x0, y0, z1), (x0, y1, z1), (x0, y1, z0)), ((x1, y0, z0), (x1, y1, z0), (x1, y1, z1), (x1, y0, z1))]
+    with open(path, "wb") as f:
+        f.write(b"box".ljust(80, b" "))
+        f.write(struct.pack("<I", 2 * len(quads)))
+        for a, b, c, d in quads:
+            for tri in ((a, b, c), (a, c, d)):
+                f.write(struct.pack("<3f", 0, 0, 0))
+                for v in tri:
+                    f.write(struct.pack("<3f", *v))
+                f.write(b"\0\0")
+    return path
+
+
 def test_summary_matches_toolpaths(root, notes):
     work = Work(root, "summary-plain")
     _, result = run_slicer(work, [CAP], "--arrange", "1", "--slice", "0", "--export-3mf", "p.3mf", "--summary", "summary.json")
@@ -339,6 +359,19 @@ def test_first_layer_check(root, notes):
         check(obj["nearest_exclusion_mm"] >= report[obj["name"]]["nearest_exclusion_mm"] - DISTANCE_TOLERANCE,
               "the first layer is no closer to the excluded area than the whole part")
         check("near_exclusion_area" not in obj["flags"], "3 mm from the excluded area is not flagged")
+
+    # Left where the file puts it, 1.5 mm right of the 18 x 28 mm excluded area.
+    work = Work(root, "first-layer-near-exclusion")
+    cube = box_stl(work.path("cube.stl"), (19.5, 5, 0), (29.5, 15, 10))
+    _, result = run_slicer(work, [cube], "--arrange", "0", "--slice", "0", "--export-3mf", "p.3mf",
+                           "--first-layer-check", "--arrange-report", "report.json")
+    report = json.load(open(os.path.join(work.out, "report.json")))
+    check(not report["unplaced"] and report["objects"][0]["plate"] == 1, f"an unarranged part on the bed is on plate 1: {report}")
+    check(abs(report["objects"][0]["nearest_exclusion_mm"] - 1.5) < DISTANCE_TOLERANCE, f"report {report['objects'][0]}")
+    obj = result["sliced_plates"][0]["summary"]["first_layer"]["objects"][0]
+    check(abs(obj["nearest_exclusion_mm"] - 1.5) < DISTANCE_TOLERANCE and "near_exclusion_area" in obj["flags"],
+          f"1.5 mm from the excluded area is flagged: {obj}")
+    check(abs(obj["contact_area_mm2"] - 100) < 1, f"a 10 x 10 mm box stands on 100 mm2: {obj['contact_area_mm2']}")
 
     work = Work(root, "first-layer-threshold")
     _, result = run_slicer(work, [CAP], "--arrange", "1", "--slice", "0", "--export-3mf", "p.3mf",
