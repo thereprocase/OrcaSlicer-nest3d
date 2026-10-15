@@ -1,0 +1,75 @@
+name: Publish tested Repro nightly
+
+on:
+  workflow_run:
+    workflows: ["Build all"]
+    types: [completed]
+    branches: [repro-dev]
+  workflow_dispatch:
+    inputs:
+      build_run_id:
+        description: Successful repro-dev Build all run to publish without rebuilding
+        required: true
+        type: string
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  verify_build:
+    if: >-
+      github.repository == 'thereprocase/OrcaSlicer-nest3d' &&
+      (github.event_name == 'workflow_dispatch' ||
+       (github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.event == 'push'))
+    runs-on: ubuntu-24.04
+    outputs:
+      sha: ${{ steps.build.outputs.sha }}
+      run_id: ${{ steps.build.outputs.run_id }}
+    steps:
+      - id: build
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          RUN_ID: ${{ inputs.build_run_id || github.event.workflow_run.id }}
+        run: |
+          [[ "$RUN_ID" =~ ^[0-9]+$ ]] || exit 1
+          gh api "repos/$GH_REPO/actions/runs/$RUN_ID" > build-run.json
+          python3 - <<'PY'
+          import json, os, re
+          from pathlib import Path
+          run = json.loads(Path('build-run.json').read_text())
+          assert run['conclusion'] == 'success' and run['status'] == 'completed'
+          assert run['path'] == '.github/workflows/build_all.yml'
+          assert run['head_branch'] == 'repro-dev' and run['event'] != 'pull_request'
+          assert run['head_repository']['full_name'] == 'thereprocase/OrcaSlicer-nest3d'
+          assert re.fullmatch('[a-f0-9]{40}', run['head_sha'])
+          with open(os.environ['GITHUB_OUTPUT'], 'a') as stream:
+              stream.write(f"sha={run['head_sha']}\nrun_id={run['id']}\n")
+          PY
+
+  publish:
+    needs: verify_build
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+      actions: read
+    concurrency:
+      group: repro-nightly-publish
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ needs.verify_build.outputs.sha }}
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
+        with:
+          pattern: OrcaSlicer*
+          path: nightly-artifacts
+          run-id: ${{ needs.verify_build.outputs.run_id }}
+          github-token: ${{ github.token }}
+      - name: Publish the verified build
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          BUILD_SHA: ${{ needs.verify_build.outputs.sha }}
+        run: python3 scripts/publish_repro_nightly.py nightly-artifacts --sha "$BUILD_SHA"
