@@ -401,6 +401,7 @@ static constexpr const char* PLATERID_ATTR = "plater_id";
 static constexpr const char* PLATER_NAME_ATTR = "plater_name";
 static constexpr const char* PLATE_IDX_ATTR = "index";
 static constexpr const char* PRINTER_MODEL_ID_ATTR = "printer_model_id";
+static constexpr const char* AMS_MAPPING_ATTR = "ams_mapping";
 static constexpr const char* EXTRUDER_TYPE_ATTR = "extruder_type";
 static constexpr const char* NOZZLE_VOLUME_TYPE_ATTR = "nozzle_volume_type";
 static constexpr const char* NOZZLE_TYPE_ATTR          = "nozzle_types";
@@ -1732,6 +1733,7 @@ void PlateData::parse_filament_info(GCodeProcessorResult *result)
             plate->slice_filaments_info = it->second->slice_filaments_info;
             plate->nozzles_info = it->second->nozzles_info;
             plate->printer_model_id = it->second->printer_model_id;
+            plate->ams_mapping = it->second->ams_mapping;
             plate->nozzle_diameters = it->second->nozzle_diameters;
             plate->nozzle_volume_types = it->second->nozzle_volume_types;
             plate->filament_maps = it->second->filament_maps;
@@ -2431,6 +2433,7 @@ void PlateData::parse_filament_info(GCodeProcessorResult *result)
             plate_data_list[it->first-1]->nozzles_info  = it->second->nozzles_info;
             plate_data_list[it->first-1]->skipped_objects = it->second->skipped_objects;
             plate_data_list[it->first-1]->printer_model_id = it->second->printer_model_id;
+            plate_data_list[it->first-1]->ams_mapping = it->second->ams_mapping;
             plate_data_list[it->first-1]->nozzle_diameters = it->second->nozzle_diameters;
             plate_data_list[it->first-1]->nozzle_volume_types = it->second->nozzle_volume_types;
             plate_data_list[it->first-1]->filament_maps = it->second->filament_maps;
@@ -4803,6 +4806,11 @@ void PlateData::parse_filament_info(GCodeProcessorResult *result)
             {
                 if (m_curr_plater)
                     m_curr_plater->printer_model_id = value;
+            }
+            else if (key == AMS_MAPPING_ATTR)
+            {
+                if (m_curr_plater)
+                    m_curr_plater->ams_mapping = value;
             }
             else if (key == NOZZLE_VOLUME_TYPE_ATTR)
             {
@@ -8745,6 +8753,8 @@ bool _BBS_3MF_Exporter::_add_model_config_file_to_archive(mz_zip_archive& archiv
                                 [](int v) { return v > 1; });
 
                 stream << "    <" << METADATA_TAG << " " << KEY_ATTR << "=\"" << PRINTER_MODEL_ID_ATTR       << "\" " << VALUE_ATTR << "=\"" << plate_data->printer_model_id << "\"/>\n";
+                if (!plate_data->ams_mapping.empty())
+                    stream << "    <" << METADATA_TAG << " " << KEY_ATTR << "=\"" << AMS_MAPPING_ATTR << "\" " << VALUE_ATTR << "=\"" << xml_escape_double_quotes_attribute_value(plate_data->ams_mapping) << "\"/>\n";
                 stream << "    <" << METADATA_TAG << " " << KEY_ATTR << "=\"" << NOZZLE_DIAMETERS_ATTR       << "\" " << VALUE_ATTR << "=\"" << nozzle_diameters_str << "\"/>\n";
                 stream << "    <" << METADATA_TAG << " " << KEY_ATTR << "=\"" << TIMELAPSE_TYPE_ATTR << "\" " << VALUE_ATTR << "=\"" << timelapse_type << "\"/>\n";
                 stream << "    <" << METADATA_TAG << " " << KEY_ATTR << "=\"" << SLICE_PREDICTION_ATTR << "\" " << VALUE_ATTR << "=\"" << plate_data->get_gcode_prediction_str() << "\"/>\n";

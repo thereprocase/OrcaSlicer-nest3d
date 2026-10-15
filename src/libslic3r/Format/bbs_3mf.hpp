@@ -96,6 +96,8 @@ struct PlateData
     std::vector<std::pair<int, int>> objects_and_instances;
     std::map<int, std::pair<int, int>> obj_inst_map;
     std::string     printer_model_id;
+    // Intended AMS tray per filament, "2,0"; written to slice_info only when set (CLI --ams-map).
+    std::string     ams_mapping;
     std::string     nozzle_diameters;
     std::string     nozzle_volume_types;
     std::string     gcode_file;

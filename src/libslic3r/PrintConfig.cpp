@@ -13175,6 +13175,13 @@ CLIMiscConfigDef::CLIMiscConfigDef()
                      "sliced plate next to it, with that plate numbered 1 inside the file.");
     def->set_default_value(new ConfigOptionBool(false));
 
+    def = this->add("ams_map", coString);
+    def->label = L("AMS mapping");
+    def->tooltip = L("Intended AMS tray (0-based) for each filament, in filament order, e.g. 2 or 2,0. Recorded as the "
+                     "ams_mapping metadata of each plate in Metadata/slice_info.config of the exported 3MF.");
+    def->cli_params = "\"tray1,tray2,...\"";
+    def->set_default_value(new ConfigOptionString());
+
 }
 
 const CLIActionsConfigDef    cli_actions_config_def;

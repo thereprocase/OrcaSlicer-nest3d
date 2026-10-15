@@ -82,6 +82,8 @@
 #include "nlohmann/json.hpp"
 
 #include <boost/algorithm/string/predicate.hpp>
+#include <boost/algorithm/string/join.hpp>
+#include <boost/algorithm/string/replace.hpp>
 #include <boost/filesystem.hpp>
 #include <boost/nowide/args.hpp>
 #include <boost/nowide/cstdlib.hpp>
@@ -1624,6 +1626,22 @@ int CLI::run(int argc, char **argv)
 
     // Outputs for printer bridges, read up front so a malformed value fails before any slicing.
     const bool        export_plates_separately = m_config.opt_bool("export_plates_separately");
+    std::string       ams_mapping;
+    for (const auto &[option, value] : {std::make_pair("ams_map", &ams_mapping)}) {
+        const std::string text = m_config.opt_string(option);
+        std::vector<int>  trays;
+        if (text.empty())
+            continue;
+        if (!AgentCLI::parse_tray_list(text, trays)) {
+            boost::nowide::cerr << "--" << boost::replace_all_copy(std::string(option), "_", "-") << " must list 0-based tray indices, e.g. 2,0" << std::endl;
+            record_exit_reson(outfile_dir, CLI_INVALID_PARAMS, 0, cli_errors[CLI_INVALID_PARAMS], sliced_info);
+            flush_and_exit(CLI_INVALID_PARAMS);
+        }
+        std::vector<std::string> items;
+        for (int tray : trays)
+            items.push_back(std::to_string(tray));
+        *value = boost::algorithm::join(items, ",");
+    }
 
     ConfigOptionBool* skip_modified_gcodes_option = m_config.option<ConfigOptionBool>("skip_modified_gcodes");
     if (skip_modified_gcodes_option)
@@ -6262,6 +6280,15 @@ int CLI::run(int argc, char **argv)
         return (outfile_dir.empty() || boost::filesystem::path(file).is_absolute()) ? file : outfile_dir + "/" + file;
     };
     const AgentCLI::PlateBed plate_bed = AgentCLI::plate_bed(m_print_config);
+    // The tray list is per filament, so a list of another length maps some filament to the wrong tray.
+    for (const std::string *mapping : {&ams_mapping}) {
+        const size_t filaments = m_print_config.option<ConfigOptionStrings>("filament_colour", true)->values.size();
+        if (!mapping->empty() && size_t(std::count(mapping->begin(), mapping->end(), ',') + 1) != filaments) {
+            boost::nowide::cerr << "the AMS mapping " << *mapping << " needs one tray per filament, " << filaments << " here" << std::endl;
+            record_exit_reson(outfile_dir, CLI_INVALID_PARAMS, 0, cli_errors[CLI_INVALID_PARAMS], sliced_info);
+            flush_and_exit(CLI_INVALID_PARAMS);
+        }
+    }
     if (const std::string report_file = m_config.opt_string("arrange_report"); !report_file.empty() && !m_models.empty()) {
         const Model                         &model = m_models[0];
         std::vector<AgentCLI::Placement>     placements;
@@ -7407,6 +7434,7 @@ int CLI::run(int argc, char **argv)
             plate_data->skipped_objects = plate_skipped_objects[i];
             if (!printer_model_id.empty())
                 plate_data->printer_model_id = printer_model_id;
+            plate_data->ams_mapping = ams_mapping;
             // One filament_maps slot per project filament, which the <filament> ids index; a printer
             // bridge checks each filament against its slot.
             // A plate can use a filament id past the project's list when --load-filaments names one preset twice.
