@@ -225,17 +225,17 @@ json first_layer_check(const Print &print, const PlateBed &bed, double min_islan
         for (const PrintInstance &instance : object->instances()) {
             const ExPolygons placed  = translated(islands, Point(instance.shift + to_plate));
             double           contact = 0., smallest = std::numeric_limits<double>::infinity();
-            json             small   = json::array();
+            json             small_islands = json::array();
             for (const ExPolygon &island : placed) {
                 const double a = island.area();
                 contact += a;
                 smallest = std::min(smallest, a);
                 if (a * SCALING_FACTOR * SCALING_FACTOR < min_island_mm2)
-                    small.push_back(json{{"area_mm2", mm2(a)}, {"center", point_json(get_extents(island).center())}});
+                    small_islands.push_back(json{{"area_mm2", mm2(a)}, {"center", point_json(get_extents(island).center())}});
             }
             const double exclusion = outline_distance(placed, excluded, true);
             json         flags     = json::array();
-            if (!small.empty())
+            if (!small_islands.empty())
                 flags.push_back("small_island");
             if (std::isfinite(exclusion) && unscale<double>(exclusion) < min_exclusion_mm)
                 flags.push_back("near_exclusion_area");
@@ -243,7 +243,7 @@ json first_layer_check(const Print &print, const PlateBed &bed, double min_islan
                                    {"island_count", placed.size()},
                                    {"contact_area_mm2", mm2(contact)},
                                    {"smallest_island_mm2", std::isfinite(smallest) ? json(mm2(smallest)) : json(nullptr)},
-                                   {"small_islands", std::move(small)},
+                                   {"small_islands", std::move(small_islands)},
                                    {"nearest_exclusion_mm", distance_json(exclusion)},
                                    {"bbox", bbox_json(get_extents(placed))},
                                    {"flags", std::move(flags)}});
