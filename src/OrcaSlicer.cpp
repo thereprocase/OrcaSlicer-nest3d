@@ -2171,6 +2171,34 @@ int CLI::run(int argc, char **argv)
         if (!probe_type && (inherits == nullptr || inherits->value.empty()))
             return true;
 
+        // A user preset outside the data directory is not in the bundle, and a fresh --datadir has no
+        // vendor installed to load. Its parent is a system preset all the same, so read that from the
+        // installed or bundled vendor tree, as a system filament is, and lay the user's values over it.
+        auto resolve_from_system_parent = [&]() {
+            Preset::Type parent_type;
+            if (config_type == "process")
+                parent_type = Preset::TYPE_PRINT;
+            else if (config_type == "filament")
+                parent_type = Preset::TYPE_FILAMENT;
+            else if (config_type == "machine")
+                parent_type = Preset::TYPE_PRINTER;
+            else
+                return false;
+            // A copy: `inherits` points into `config`, which is replaced below.
+            const std::string  parent_name = inherits->value;
+            DynamicPrintConfig parent;
+            std::string        parent_error;
+            if (!ensure_system_preset_resolver().resolve_system_preset(parent, parent_type, parent_name, config_substitution_rule, parent_error)) {
+                error += "; system parent '" + parent_name + "': " + parent_error;
+                return false;
+            }
+            parent.apply(config);
+            config = std::move(parent);
+            BOOST_LOG_TRIVIAL(info) << boost::format("resolved %1% over its system parent %2%") % file % parent_name;
+            error.clear();
+            return true;
+        };
+
         PresetBundle                 *bundle = nullptr;
         bool                          allow_source_manifest = false;
         if (config_from == "system") {
@@ -2179,7 +2207,7 @@ int CLI::run(int argc, char **argv)
         } else {
             bundle = ensure_cli_preset_bundle(error);
             if (bundle == nullptr)
-                return false;
+                return !probe_type && resolve_from_system_parent();
         }
 
         if (probe_type) {
@@ -2202,8 +2230,9 @@ int CLI::run(int argc, char **argv)
             error = "Unsupported preset type: " + config_type;
             return false;
         }
-        return bundle->resolve_preset_config(config, preset_type, file, config_substitution_rule,
-                                             error, allow_source_manifest);
+        if (bundle->resolve_preset_config(config, preset_type, file, config_substitution_rule, error, allow_source_manifest))
+            return true;
+        return config_from != "system" && resolve_from_system_parent();
     };
 
     //ORCA: list the keys a user preset overrides relative to its system parent, for the
