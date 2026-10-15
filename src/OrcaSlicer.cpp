@@ -1636,6 +1636,8 @@ int CLI::run(int argc, char **argv)
     // Outputs for printer bridges, read up front so a malformed value fails before any slicing.
     const std::string bridge_url        = m_config.opt_string("send_to_bridge");
     const std::string bridge_token_file = m_config.opt_string("bridge_token_file");
+    const std::string bridge_ca_file    = m_config.opt_string("bridge_ca_file");
+    const bool        bridge_insecure   = m_config.opt_bool("bridge_insecure");
     const bool        export_plates_separately = m_config.opt_bool("export_plates_separately") || !bridge_url.empty();
     std::string       ams_mapping, bridge_ams_mapping;
     for (const auto &[option, value] : {std::make_pair("ams_map", &ams_mapping), std::make_pair("bridge_ams_map", &bridge_ams_mapping)}) {
@@ -8244,7 +8246,8 @@ int CLI::run(int argc, char **argv)
             if (plate_files.empty())
                 error = "no sliced plate to send";
             const bool sent = !plate_files.empty() &&
-                              AgentCLI::send_to_bridge(bridge_url, bridge_token_file, bridge_ams_mapping, plate_files, uploads, error);
+                              AgentCLI::send_to_bridge(bridge_url, bridge_token_file, bridge_ams_mapping, bridge_ca_file,
+                                                       bridge_insecure, plate_files, uploads, error);
             sliced_info.extra["bridge_uploads"] = uploads;
             if (!sent) {
                 boost::nowide::cerr << "--send-to-bridge: " << error << std::endl;

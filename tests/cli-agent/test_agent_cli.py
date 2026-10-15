@@ -509,6 +509,44 @@ def test_send_to_bridge_mock(root, notes):
     check(token not in proc.stdout + proc.stderr + json.dumps(result), "no token on failure either")
 
 
+def test_send_to_bridge_tls(root, notes):
+    """The token only goes out over a verified connection: a self-signed bridge is refused unless its
+    certificate is given with --bridge-ca-file (or checks are waived with --bridge-insecure)."""
+    import ssl
+    import subprocess as sp
+
+    work = Work(root, "bridge-tls")
+    cert, key = work.path("bridge.pem"), work.path("bridge.key")
+    sp.run(["openssl", "req", "-x509", "-newkey", "rsa:2048", "-nodes", "-days", "1", "-subj", "/CN=127.0.0.1",
+            "-addext", "subjectAltName=IP:127.0.0.1", "-keyout", key, "-out", cert], check=True, capture_output=True)
+    ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+    ctx.load_cert_chain(cert, key)
+    token_file = work.path("token")
+    with open(token_file, "w") as f:
+        f.write("tok-" + secrets.token_hex(16) + "\n")
+
+    def attempt(name, extra):
+        MockBridge.requests = []
+        server = http.server.HTTPServer(("127.0.0.1", 0), MockBridge)
+        server.socket = ctx.wrap_socket(server.socket, server_side=True)
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        try:
+            url = f"https://127.0.0.1:{server.server_port}/api/v1/printers/p1s/jobs"
+            proc, result = run_slicer(Work(root, name), [CAP], "--arrange", "1", "--slice", "0", "--export-3mf",
+                                      "job.3mf", "--send-to-bridge", url, "--bridge-token-file", token_file,
+                                      "--ams-map", "0", *extra, check=False)
+        finally:
+            server.shutdown()
+        return proc, result, len(MockBridge.requests)
+
+    proc, result, seen = attempt("tls-untrusted", [])
+    check(proc.returncode != 0 and seen == 0, f"a self-signed bridge is refused by default (exit {proc.returncode}, {seen} requests)")
+    proc, result, seen = attempt("tls-pinned", ["--bridge-ca-file", cert])
+    check(proc.returncode == 0 and seen == 1, f"--bridge-ca-file trusts the bridge (exit {proc.returncode}, {seen} requests)")
+    proc, result, seen = attempt("tls-insecure", ["--bridge-insecure"])
+    check(proc.returncode == 0 and seen == 1, f"--bridge-insecure skips the checks (exit {proc.returncode}, {seen} requests)")
+
+
 TESTS = [
     test_arrange_report_and_gap,
     test_kraken_set_fits_one_plate_with_3mm_gap,
@@ -520,6 +558,7 @@ TESTS = [
     test_inheriting_presets_in_empty_datadir,
     test_object_settings,
     test_send_to_bridge_mock,
+    test_send_to_bridge_tls,
 ]
 
 

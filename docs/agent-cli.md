@@ -200,3 +200,7 @@ that point it at a binary, a data directory, presets and parts.
 python3 tests/cli-agent/test_agent_cli.py          # all checks
 python3 tests/cli-agent/test_agent_cli.py -k bridge
 ```
+
+The connection is verified: a bridge with a self-signed certificate is refused unless that
+certificate (or its CA) is passed with `--bridge-ca-file PATH`. `--bridge-insecure` skips the checks;
+anyone able to intercept the connection could then read the token.

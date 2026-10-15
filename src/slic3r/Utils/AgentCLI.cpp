@@ -419,6 +419,7 @@ bool parse_tray_list(const std::string &text, std::vector<int> &trays)
 }
 
 bool send_to_bridge(const std::string &url, const std::string &token_file, const std::string &ams_mapping,
+                    const std::string &ca_file, bool insecure,
                     const std::vector<std::string> &files, json &results, std::string &error)
 {
     std::string token;
@@ -449,8 +450,12 @@ bool send_to_bridge(const std::string &url, const std::string &token_file, const
     results     = json::array();
     for (const std::string &file : files) {
         json result{{"file", file}, {"ok", false}};
-        Http::post(url)
-            .header("Authorization", "Bearer " + token)
+        // The shared Http client defaults to no certificate checks; a bearer token must not go out that way.
+        Http http = Http::post(url);
+        http.tls_verify(!insecure);
+        if (!insecure && !ca_file.empty())
+            http.ca_file(ca_file);
+        http.header("Authorization", "Bearer " + token)
             .form_add("ams_mapping", ams_mapping)
             .form_add_file("file", fs::path(file), fs::path(file).filename().string())
             .on_complete([&](std::string body, unsigned status) {

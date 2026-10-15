@@ -13225,6 +13225,19 @@ CLIMiscConfigDef::CLIMiscConfigDef()
     def->cli_params = "path";
     def->set_default_value(new ConfigOptionString());
 
+    def = this->add("bridge_ca_file", coString);
+    def->label = L("Bridge CA file");
+    def->tooltip = L("PEM certificate (or CA) to trust for --send-to-bridge, for a bridge with a self-signed "
+                     "certificate. Without it the system trust store is used.");
+    def->cli_params = "path";
+    def->set_default_value(new ConfigOptionString());
+
+    def = this->add("bridge_insecure", coBool);
+    def->label = L("Skip bridge TLS checks");
+    def->tooltip = L("Send to the bridge without verifying its TLS certificate. Anyone able to intercept the "
+                     "connection could read the bearer token; prefer --bridge-ca-file.");
+    def->set_default_value(new ConfigOptionBool(false));
+
     def = this->add("bridge_ams_map", coString);
     def->label = L("Bridge AMS mapping");
     def->tooltip = L("ams_mapping field sent with --send-to-bridge: comma-separated 0-based tray indices, one per "

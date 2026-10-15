@@ -64,7 +64,9 @@ bool parse_tray_list(const std::string &text, std::vector<int> &trays);
 
 // Uploads each of `files` to `url` as multipart/form-data with fields `file` and `ams_mapping`, authorised
 // by the bearer token in `token_file`. One result per file goes to `results`. Never prints the token.
+// TLS is verified against `ca_file` when given, else the system store; `insecure` turns checks off.
 bool send_to_bridge(const std::string &url, const std::string &token_file, const std::string &ams_mapping,
+                    const std::string &ca_file, bool insecure,
                     const std::vector<std::string> &files, nlohmann::json &results, std::string &error);
 
 } // namespace AgentCLI
