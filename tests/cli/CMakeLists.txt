@@ -37,3 +37,11 @@ set_tests_properties(cli_malformed_input PROPERTIES
     LABELS "CLI;RequiresApp"
     SKIP_RETURN_CODE 77
     TIMEOUT 900)
+
+add_test(NAME cli_retraction_guard
+    COMMAND ${ORCA_CLI_TEST_PYTHON} ${CMAKE_CURRENT_SOURCE_DIR}/test_retraction_guard.py
+        $<TARGET_FILE:OrcaSlicer> ${CMAKE_SOURCE_DIR}/resources/profiles/BBL)
+set_tests_properties(cli_retraction_guard PROPERTIES
+    LABELS "CLI;RequiresApp;RetractionLimiter"
+    SKIP_RETURN_CODE 77
+    TIMEOUT 900)

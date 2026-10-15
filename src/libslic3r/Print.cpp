@@ -256,6 +256,9 @@ bool Print::invalidate_state_by_config_options(const ConfigOptionResolver & /* n
         "extrusion_rate_smoothing_external_perimeter_only",
         "reduce_infill_retraction",
         "filename_format",
+        "retraction_count_max",
+        "retraction_extrusion_window",
+        "retraction_minimum_extrusion",
         "retraction_minimum_travel",
         "retract_before_wipe",
         // Orca:

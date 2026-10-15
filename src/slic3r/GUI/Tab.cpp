@@ -4276,6 +4276,9 @@ void TabFilament::add_filament_overrides_page()
                                         "filament_retraction_speed",
                                         "filament_deretraction_speed",
                                         "filament_retract_restart_extra",
+                                        "filament_retraction_count_max",
+                                        "filament_retraction_extrusion_window",
+                                        "filament_retraction_minimum_extrusion",
                                         "filament_retraction_minimum_travel",
                                         "filament_retract_when_changing_layer",
                                         "filament_wipe",
@@ -4413,6 +4416,9 @@ void TabFilament::update_filament_overrides_page(const DynamicPrintConfig* print
                                             "filament_retract_restart_extra",
                                             "filament_retract_length_toolchange",
                                             "filament_retract_restart_extra_toolchange",
+                                            "filament_retraction_count_max",
+                                            "filament_retraction_extrusion_window",
+                                            "filament_retraction_minimum_extrusion",
                                             "filament_retraction_minimum_travel",
                                             "filament_retract_when_changing_layer",
                                             "filament_wipe",
@@ -6673,7 +6679,7 @@ void TabPrinter::toggle_options()
         // user can customize other retraction options if retraction is enabled
         //BBS
         bool retraction = have_retract_length || use_firmware_retraction;
-        std::vector<std::string> vec = {"z_hop", "retract_when_changing_layer"};
+        std::vector<std::string> vec = {"z_hop", "retract_when_changing_layer", "retraction_count_max", "retraction_extrusion_window", "retraction_minimum_extrusion"};
         for (auto el : vec)
             toggle_option(el, retraction, i);
 

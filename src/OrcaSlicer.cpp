@@ -4198,9 +4198,9 @@ int CLI::run(int argc, char **argv)
     //      override does. Without them re-opening the exported project in the GUI shows nothing
     //      modified and reverts those values to the system presets'.
     //
-    //      The keys come from m_config, not m_extra_config: read_cli() puts only what the user typed
-    //      into m_config (setup() adds nothing but CLI-own defaults), whereas the CLI writes its own
-    //      values into m_extra_config. Only keys whose value the override actually changed are
+    //      The keys come from m_config, not m_extra_config: read_cli() puts typed values there and
+    //      setup() adds CLI defaults, including the local retraction policy. The CLI then writes
+    //      those values into m_extra_config. Only keys whose value the override actually changed are
     //      recorded -- a typed value equal to the loaded one modifies nothing -- and each lands in
     //      the column(s) whose preset type owns it: [0] process, [1..n-2] filaments, [n-1] printer.
     //
@@ -8421,6 +8421,18 @@ bool CLI::setup(int argc, char **argv)
     for (const t_optiondef_map *options : { &cli_actions_config_def.options, &cli_transform_config_def.options, &cli_misc_config_def.options })
         for (const t_optiondef_map::value_type &optdef : *options)
             m_config.option(optdef.first, true);
+
+    // Local headless policy only. GUI/profile defaults remain disabled, while
+    // typed flags keep their usual precedence and are recorded in exported projects.
+    if (std::find(m_actions.begin(), m_actions.end(), "slice") != m_actions.end() &&
+        m_config.opt_int("retraction_guard") != 0) {
+        if (!m_config.has("retraction_count_max"))
+            m_config.set_deserialize_strict({{"retraction_count_max", "3"}});
+        if (!m_config.has("retraction_extrusion_window"))
+            m_config.set_deserialize_strict({{"retraction_extrusion_window", "1"}});
+        if (!m_config.has("retraction_minimum_extrusion"))
+            m_config.set_deserialize_strict({{"retraction_minimum_extrusion", "0.3"}});
+    }
 
     set_data_dir(m_config.opt_string("datadir"));
     if (!data_dir().empty() && !boost::filesystem::exists(data_dir())) {

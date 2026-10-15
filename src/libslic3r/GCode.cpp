@@ -10,6 +10,7 @@
 #include "GCode/PressureEqualizer.hpp"
 #include "GCode/SmallAreaInfillFlowCompensator.hpp"
 #include "GCode/CoolingBuffer.hpp"
+#include "GCode/RetractionLimiter.hpp"
 #include "GCode/AdaptivePAProcessor.hpp"
 #include "CustomGCode.hpp"
 #include "GCode/TimelapsePosPicker.hpp"
@@ -3260,6 +3261,7 @@ void GCode::_do_export(Print& print, GCodeOutputStream &file, ThumbnailsGenerato
 {
     PROFILE_FUNC();
 
+    m_retraction_limiters.clear();
     m_print = &print;
     m_timelapse_pos_picker.init(&print,m_writer.get_xy_offset().cast<coord_t>());
     // init as filament map
@@ -4492,7 +4494,7 @@ void GCode::_do_export(Print& print, GCodeOutputStream &file, ThumbnailsGenerato
                         file.write(this->set_extruder(initial_extruder_id, initial_layer_print_height, true));
                         prime_extruder = true;
                     } else {
-                        file.write(this->retract());
+                        file.write(this->retract(false, false, LiftType::NormalLift, false, erNone, false, true));
                     }
                     file.write(m_writer.travel_to_z(m_max_layer_z + m_writer.config.z_hop.get_at(get_filament_config_index((int)initial_extruder_id))));
                     file.write(this->travel_to(Point(0, 0), erNone, "move to origin position for next object"));
@@ -7220,7 +7222,7 @@ LayerResult GCode::process_layer(
     if (!need_insert_timelapse_gcode_for_traditional  && is_BBL_Printer()
         && !(m_farthest_point_timelapse.enabled && m_farthest_point_timelapse.farthest_is_photo_head)) { // Equivalent to the timelapse gcode placed in layer_change_gcode
         if (FILAMENT_CONFIG(retract_when_changing_layer)) {
-            gcode += this->retract(false, false, auto_lift_type, true);
+            gcode += this->retract(false, false, auto_lift_type, true, erNone, false, true);
         }
         gcode += insert_timelapse_gcode();
     }
@@ -7329,7 +7331,7 @@ LayerResult GCode::process_layer(
                     }
 
                     if (should_insert) {
-                        gcode += this->retract(false, false, auto_lift_type, true);
+                        gcode += this->retract(false, false, auto_lift_type, true, erNone, false, true);
                         m_writer.add_object_change_labels(gcode);
 
                         gcode += insert_timelapse_gcode();
@@ -7338,7 +7340,7 @@ LayerResult GCode::process_layer(
                 }
 
                 if (print.config().enable_wrapping_detection && !has_insert_wrapping_detection_gcode) {
-                    gcode += this->retract(false, false, auto_lift_type, true);
+                    gcode += this->retract(false, false, auto_lift_type, true, erNone, false, true);
                     gcode += insert_wrapping_detection_gcode();
                     has_insert_wrapping_detection_gcode = true;
                 }
@@ -7357,7 +7359,7 @@ LayerResult GCode::process_layer(
                 bool is_case_b = m_farthest_point_timelapse.enabled && !m_farthest_point_timelapse.farthest_is_photo_head;
                 bool should_insert = is_case_b ? !curr_is_photo_head : curr_is_photo_head;
                 if (should_insert) {
-                    gcode += this->retract(false, false, auto_lift_type, true);
+                    gcode += this->retract(false, false, auto_lift_type, true, erNone, false, true);
                     m_writer.add_object_change_labels(gcode);
 
                     gcode += insert_timelapse_gcode();
@@ -7366,7 +7368,7 @@ LayerResult GCode::process_layer(
             }
 
             if (print.config().enable_wrapping_detection && !has_insert_wrapping_detection_gcode) {
-                gcode += this->retract(false, false, auto_lift_type, true);
+                gcode += this->retract(false, false, auto_lift_type, true, erNone, false, true);
                 gcode += insert_wrapping_detection_gcode();
                 has_insert_wrapping_detection_gcode = true;
             }
@@ -7434,7 +7436,7 @@ LayerResult GCode::process_layer(
                 m_config.apply(instance_to_print.print_object.config(), true);
                 m_layer = layer_to_print.layer();
                 m_object_layer_over_raft = object_layer_over_raft;
-                if (m_config.reduce_crossing_wall)
+                if (m_config.reduce_crossing_wall || ((FILAMENT_CONFIG(retraction_count_max) > 0 && FILAMENT_CONFIG(retraction_extrusion_window) > 0.) || FILAMENT_CONFIG(retraction_minimum_extrusion) > 0.))
                     m_avoid_crossing_perimeters.init_layer(*m_layer);
 
                 if (this->config().gcode_label_objects) {
@@ -7576,7 +7578,7 @@ LayerResult GCode::process_layer(
                         gcode += this->extrude_perimeters(print, by_region_specific, first_layer, false);
                         if (!has_wipe_tower && need_insert_timelapse_gcode_for_traditional && printer_structure == PrinterStructure::psI3
                             && !has_insert_timelapse_gcode && has_infill(by_region_specific)) {
-                            gcode += this->retract(false, false, auto_lift_type, true);
+                            gcode += this->retract(false, false, auto_lift_type, true, erNone, false, true);
 
                             gcode += insert_timelapse_gcode();
                             has_insert_timelapse_gcode = true;
@@ -7668,7 +7670,7 @@ LayerResult GCode::process_layer(
                 m_config.apply(instance_to_print.print_object.config(), true);
                 m_layer = layer_to_print.layer();
                 m_object_layer_over_raft = object_layer_over_raft;
-                if (m_config.reduce_crossing_wall)
+                if (m_config.reduce_crossing_wall || ((FILAMENT_CONFIG(retraction_count_max) > 0 && FILAMENT_CONFIG(retraction_extrusion_window) > 0.) || FILAMENT_CONFIG(retraction_minimum_extrusion) > 0.))
                     m_avoid_crossing_perimeters.init_layer(*m_layer);
 
                 if (this->config().gcode_label_objects) {
@@ -7878,7 +7880,7 @@ LayerResult GCode::process_layer(
                         if (!has_wipe_tower && need_insert_timelapse_gcode_for_traditional
                             && printer_structure == PrinterStructure::psI3
                             && !has_insert_timelapse_gcode && plan_has_infill(by_region_specific)) {
-                            gcode += this->retract(false, false, auto_lift_type, true);
+                            gcode += this->retract(false, false, auto_lift_type, true, erNone, false, true);
                             gcode += insert_timelapse_gcode();
                             has_insert_timelapse_gcode = true;
                         }
@@ -8004,7 +8006,7 @@ LayerResult GCode::process_layer(
     // block never runs for a printer with the subsystem off.
     if (m_farthest_point_timelapse.enabled && m_farthest_point_timelapse.farthest_is_photo_head && !has_insert_timelapse_gcode) {
         if (FILAMENT_CONFIG(retract_when_changing_layer)) {
-            gcode += this->retract(false, false, auto_lift_type, true);
+            gcode += this->retract(false, false, auto_lift_type, true, erNone, false, true);
         }
         m_writer.add_object_change_labels(gcode);
         gcode += insert_timelapse_gcode();
@@ -8026,7 +8028,7 @@ LayerResult GCode::process_layer(
             m_support_traditional_timelapse = false;
         }
         if (FILAMENT_CONFIG(retract_when_changing_layer)) {
-            gcode += this->retract(false, false, auto_lift_type, true);
+            gcode += this->retract(false, false, auto_lift_type, true, erNone, false, true);
         }
         m_writer.add_object_change_labels(gcode);
 
@@ -8237,7 +8239,7 @@ std::string GCode::change_layer(coordf_t print_z)
     if (FILAMENT_CONFIG(retract_when_changing_layer) && m_writer.will_move_z(z)) {
         LiftType lift_type = this->to_lift_type(ZHopType(FILAMENT_CONFIG(z_hop_types)));
         //BBS: force to use SpiralLift when change layer if lift type is auto
-        gcode += this->retract(false, false, ZHopType(FILAMENT_CONFIG(z_hop_types)) == ZHopType::zhtAuto ? LiftType::SpiralLift : lift_type);
+        gcode += this->retract(false, false, ZHopType(FILAMENT_CONFIG(z_hop_types)) == ZHopType::zhtAuto ? LiftType::SpiralLift : lift_type, false, erNone, false, true);
     }
 
     m_writer.add_object_change_labels(gcode);
@@ -10145,16 +10147,52 @@ std::string GCode::travel_to(const Point& point, ExtrusionRole role, std::string
 
     // if a retraction would be needed, try to use reduce_crossing_wall to plan a
     // multi-hop travel path inside the configuration space
-    if (m_config.reduce_crossing_wall
+    const bool limit_retractions = (FILAMENT_CONFIG(retraction_count_max) > 0 && FILAMENT_CONFIG(retraction_extrusion_window) > 0.) || FILAMENT_CONFIG(retraction_minimum_extrusion) > 0.;
+    const bool protected_wall_endpoints = role == erExternalPerimeter || role == erOverhangPerimeter ||
+        m_last_notgapfill_extrusion_role == erExternalPerimeter || m_last_notgapfill_extrusion_role == erOverhangPerimeter;
+    bool avoid_for_limiter = false;
+    bool travel_budget_available = true;
+    if (limit_retractions) {
+        RetractionLimiter &limiter = m_retraction_limiters[m_writer.filament()->id()];
+        const double retracted = m_writer.get_extruder_retracted_length(m_writer.filament()->id());
+        const double position = m_writer.filament()->used_filament() +
+            (m_writer.filament()->is_share_extruder() ? retracted : 0.);
+        travel_budget_available = limiter.allows(position, FILAMENT_CONFIG(retraction_count_max), FILAMENT_CONFIG(retraction_extrusion_window));
+        avoid_for_limiter = needs_retraction && retracted <= EPSILON && ((!travel_budget_available && !protected_wall_endpoints) ||
+            !limiter.allows_minimum(position, FILAMENT_CONFIG(retraction_minimum_extrusion)));
+    }
+    if ((m_config.reduce_crossing_wall || avoid_for_limiter)
         && !m_avoid_crossing_perimeters.disabled_once()
         && m_layer != nullptr   // A brim apron layer has no Layer to avoid crossing
         && m_writer.is_current_position_clear())
         //BBS: don't generate detour travel paths when current position is unclea
     {
         travel = m_avoid_crossing_perimeters.travel_to(*this, point, &could_be_wipe_disabled);
+        // Implicit avoidance must not produce an unlimited detour. An explicit
+        // wall-avoidance setting retains its own configured distance policy.
+        if (!m_config.reduce_crossing_wall && m_config.max_travel_detour_distance.value == 0. &&
+            travel.length() > (point - this->last_pos()).cast<double>().norm() + scale_(10.))
+            travel = Polyline {this->last_pos(), point};
         // check again whether the new travel path still needs a retraction
         needs_retraction = this->needs_retraction(travel, role, lift_type);
         //if (needs_retraction && m_layer_index > 1) exit(0);
+    }
+
+    const auto inside_outer_contour = [this](const Polyline &path) {
+        if (m_layer != nullptr)
+            for (const ExPolygon &island : m_layer->lslices)
+                if (ExPolygon(island.contour).contains(path))
+                    return true;
+        return false;
+    };
+    // If the bounded wall planner cannot stay inside, prefer crossing holes to
+    // leaving the outside silhouette. Exterior-to-exterior transfers never qualify.
+    if (avoid_for_limiter && m_writer.is_current_position_clear() && !inside_outer_contour(travel)) {
+        Polyline shortcut {this->last_pos(), point};
+        if (inside_outer_contour(shortcut)) {
+            travel = std::move(shortcut);
+            needs_retraction = this->needs_retraction(travel, role, lift_type);
+        }
     }
 
     // Re-allow reduce_crossing_wall for the next travel moves
@@ -10168,7 +10206,14 @@ std::string GCode::travel_to(const Point& point, ExtrusionRole role, std::string
             m_wipe.reset_path();*/
 
         Point last_post_before_retract = this->last_pos();
-        gcode += this->retract(false, false, lift_type, false, role);
+        // The count is a soft cap: visible outside walls take priority. Hole
+        // shortcuts are allowed only when both endpoints and the whole path stay
+        // inside one outside contour. Unknown/support geometry stays protected.
+        bool optional_travel = false;
+        if (!travel_budget_available && m_layer != nullptr && m_writer.is_current_position_clear() && !protected_wall_endpoints) {
+            optional_travel = inside_outer_contour(travel);
+        }
+        gcode += this->retract(false, false, lift_type, false, role, optional_travel, true);
         // When "Wipe while retracting" is enabled, then extruder moves to another position, and travel from this position can cross perimeters.
         // Because of it, it is necessary to call avoid crossing perimeters again with new starting point after calling retraction()
         // FIXME Lukas H.: Try to predict if this second calling of avoid crossing perimeters will be needed or not. It could save computations.
@@ -10381,15 +10426,31 @@ bool GCode::needs_retraction(const Polyline &travel, ExtrusionRole role, LiftTyp
     return true;
 }
 
-std::string GCode::retract(bool toolchange, bool is_last_retraction, LiftType lift_type, bool apply_instantly, ExtrusionRole role)
+std::string GCode::retract(bool toolchange, bool is_last_retraction, LiftType lift_type, bool apply_instantly, ExtrusionRole role, bool limit_travel_retraction, bool normal_retraction)
 {
     std::string gcode;
 
     if (m_writer.filament() == nullptr)
         return gcode;
 
+    const bool limiter_enabled = (FILAMENT_CONFIG(retraction_count_max) > 0 && FILAMENT_CONFIG(retraction_extrusion_window) > 0.) || FILAMENT_CONFIG(retraction_minimum_extrusion) > 0.;
+    RetractionLimiter &limiter = m_retraction_limiters[m_writer.filament()->id()];
+    const double retracted_before = m_writer.get_extruder_retracted_length(m_writer.filament()->id());
+    // Shared-extruder accounting omits the retracted length in used_filament().
+    const double filament_position = m_writer.filament()->used_filament() +
+        (m_writer.filament()->is_share_extruder() ? retracted_before : 0.);
+    const bool budget_available = limiter.allows(filament_position, FILAMENT_CONFIG(retraction_count_max), FILAMENT_CONFIG(retraction_extrusion_window));
+    const bool minimum_available = limiter.allows_minimum(filament_position, FILAMENT_CONFIG(retraction_minimum_extrusion));
+    const bool hard_limit = normal_retraction && !minimum_available;
+    const bool skip_retraction = limiter_enabled && !toolchange && !is_last_retraction && retracted_before <= EPSILON &&
+        (hard_limit || (limit_travel_retraction && !budget_available));
+    if (skip_retraction) {
+        gcode += hard_limit ? "; travel retraction skipped: minimum extrusion\n" : "; travel retraction skipped: frequency limit\n";
+        m_wipe.reset_path(); // A subsequent retract must not wipe along a path before this travel.
+    }
+
     // wipe (if it's enabled for this extruder and we have a stored wipe path and no-zero wipe distance)
-    if (FILAMENT_CONFIG(wipe) && m_wipe.has_path() && scale_(FILAMENT_CONFIG(wipe_distance)) > SCALED_EPSILON) {
+    if (!skip_retraction && FILAMENT_CONFIG(wipe) && m_wipe.has_path() && scale_(FILAMENT_CONFIG(wipe_distance)) > SCALED_EPSILON) {
         Wipe::RetractionValues wipeRetractions = m_wipe.calculateWipeRetractionLengths(*this, toolchange);
         gcode += toolchange ? m_writer.retract_for_toolchange(true, wipeRetractions.retraction_length_before_wipe) :
                               m_writer.retract(true, wipeRetractions.retraction_length_before_wipe);
@@ -10403,9 +10464,15 @@ std::string GCode::retract(bool toolchange, bool is_last_retraction, LiftType li
         (the extruder might be already retracted fully or partially). We call these
         methods even if we performed wipe, since this will ensure the entire retraction
         length is honored in case wipe path was too short.  */
-    if ((!this->on_first_layer()  || this->config().bottom_surface_pattern != InfillPattern::ipHilbertCurve) &&
+    if (!skip_retraction && (!this->on_first_layer()  || this->config().bottom_surface_pattern != InfillPattern::ipHilbertCurve) &&
 	    (role != erTopSolidInfill || this->config().top_surface_pattern    != InfillPattern::ipHilbertCurve))
         gcode += toolchange ? m_writer.retract_for_toolchange() : m_writer.retract();
+
+    if (toolchange && m_config.single_extruder_multi_material)
+        limiter.reset(); // Reload/purge advances fresh stock outside writer accounting.
+    else if (limiter_enabled && retracted_before <= EPSILON &&
+             m_writer.get_extruder_retracted_length(m_writer.filament()->id()) > EPSILON)
+        limiter.record(); // One cycle, including wipe segments; protected cycles count too.
 
     gcode += m_writer.reset_e();
     // Orca: check if should + can lift (roughly from SuperSlicer)

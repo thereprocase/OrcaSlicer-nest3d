@@ -11,6 +11,7 @@ add_executable(${_TEST_NAME}_tests
 	test_gcode_processor.cpp
 	test_gcode_timing.cpp
 	test_gcode.cpp
+    test_retraction_limiter.cpp
 	test_gcodeprocessor.cpp
 	test_gcodewriter.cpp
 	test_imex_mode_gcode.cpp

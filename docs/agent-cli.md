@@ -67,6 +67,41 @@ parts' footprints, the outlines of their meshes seen from above, in plate coordi
 is `null` when there is nothing to measure against, and 0 when footprints overlap, as stacked parts do.
 `unplaced` lists objects that are not entirely on any plate.
 
+## Retraction protection
+
+Headless `--slice` runs in this local fork enable a starting retraction policy unless
+`--retraction-guard 0` is given. This switch disables the CLI defaults and respects the supplied
+profiles; it does not erase protection explicitly stored in a profile. GUI defaults are off.
+
+| Flag / printer setting | CLI default | Behavior |
+|---|---|---|
+| `--retraction-count-max` | `3` | Soft maximum cycles in the extrusion window; zero disables this budget. |
+| `--retraction-extrusion-window` | `1` mm | Fresh filament window over which cycles are counted. |
+| `--retraction-minimum-extrusion` | `0.3` mm | Hard minimum fresh filament between normal retracts, including layer changes; zero disables this minimum. |
+
+Explicit flags override individual CLI defaults. These are per-extruder printer settings, shown
+in Advanced mode beside the existing retraction controls. The corresponding nullable filament
+settings (`filament_retraction_count_max`, `filament_retraction_extrusion_window`, and
+`filament_retraction_minimum_extrusion`) override the printer when enabled in the filament's
+Setting overrides → Retraction section. The settings persist in presets and exported projects.
+
+Each filament has its own history. Retraction/unretraction and E-axis resets do not replenish the
+budget. Wipe segments count as one cycle. The soft budget preserves outer-wall starts/ends and
+outside-silhouette crossings. When the budget is exhausted, wall avoidance is attempted first; a shortcut across internal holes
+is preferred to leaving the outside contour. Automatic avoidance permits at most 10 mm extra travel
+when no detour limit is configured. Explicit wall avoidance retains its configured distance policy. The hard minimum takes priority over wall quality,
+so it can increase stringing where a crossing is unavoidable. Z-hop remains available when
+retraction is skipped. Required material-change, unload and final retractions are exempt.
+Protected cycles still consume the budget. This policy controls repeated filament cycling; the
+starting values are not a physical heat-creep qualification.
+
+```bash
+orca-slicer ... --slice 0 --retraction-count-max 3 \
+  --retraction-extrusion-window 1 --retraction-minimum-extrusion 0.3
+# Reproduce the profile's existing behavior without the local CLI defaults:
+orca-slicer ... --slice 0 --retraction-guard 0
+```
+
 ## Exported files
 
 ### `--export-plates-separately`

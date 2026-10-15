@@ -101,6 +101,9 @@ const std::vector<std::string> filament_extruder_override_keys = {
     "filament_retraction_speed",
     "filament_deretraction_speed",
     "filament_retract_restart_extra",  //not in filament_options_with_variant, added on 20250816
+    "filament_retraction_count_max",
+    "filament_retraction_extrusion_window",
+    "filament_retraction_minimum_extrusion",
     "filament_retraction_minimum_travel",
     "filament_retract_length_toolchange",
     "filament_retract_restart_extra_toolchange",
@@ -5772,6 +5775,29 @@ void PrintConfigDef::init_fff_params()
     def->mode = comAdvanced;
     def->set_default_value(new ConfigOptionBool(false));
 
+    def = this->add("retraction_count_max", coInts);
+    def->label = L("Maximum travel retraction count");
+    def->tooltip = L("Maximum retraction cycles within the filament extrusion window. Zero disables the limit. Optional travel retractions may be skipped after the limit; outer-wall starts and ends, travel outside the object silhouette, layer changes and material changes remain protected. When the budget is exhausted, wall avoidance is attempted before allowing shortcuts across internal holes. Automatic avoidance allows at most 10 mm extra travel when no detour limit is configured; explicit wall avoidance keeps its own policy. Z-hop is preserved. Protected retractions can exceed the limit unless the minimum extrusion between retractions prevents them.");
+    def->mode = comAdvanced;
+    def->min = 0;
+    def->set_default_value(new ConfigOptionInts{0});
+
+    def = this->add("retraction_extrusion_window", coFloats);
+    def->label = L("Retraction extrusion window");
+    def->tooltip = L("Length of fresh filament over which retraction cycles are counted, independently for each filament. Retraction and unretraction do not replenish the budget. Zero disables the limit.");
+    def->sidetext = L("mm");
+    def->mode = comAdvanced;
+    def->min = 0;
+    def->set_default_value(new ConfigOptionFloats{1.0});
+
+    def = this->add("retraction_minimum_extrusion", coFloats);
+    def->label = L("Minimum extrusion between retractions");
+    def->tooltip = L("Hard minimum length of fresh filament before another normal retraction, including layer changes. This takes priority over outer-wall quality and the maximum travel retraction count. Z-hop is preserved; required material-change, unload and final retractions are exempt. Zero disables this minimum. May increase stringing when a visible wall must be crossed.");
+    def->sidetext = L("mm");
+    def->mode = comAdvanced;
+    def->min = 0;
+    def->set_default_value(new ConfigOptionFloats{0.});
+
     def = this->add("ooze_prevention", coBool);
     def->label = L("Enable");
     def->tooltip = L("This option will drop the temperature of the inactive extruders to prevent oozing.");
@@ -8699,12 +8725,18 @@ void PrintConfigDef::init_fff_params()
         else
             def->mode       = comAdvanced;
         switch (def->type) {
+        case coInts     : def->set_default_value(new ConfigOptionIntsNullable(static_cast<const ConfigOptionInts*>(it_opt->second.default_value.get())->values)); break;
         case coFloats   : def->set_default_value(new ConfigOptionFloatsNullable  (static_cast<const ConfigOptionFloats*  >(it_opt->second.default_value.get())->values)); break;
         case coPercents : def->set_default_value(new ConfigOptionPercentsNullable(static_cast<const ConfigOptionPercents*>(it_opt->second.default_value.get())->values)); break;
         case coBools    : def->set_default_value(new ConfigOptionBoolsNullable   (static_cast<const ConfigOptionBools*   >(it_opt->second.default_value.get())->values)); break;
         case coEnums    : def->set_default_value(new ConfigOptionEnumsGenericNullable(static_cast<const ConfigOptionEnumsGeneric*   >(it_opt->second.default_value.get())->values)); break;
         default: assert(false);
         }
+        // New controls inherit the printer unless the filament explicitly overrides them.
+        if (opt_key == "filament_retraction_count_max")
+            def->set_default_value(new ConfigOptionIntsNullable{ConfigOptionIntsNullable::nil_value()});
+        else if (opt_key == "filament_retraction_extrusion_window" || opt_key == "filament_retraction_minimum_extrusion")
+            def->set_default_value(new ConfigOptionFloatsNullable{ConfigOptionFloatsNullable::nil_value()});
     }
 
     // ---- Multi-nozzle + pre-heat + nozzle-change (nc) config keys ----
@@ -8911,8 +8943,11 @@ void PrintConfigDef::init_extruder_option_keys()
         "retract_restart_extra",
         "retract_restart_extra_toolchange",
         "retract_when_changing_layer",
+        "retraction_count_max",
         "retraction_distances_when_cut",
+        "retraction_extrusion_window",
         "retraction_length",
+        "retraction_minimum_extrusion",
         "retraction_minimum_travel",
         "retraction_speed",
         "travel_slope",
@@ -8934,8 +8969,11 @@ void PrintConfigDef::init_extruder_option_keys()
         "retract_restart_extra",
         "retract_restart_extra_toolchange",
         "retract_when_changing_layer",
+        "retraction_count_max",
         "retraction_distances_when_cut",
+        "retraction_extrusion_window",
         "retraction_length",
+        "retraction_minimum_extrusion",
         "retraction_minimum_travel",
         "retraction_speed",
         "travel_slope",
@@ -8968,8 +9006,11 @@ void PrintConfigDef::init_filament_option_keys()
         "retract_restart_extra",
         "retract_restart_extra_toolchange",
         "retract_when_changing_layer",
+        "retraction_count_max",
         "retraction_distances_when_cut",
+        "retraction_extrusion_window",
         "retraction_length",
+        "retraction_minimum_extrusion",
         "retraction_minimum_travel",
         "retraction_speed",
         "volumetric_speed_coefficients",
@@ -8990,8 +9031,11 @@ void PrintConfigDef::init_filament_option_keys()
         "retract_lift_enforce",
         "retract_restart_extra",
         "retract_when_changing_layer",
+        "retraction_count_max",
         "retraction_distances_when_cut",
+        "retraction_extrusion_window",
         "retraction_length",
+        "retraction_minimum_extrusion",
         "retraction_minimum_travel",
         "retraction_speed",
         "wipe",
@@ -10056,6 +10100,9 @@ std::set<std::string> filament_options_with_variant = {
     "filament_retract_restart_extra_toolchange",
     "filament_retraction_speed",
     "filament_deretraction_speed",
+    "filament_retraction_count_max",
+    "filament_retraction_extrusion_window",
+    "filament_retraction_minimum_extrusion",
     "filament_retraction_minimum_travel",
     "filament_retract_when_changing_layer",
     "filament_wipe",
@@ -10127,6 +10174,9 @@ std::set<std::string> printer_options_with_variant_1 = {
     "z_hop_types",
     "retraction_speed",
     "deretraction_speed",
+    "retraction_count_max",
+    "retraction_extrusion_window",
+    "retraction_minimum_extrusion",
     "retraction_minimum_travel",
     "retract_when_changing_layer",
     "wipe",
@@ -12936,6 +12986,13 @@ CLITransformConfigDef::CLITransformConfigDef()
 CLIMiscConfigDef::CLIMiscConfigDef()
 {
     ConfigOptionDef* def;
+
+    def = this->add("retraction_guard", coInt);
+    def->label = L("CLI retraction guard");
+    def->tooltip = L("Enable local CLI defaults for travel retraction protection (1), or use the supplied profiles without those defaults (0). Explicit retraction flags override individual defaults. GUI defaults are unchanged.");
+    def->min = 0;
+    def->max = 1;
+    def->set_default_value(new ConfigOptionInt(1));
 
     /*def = this->add("ignore_nonexistent_config", coBool);
     def->label = L("Ignore non-existent config files");
