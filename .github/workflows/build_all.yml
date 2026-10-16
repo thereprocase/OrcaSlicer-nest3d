@@ -72,7 +72,7 @@ concurrency:
 
 jobs:
   check_repro_build_wiring:
-    name: Nightly packaging tests
+    name: Repro preflight
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7

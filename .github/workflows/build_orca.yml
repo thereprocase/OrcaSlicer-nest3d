@@ -649,6 +649,13 @@ jobs:
           "${{ github.workspace }}/build/src/Release/orca-slicer"
           "${{ github.workspace }}/resources/profiles/BBL"
 
+      - name: Check profile automation with the built application
+        if: runner.os == 'Linux' && inputs.arch != 'aarch64'
+        timeout-minutes: 5
+        env:
+          ORCA_PROFILE_COMMAND: '["${{ github.workspace }}/build/src/Release/orca-slicer"]'
+        run: build/package/libexec/orca-slicer-env python3 tests/cli/test_agent_profiles.py
+
       - name: Run external slicer regression tests
         if: runner.os == 'Linux' && inputs.arch != 'aarch64'
         timeout-minutes: 20
