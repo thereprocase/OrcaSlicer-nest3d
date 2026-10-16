@@ -45,3 +45,31 @@ set_tests_properties(cli_retraction_guard PROPERTIES
     LABELS "CLI;RequiresApp;RetractionLimiter"
     SKIP_RETURN_CODE 77
     TIMEOUT 900)
+
+add_test(NAME cli_agent_profiles
+    COMMAND ${ORCA_CLI_TEST_PYTHON} ${CMAKE_CURRENT_SOURCE_DIR}/test_agent_profiles.py)
+set_tests_properties(cli_agent_profiles PROPERTIES
+    LABELS "CLI;RequiresApp;Profiles"
+    ENVIRONMENT "ORCA_PROFILE_COMMAND=[\"$<TARGET_FILE:OrcaSlicer>\"]"
+    TIMEOUT 120)
+
+# Standalone transport coverage: no GUI, wxWidgets, cloud account or app resources.
+find_package(Threads REQUIRED)
+add_executable(local_agent_api_transport
+    local_agent_api_transport.cpp
+    ${CMAKE_SOURCE_DIR}/src/slic3r/GUI/LocalAgentApi.cpp)
+target_include_directories(local_agent_api_transport PRIVATE
+    ${CMAKE_SOURCE_DIR}/src/slic3r ${CMAKE_SOURCE_DIR}/deps_src)
+target_compile_definitions(local_agent_api_transport PRIVATE BOOST_ERROR_CODE_HEADER_ONLY)
+target_link_libraries(local_agent_api_transport PRIVATE boost_headeronly Threads::Threads)
+if (WIN32)
+    target_link_libraries(local_agent_api_transport PRIVATE ws2_32 mswsock)
+endif ()
+add_test(NAME cli_local_agent_api_transport
+    COMMAND ${ORCA_CLI_TEST_PYTHON} ${CMAKE_CURRENT_SOURCE_DIR}/test_local_agent_api_transport.py
+        $<TARGET_FILE:local_agent_api_transport>)
+set_tests_properties(cli_local_agent_api_transport PROPERTIES LABELS "CLI;LocalAgentApi" TIMEOUT 45)
+
+add_test(NAME cli_agent_gui
+    COMMAND ${ORCA_CLI_TEST_PYTHON} ${CMAKE_CURRENT_SOURCE_DIR}/test_agent_gui.py)
+set_tests_properties(cli_agent_gui PROPERTIES LABELS "CLI;LocalAgentApi" TIMEOUT 45)

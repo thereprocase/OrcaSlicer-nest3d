@@ -3330,6 +3330,7 @@ TEST_CASE("Printer publishable allowlist matches the printer tab's Retraction an
 
     const std::vector<std::string> expected_retraction = {
         "retraction_length", "retract_restart_extra", "retraction_speed", "deretraction_speed",
+        "retraction_count_max", "retraction_extrusion_window", "retraction_minimum_extrusion",
         "retraction_minimum_travel", "retract_when_changing_layer", "wipe", "wipe_distance",
         "retract_before_wipe", "retract_after_wipe"
     };
@@ -7161,3 +7162,48 @@ TEST_CASE("A user filament whose derived compatible printer cannot be written ba
     CHECK(read_file(file) == before);
 }
 #endif
+
+TEST_CASE("Cloud updates preserve unsaved edits without writing them into the saved preset", "[Preset][Cloud][Regression]")
+{
+    ScopedTemporaryDir temp_dir;
+    PresetBundle bundle;
+    PresetsConfigSubstitutions substitutions;
+    const std::string name = "Cloud Normal";
+    write_print_preset(bundle.prints.default_preset().config,
+                       temp_dir.path() / PRESET_PRINT_NAME / (name + ".json"), name);
+    bundle.prints.load_presets(temp_dir.path().string(), PRESET_PRINT_NAME, substitutions,
+                              ForwardCompatibilitySubstitutionRule::Disable);
+    bundle.prints.select_preset_by_name(name, true);
+    const bool dirty = GENERATE(false, true);
+    auto& edited = bundle.prints.get_edited_preset();
+    edited.config.set_key_value("wall_loops", new ConfigOptionInt(7));
+    bundle.prints.get_selected_preset().is_dirty = dirty;
+    edited.is_dirty = dirty;
+    const auto project_config = edited.config;
+    const std::map<std::string, std::string> cloud {
+        {BBL_JSON_KEY_VERSION, "2.4.0"}, {BBL_JSON_KEY_SETTING_ID, "cloud-normal-id"},
+        {BBL_JSON_KEY_USER_ID, "cloud-user"}, {ORCA_JSON_KEY_UPDATE_TIME, "2000000000"},
+        {BBL_JSON_KEY_INHERITS, ""}, {"wall_loops", "3"}, {"print_settings_id", name}
+    };
+    bundle.prints.load_user_preset(name, cloud, substitutions, ForwardCompatibilitySubstitutionRule::Disable);
+    const auto* saved = bundle.prints.find_preset(name, false, true);
+    REQUIRE(saved != nullptr);
+    CHECK(saved->config.opt_int("wall_loops") == 3);
+    CHECK(saved->setting_id == "cloud-normal-id");
+    CHECK(saved->updated_time == 2000000000);
+    if (dirty) {
+        CHECK(edited.config.equals(project_config));
+        CHECK(edited.is_dirty);
+    } else {
+        CHECK(edited.config.opt_int("wall_loops") == 3);
+    }
+    std::map<std::string, std::string> deleted;
+    bundle.prints.save_user_presets(temp_dir.path().string(), PRESET_PRINT_NAME, deleted);
+    DynamicPrintConfig persisted;
+    std::map<std::string, std::string> metadata;
+    std::string reason;
+    persisted.load_from_json(saved->file, ForwardCompatibilitySubstitutionRule::Disable, metadata, reason);
+    CHECK(persisted.opt_int("wall_loops") == 3);
+    if (dirty)
+        CHECK(edited.config.equals(project_config));
+}

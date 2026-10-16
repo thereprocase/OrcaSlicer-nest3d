@@ -2653,10 +2653,10 @@ bool PresetCollection::load_user_preset(std::string name, std::map<std::string, 
                                      << "\" contains the following incorrect keys: " << incorrect_keys << ", which were removed";
         }
         if (need_update) {
-            if (iter->name == m_edited_preset.name && iter->is_dirty) {
-                // Keep modifies when update from remote
-                new_config.apply_only(m_edited_preset.config, m_edited_preset.config.diff(iter->config));
-            } else if (iter->name == m_edited_preset.name) {
+            // The saved preset must reflect the cloud revision exactly. Unsaved
+            // project edits belong only to m_edited_preset; merging them here
+            // persists them under the cloud timestamp and hides the mismatch.
+            if (iter->name == m_edited_preset.name && !iter->is_dirty) {
                 // Preset is not dirty (no local unsaved changes) — also update the edited preset
                 // to prevent a false "dirty" indication (orange highlight) after a silent cloud sync
                 m_edited_preset.config = new_config;
