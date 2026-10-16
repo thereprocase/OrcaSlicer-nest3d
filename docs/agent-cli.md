@@ -185,6 +185,11 @@ flags `near_exclusion_area`. With a raft, this is the part's first layer on the 
 
 ## Presets
 
+For standalone user profiles, nozzle families, JSON inspection, revision-checked
+updates and cloud publication, see the [agent profile manager](agent-profile-manager.md).
+The manager exports independent root presets so its family relationships do not
+depend on Orca's user-parent loading order.
+
 A user preset that `inherits` a system preset (`"from": "User"`, `"inherits": "Bambu Lab P1S 0.4 nozzle"`)
 resolves in a fresh `--datadir` too: when the data directory has no vendor installed to resolve it
 against, the parent is read from the bundled profiles and the preset's own values are laid over it.

@@ -45,3 +45,10 @@ set_tests_properties(cli_retraction_guard PROPERTIES
     LABELS "CLI;RequiresApp;RetractionLimiter"
     SKIP_RETURN_CODE 77
     TIMEOUT 900)
+
+add_test(NAME cli_agent_profiles
+    COMMAND ${ORCA_CLI_TEST_PYTHON} ${CMAKE_CURRENT_SOURCE_DIR}/test_agent_profiles.py)
+set_tests_properties(cli_agent_profiles PROPERTIES
+    LABELS "CLI;RequiresApp;Profiles"
+    ENVIRONMENT "ORCA_PROFILE_COMMAND=[\"$<TARGET_FILE:OrcaSlicer>\"]"
+    TIMEOUT 120)
