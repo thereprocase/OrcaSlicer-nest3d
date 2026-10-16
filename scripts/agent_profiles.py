@@ -178,6 +178,8 @@ def build(family):
         config.update(type=family['type'], name=name, inherits='', base_id='',
                       version=family['version'], instantiation='true')
         config['from'] = 'User'
+        if 'description' in variant or 'description' in family:
+            config['description'] = variant.get('description', family.get('description'))
         identity = IDENTITY[family['type']]
         config[identity] = [name] if family['type'] == 'filament' else name
         if family.get('filament_id'):
@@ -226,7 +228,51 @@ def matches(expected, actual):
     return canonical_value(expected) == canonical_value(actual)
 
 
+def unescape_scalar(value):
+    """ConfigOptionString::deserialize: one C-style layer, never recursive."""
+    result = []
+    index = 0
+    while index < len(value):
+        char = value[index]
+        if char == '\\':
+            index += 1
+            if index == len(value):
+                raise ValueError('Incomplete scalar string escape')
+            char = {'n': '\n', 'r': '\r'}.get(value[index], value[index])
+        result.append(char)
+        index += 1
+    return ''.join(result)
+
+
+def setting_matches(key, expected, actual):
+    # Native scalar G-code options deserialize escapes, but JSON export writes
+    # their raw value. Vector G-code uses ConfigOptionStrings instead.
+    if key.endswith('_gcode') and isinstance(expected, str) and isinstance(actual, str):
+        decoded = unescape_scalar(expected)
+        if key == 'machine_start_gcode':
+            # OrcaSlicer.cpp applies AgentCLI::unindent_tool_selects even to
+            # export-settings. Mirror only that precise whole-line rewrite.
+            lines = []
+            for line in decoded.split('\n'):
+                stripped = line.lstrip(' \t')
+                if re.fullmatch(r'T([0-9]+|\[[^\]]*\]|\{[^}]*\})[ \t]*(;.*)?\r?', stripped):
+                    line = stripped
+                lines.append(line)
+            decoded = '\n'.join(lines)
+        return decoded == actual
+    if key == 'thumbnails' and isinstance(expected, str) and isinstance(actual, str):
+        # PrintConfig normalizes separators. Only explicit, valid specifications
+        # are normalized here; dimensions, order and formats must remain exact.
+        pattern = r'\d+x\d+/(?:PNG|JPG|QOI|BTT_TFT)'
+        left, right = expected.split(','), actual.split(',')
+        if all(re.fullmatch(pattern, part.strip()) for part in left + right):
+            return [part.strip() for part in left] == [part.strip() for part in right]
+        return expected == actual
+    return matches(expected, actual)
+
+
 def verify(config, command):
+    config = cloud_content({'content': config})
     check_root(config)
     if not isinstance(command, list) or not command or not all(isinstance(v, str) for v in command):
         raise ValueError('--orca-command must be a JSON argv array')
@@ -245,7 +291,7 @@ def verify(config, command):
         omitted = {'compatible_printers', 'compatible_printers_condition',
                    'compatible_prints', 'compatible_prints_condition'}
         failed = [k for k, v in settings(config).items()
-                  if k not in omitted and (k not in effective or not matches(v, effective[k]))]
+                  if k not in omitted and (k not in effective or not setting_matches(k, v, effective[k]))]
         if failed:
             raise ValueError('Orca readback changed or dropped settings: ' + ', '.join(sorted(failed)))
         return {'status': 'orca_readback_verified', 'settings_checked': len(settings(config)) -
@@ -327,12 +373,18 @@ class CloudSession:
 
 def cloud_content(item):
     value = item['content']
-    return json.loads(value) if isinstance(value, str) else value
+    config = json.loads(value) if isinstance(value, str) else dict(value)
+    config['type'] = {'print': 'process', 'printer': 'machine'}.get(config.get('type'), config.get('type'))
+    if config.get('type') in TYPES:
+        config.setdefault('from', 'User')
+    return config
 
 
-def cloud_wire(config):
+def canonical_cloud(config):
     output = {}
     for key, value in config.items():
+        if key == 'type':
+            value = {'print': 'process', 'printer': 'machine'}.get(value, value)
         if key in {'setting_id', 'user_id', 'updated_time', 'sync_info'}:
             continue  # Account identity and revisions come from the server envelope.
         if isinstance(value, list):
@@ -349,6 +401,16 @@ def cloud_wire(config):
             output[key] = '1' if value else '0'
         else:
             output[key] = str(value)
+    if output.get('type') in TYPES:
+        output.setdefault('from', 'User')
+    return output
+
+
+def cloud_wire(config):
+    """Cloud loader uses IoT types; comparison/storage use native types."""
+    output = canonical_cloud(config)
+    output['type'] = {'process': 'print', 'machine': 'printer'}.get(output.get('type'), output.get('type'))
+    output.pop('from', None)  # Native provenance is not server content metadata.
     return output
 
 
@@ -356,7 +418,7 @@ def remote_version(item):
     if item is None:
         return None
     return {'id': item['id'], 'name': item['name'], 'updated_time': item['updated_time'],
-            'content': cloud_wire(cloud_content(item))}
+            'content': canonical_cloud(cloud_content(item))}
 
 
 def save_operation(path, operation, status, reason=None):
@@ -380,7 +442,7 @@ def cloud_observation(operation, response):
         return 'conflicted', remote, 'name_collision'
     if body['id'] in response.get('deletes', []):
         return 'conflicted', remote, 'remote_deleted'
-    if remote and remote['name'] == body['name'] and cloud_wire(cloud_content(remote)) == body['content']:
+    if remote and remote['name'] == body['name'] and canonical_cloud(cloud_content(remote)) == canonical_cloud(body['content']):
         return 'verified', remote, None
     before = operation['before']
     if remote_version(remote) == remote_version(before):
@@ -434,6 +496,8 @@ def advance_cloud(path, session, polls=3, interval=1.0, retry=False):
                 break
             may_submit = operation['attempts'] == 0 or retry
             if status == 'baseline' and may_submit and not attempted_here and operation['attempts'] < 3:
+                if operation['request']['content'].get('type') not in ('print', 'printer', 'filament'):
+                    raise ValueError('Legacy operation has a native-only cloud type; create a new operation instead of replaying it')
                 operation['attempts'] += 1
                 operation['phase'] = 'submitting'
                 save_operation(path, operation, 'pending', 'upload_in_flight')
@@ -499,7 +563,7 @@ def prepare_cloud(config, old, profile_id, account, command):
 
 def three_way(base, local, remote):
     """Merge independent edits, including deletions; conflicts never get a winner."""
-    base, local, remote = cloud_wire(base), cloud_wire(local), cloud_wire(remote)
+    base, local, remote = canonical_cloud(base), canonical_cloud(local), canonical_cloud(remote)
     missing = object()
     merged, conflicts = {}, {}
     for key in sorted(base.keys() | local.keys() | remote.keys()):
@@ -545,9 +609,9 @@ def bind_sync(args):
         local = check_root(read(args.profile))
         if Path(args.profile).stem != local['name'] or Path(args.profile).parent.parent.name != local['type']:
             raise ValueError('Profile filename/type must match its identity')
-        if cloud_wire(local) != cloud_wire(cloud_content(remote)):
+        if canonical_cloud(local) != canonical_cloud(cloud_content(remote)):
             raise ValueError('Initial local/cloud versions differ; reconcile explicitly before binding')
-        binding.update(baseline=cloud_wire(local), remote=remote_version(remote))
+        binding.update(baseline=canonical_cloud(local), remote=remote_version(remote))
         write(args.out, binding)
     return {'status': 'bound', 'binding': args.out, 'gui_loaded': 'unknown'}
 
@@ -631,7 +695,7 @@ def advance_sync(path, session, command, polls=3, interval=1.0, retry=False):
             already_completed = (actual_binding.get('last_operation') == operation['operation_id'] and
                                  actual_binding.get('baseline') == plan['merged'])
             if (digest(actual_binding) != plan['binding_revision'] and not already_completed) or (
-                    local != plan['local_before'] and cloud_wire(local) != plan['merged']):
+                    local != plan['local_before'] and canonical_cloud(local) != plan['merged']):
                 # An earlier upload may still be in flight. Resolve its outcome without
                 # replay before releasing the workspace reservation for a new plan.
                 state = 'conflicted'
@@ -653,7 +717,7 @@ def advance_sync(path, session, command, polls=3, interval=1.0, retry=False):
             if result['status'] == 'verified':
                 # Recheck the file even under our lock: an editor need not obey it.
                 current = read(binding['local_path'])
-                if current != plan['local_before'] and cloud_wire(current) != plan['merged']:
+                if current != plan['local_before'] and canonical_cloud(current) != plan['merged']:
                     operation.update(status='conflicted', reason='local_changed_after_cloud_write')
                 else:
                     verify(plan['merged'], command)
@@ -880,6 +944,8 @@ def main(argv=None):
             family = {'schema': 1, 'id': str(uuid.uuid4()), 'name': args.name,
                       'type': base['type'], 'version': base.get('version', '2.3.0.0'),
                       'base_nozzle': args.base_nozzle, 'base': settings(base), 'variants': {}}
+            if 'description' in base:
+                family['description'] = base['description']
             if base.get('filament_id'):
                 family['filament_id'] = base['filament_id']
             variants = [(args.base_nozzle, base)]
@@ -900,6 +966,8 @@ def main(argv=None):
                         raise ValueError('Machine variant must have exactly the specified nozzle diameter')
                 family['variants'][diameter] = {'id': str(uuid.uuid4()), 'name': config['name'],
                     'overrides': {k: v for k, v in values.items() if k not in family['base'] or v != family['base'][k]}}
+                if config.get('description') != base.get('description'):
+                    family['variants'][diameter]['description'] = config.get('description', '')
             make_plan(family, Path(args.out).parent / 'validation-only')
             if len({v['name'] for v in family['variants'].values()}) != len(family['variants']):
                 raise ValueError('Each nozzle variant must have a distinct preset name')

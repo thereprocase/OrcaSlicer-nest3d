@@ -2,7 +2,8 @@
 
 `python scripts/agent_profiles.py` manages process, filament and single-nozzle machine
 families outside Orca's inheritance graph. Each exported preset is a standalone user
-root with empty `inherits` and `base_id`. The family file holds shared settings and
+root with empty `inherits` and `base_id`. Shared family descriptions and optional
+per-variant descriptions survive generation. The family file holds shared settings and
 explicit per-nozzle overrides. An override equal to the base remains pinned when the
 base changes. Commands return JSON. Completed commands exit 0; invocation errors exit 2.
 A completed command can report a `pending`, `conflicted` or `failed` operation: agents
@@ -61,7 +62,11 @@ Linux and macOS. Use Orca's import UI to import exported presets into the active
 
 `validate` and `verify` both run the supplied Orca executable in a fresh temporary data
 directory, load the profile, export its effective settings, and compare the provided
-settings with readback. Unknown, dropped and changed settings fail. This verifies
+settings with readback. Unknown, dropped and changed settings fail. Scalar G-code
+escapes are decoded exactly once for comparison, matching native loading; only the
+CLI's known startup tool-selection indentation rewrite is accepted. Uploaded macro
+bytes remain unchanged. Thumbnail separators may normalize while dimensions, formats
+and ordering must remain identical. This verifies
 configuration round trips, not print quality or every printer/material combination.
 Compatibility metadata is retained but is absent from project-settings export and
 therefore is not covered by the value comparison. Retain explicit compatible-printer
@@ -141,7 +146,8 @@ profile; the server may reject a duplicate or previously deleted identity. Name
 collisions with another live ID are rejected locally. Push validates both the local
 format and cloud serialization through Orca, rechecks the server revision, submits
 `original_updated_time`, and compares a fresh cloud readback with the exact submitted
-content. It never force-pushes. Both Standard and High Flow vector entries are retained.
+content. Native `process`/`machine` types serialize as cloud `print`/`printer`,
+which the GUI cloud loader expects; comparisons normalize those aliases. It never force-pushes. Both Standard and High Flow vector entries are retained.
 
 A durable receipt is written **before** the request. It records the original cloud
 revision and content, desired content, attempt count and operation state:

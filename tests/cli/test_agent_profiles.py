@@ -114,7 +114,7 @@ class ProfilesTest(unittest.TestCase):
                               'filament_start_gcode': ['G1 X1\n; "quoted" \\ path']}
         wire = manager.cloud_wire(config)
         self.assertEqual(wire['default_acceleration'], '5000,5000')
-        for key, value in config.items():
+        for key, value in manager.settings(config).items():
             self.assertTrue(manager.matches(wire[key], value), key)
         self.assertTrue(manager.matches('0,0;"\\n0.2,0.4444"', ['0,0', '\n0.2,0.4444']))
 
@@ -508,6 +508,81 @@ class ProfilesTest(unittest.TestCase):
         self.assertEqual(manager.read(child)['status'], 'recovered')
         for entry in plan['entries']:
             self.assertEqual(manager.read(library / entry['path']), entry['after'])
+
+    def test_cloud_server_type_aliases_match_native_root_types(self):
+        for server, native in [('print', 'process'), ('printer', 'machine'), ('filament', 'filament')]:
+            config = self.base | {'type': server}
+            self.assertEqual(manager.cloud_content({'content': config})['type'], native)
+            self.assertEqual(config['type'], server)
+            self.assertEqual(manager.cloud_wire(config), manager.cloud_wire(config | {'type': native}))
+
+    @patch.object(manager, 'verify', return_value={'status': 'verified'})
+    def test_legacy_native_type_journal_can_reconcile_but_cannot_upload(self, _verify):
+        session = self.cloud_fixture()
+        operation = manager.read(self.receipt)
+        operation['request']['content']['type'] = 'process'
+        operation['intent_sha256'] = manager.digest({'before': operation['before'], 'request': operation['request']})
+        manager.write(self.receipt, operation)
+        session.request.return_value = {'upserts': [self.old]}
+        with self.assertRaisesRegex(ValueError, 'Legacy operation'):
+            manager.advance_cloud(self.receipt, session, 1, 0)
+        self.assertEqual([call.args[0] for call in session.request.call_args_list], ['pull'])
+        session.request.return_value = {'upserts': [self.after]}
+        self.assertEqual(manager.advance_cloud(self.receipt, session, 1, 0)['status'], 'verified')
+
+    def test_cloud_wire_uses_gui_types_and_preserves_scalar_macro_bytes(self):
+        macro = r'G1 X1\nM400\\n; "quoted"'
+        config = self.base | {'type': 'machine', 'machine_start_gcode': macro}
+        wire = manager.cloud_wire(config)
+        self.assertEqual(wire['type'], 'printer')
+        self.assertNotIn('from', wire)
+        self.assertEqual(wire['machine_start_gcode'], macro)
+        self.assertEqual(manager.cloud_content({'content': wire})['type'], 'machine')
+        self.assertEqual(manager.canonical_cloud(config), manager.canonical_cloud(wire))
+
+    def test_scalar_macro_comparison_decodes_exactly_once_and_detects_changes(self):
+        serialized = r'G1 X1\nM400\\n; \"quoted\"\r\n'
+        decoded = 'G1 X1\nM400\\n; "quoted"\r\n'
+        self.assertTrue(manager.setting_matches('machine_start_gcode', serialized, decoded))
+        self.assertFalse(manager.setting_matches('machine_start_gcode', serialized, decoded.replace('X1', 'X2')))
+        self.assertFalse(manager.setting_matches('machine_start_gcode', serialized, decoded.replace('\\n', '\n')))
+        with self.assertRaisesRegex(ValueError, 'Incomplete'):
+            manager.setting_matches('machine_start_gcode', 'G1' + chr(92), 'G1')
+        self.assertFalse(manager.setting_matches('unrelated_setting', r'a\nb', 'a\nb'))
+
+    def test_start_macro_allows_only_native_whole_line_tool_unindent(self):
+        source = r'  G1 X1\n    T[initial_extruder]\n\tT0'
+        actual = '  G1 X1\nT[initial_extruder]\ntT0'
+        self.assertTrue(manager.setting_matches('machine_start_gcode', source, actual))
+        self.assertFalse(manager.setting_matches('machine_start_gcode', source, actual.replace('  G1', 'G1')))
+        self.assertFalse(manager.setting_matches('machine_start_gcode', source, actual.replace('T[initial_extruder]', 'T1')))
+        self.assertFalse(manager.setting_matches('machine_end_gcode', source, actual))
+
+    def test_thumbnail_comparison_only_normalizes_valid_separators(self):
+        expected = '48x48/PNG,300x300/PNG'
+        self.assertTrue(manager.setting_matches('thumbnails', expected, '48x48/PNG, 300x300/PNG'))
+        for actual in ('48x48/PNG,300x300/JPG', '300x300/PNG,48x48/PNG', '48x48/PNG,301x300/PNG'):
+            self.assertFalse(manager.setting_matches('thumbnails', expected, actual))
+        self.assertFalse(manager.setting_matches('thumbnails', 'bad, input', 'bad,input'))
+
+    def test_family_description_survives_build_and_variant_override(self):
+        family = manager.family_read(self.family_file)
+        family['description'] = 'Shared intent'
+        family['variants']['0.6']['description'] = 'Coarse nozzle intent'
+        self.assertEqual([p['config']['description'] for p in manager.build(family)],
+                         ['Shared intent', 'Coarse nozzle intent'])
+
+    @unittest.skipUnless(os.environ.get('ORCA_PROFILE_COMMAND'), 'Real Orca command not configured')
+    def test_real_orca_verifies_machine_macro_wire_escapes_without_mutation(self):
+        config = {'name': 'Macro roundtrip', 'type': 'machine', 'from': 'User',
+                  'inherits': '', 'version': '2.3.0.0', 'nozzle_diameter': ['0.4'],
+                  'machine_start_gcode': r'G1 X1\nM400\\n; \"quoted\"\r\n',
+                  'thumbnails': '48x48/PNG,300x300/PNG'}
+        before = manager.encoded(config)
+        command = json.loads(os.environ['ORCA_PROFILE_COMMAND'])
+        for source in (config, manager.cloud_wire(config)):
+            self.assertEqual(manager.verify(source, command)['status'], 'orca_readback_verified')
+        self.assertEqual(manager.encoded(config), before)
 
     @unittest.skipUnless(os.environ.get('ORCA_PROFILE_COMMAND'), 'Real Orca command not configured')
     def test_real_orca_preserves_both_variants_from_local_and_cloud_formats(self):
