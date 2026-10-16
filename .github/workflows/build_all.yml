@@ -36,6 +36,8 @@ on:
      - 'src/**'
      - '**/CMakeLists.txt'
      - 'version.inc'
+     - 'resources/**'
+     - 'localization/**'
      - '.github/workflows/**'
      - 'scripts/**'
      - 'build_linux.sh'

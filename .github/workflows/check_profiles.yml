@@ -60,11 +60,21 @@ jobs:
           python3 ./scripts/orca_profile_tool.py check 2>&1 | tee ${{ runner.temp }}/profile_tool.log
           exit ${PIPESTATUS[0]}
 
-      # download
-      - name: Download
+      - name: Download the tested profile validator
         working-directory: ${{ github.workspace }}
         run: |
-          curl -L -o OrcaSlicer_profile_validator https://github.com/OrcaSlicer/OrcaSlicer/releases/download/nightly-builds/OrcaSlicer_profile_validator_Linux_Ubuntu2404_nightly
+          if [ "$GITHUB_REPOSITORY" = "thereprocase/OrcaSlicer-nest3d" ]; then
+            release="https://github.com/$GITHUB_REPOSITORY/releases/download/repro-nightly"
+            asset="OrcaSlicer_profile_validator_Linux_ubuntu_2404_nightly"
+            curl --fail --location --retry 3 --output OrcaSlicer_profile_validator "$release/$asset"
+            curl --fail --location --retry 3 --output validator-SHA256SUMS "$release/SHA256SUMS"
+            expected=$(awk -v name="$asset" '$2 == name { print $1 }' validator-SHA256SUMS)
+            [[ "$expected" =~ ^[a-f0-9]{64}$ ]] || { echo "Missing validator checksum" >&2; exit 1; }
+            printf '%s  OrcaSlicer_profile_validator\n' "$expected" | sha256sum --check
+          else
+            curl --fail --location --retry 3 --output OrcaSlicer_profile_validator \
+              https://github.com/OrcaSlicer/OrcaSlicer/releases/download/nightly-builds/OrcaSlicer_profile_validator_Linux_Ubuntu2404_nightly
+          fi
           chmod +x ./OrcaSlicer_profile_validator
 
       # Validate all system profiles.
@@ -75,9 +85,9 @@ jobs:
           set +e
           ./OrcaSlicer_profile_validator -p ${{ github.workspace }}/resources/profiles -l 2 2>&1 | tee ${{ runner.temp }}/validate_system.log
           exit ${PIPESTATUS[0]}
-      # The validator above is the nightly build of main, so it cannot slice profiles that use
+      # The validator above is the last tested development build, so it cannot slice profiles that use
       # settings a PR adds to the engine: it reports their placeholders as undefined. A PR that
-      # changes src/ also runs Build all, whose Slice check runs this same sweep with the
+      # changes src/ also runs Repro build and test, whose Slice check runs this same sweep with the
       # validator built from the PR, so the sweep below only runs for the other PRs.
       - name: Detect engine changes
         id: engine_changes
@@ -86,7 +96,7 @@ jobs:
           base=${{ github.event.pull_request.base.sha }}
           if git fetch --no-tags --depth=1 origin "$base" && ! git diff --quiet "$base" HEAD -- src/; then
             echo "changed=true" >> "$GITHUB_OUTPUT"
-            echo "::notice::This PR changes src/, so Build all's Slice check slices the profiles with the PR-built validator."
+            echo "::notice::This PR changes src/, so Repro build and test's Slice check slices the profiles with the PR-built validator."
           fi
       # Slice a two-colour cube through every printer, and through every system process/filament whose
       # templates no printer's own slice reaches, so every custom g-code and filename_format shipped is

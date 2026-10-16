@@ -58,8 +58,9 @@ find_package(Threads REQUIRED)
 add_executable(local_agent_api_transport
     local_agent_api_transport.cpp
     ${CMAKE_SOURCE_DIR}/src/slic3r/GUI/LocalAgentApi.cpp)
-target_include_directories(local_agent_api_transport PRIVATE
-    ${CMAKE_SOURCE_DIR}/src/slic3r ${CMAKE_SOURCE_DIR}/deps_src)
+target_include_directories(local_agent_api_transport PRIVATE ${CMAKE_SOURCE_DIR}/src/slic3r)
+# Match the application's third-party-header treatment under the Flatpak SDK's -Werror.
+target_include_directories(local_agent_api_transport SYSTEM PRIVATE ${CMAKE_SOURCE_DIR}/deps_src)
 target_compile_definitions(local_agent_api_transport PRIVATE BOOST_ERROR_CODE_HEADER_ONLY)
 target_link_libraries(local_agent_api_transport PRIVATE boost_headeronly Threads::Threads)
 if (WIN32)
