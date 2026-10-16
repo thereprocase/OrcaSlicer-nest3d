@@ -6,6 +6,10 @@
 #include "libslic3r/Technologies.hpp"
 #include "libslic3r/Platform.hpp"
 #include "GUI_App.hpp"
+#include "LocalAgentApi.hpp"
+#include <boost/thread.hpp>
+#include <nlohmann/json.hpp>
+#include <stdexcept>
 #include "Shortcuts.hpp"
 #include "DeviceCore/DevConfigUtil.h"
 #include "BindDialog.hpp"
@@ -170,6 +174,7 @@
 #include <wx/utils.h>
 #include <openssl/hmac.h>
 #include <openssl/evp.h>
+#include <openssl/rand.h>
 
 #include "libslic3r/Utils.hpp"
 #include "libslic3r/Geometry.hpp"
@@ -2508,6 +2513,7 @@ void GUI_App::init_networking_callbacks()
 
 GUI_App::~GUI_App()
 {
+    stop_local_agent_api();
     BOOST_LOG_TRIVIAL(info) << __FUNCTION__<< boost::format(": enter");
 
     if (m_agent)
@@ -2847,7 +2853,9 @@ void GUI_App::init_single_instance_checker(const std::string &name, const std::s
 bool GUI_App::OnInit()
 {
     try {
-        return on_init_inner();
+        const bool initialized = on_init_inner();
+        if (initialized) start_local_agent_api();
+        return initialized;
     } catch (const std::exception& e) {
         BOOST_LOG_TRIVIAL(fatal) << "OnInit Got Fatal error: " << e.what();
         generic_exception_handle();
@@ -2857,6 +2865,7 @@ bool GUI_App::OnInit()
 
 int GUI_App::OnExit()
 {
+    stop_local_agent_api();
     stop_http_server();
     stop_sync_user_preset();
 
@@ -2912,6 +2921,7 @@ int GUI_App::OnExit()
 
 void GUI_App::CleanUp()
 {
+    stop_local_agent_api();
     // OnExit() does not run when OnInit() fails, and m_agent is then still set. Stop the check before
     // wxApp::CleanUp() resets wxTheApp, which a result posted from the worker would still be using.
     stop_orca_health_check(m_agent);
@@ -3143,6 +3153,7 @@ bool GUI_App::on_init_inner()
     // Stop the Orca Cloud health check as OnExit() does, so no request is in flight while exit() tears down.
     wxGetApp().Bind(wxEVT_END_SESSION, [this](wxCloseEvent &e) {
         BOOST_LOG_TRIVIAL(info) << __FUNCTION__ << "received wxEVT_END_SESSION";
+        stop_local_agent_api();
         stop_sync_user_preset();
         stop_orca_health_check(m_agent);
         Slic3r::NetworkAgent::unload_network_module();
@@ -5672,6 +5683,11 @@ void GUI_App::on_http_error(wxCommandEvent &evt)
         } catch (...) {}
     }
 
+    if (provider == ORCA_CLOUD_PROVIDER && m_local_sync_status.value("busy", false) && status >= 400 && status != 410) {
+        local_sync_update(m_local_sync_status.value("job_id", ""), "failed", "Cloud HTTP error " + std::to_string(status));
+        return; // API never chooses a force-upload conflict resolution or opens a modal dialog.
+    }
+
     // Version limit
     if (code == HttpErrorVersionLimited) {
         MessageDialog msg_dlg(nullptr, _L("The version of Orca Slicer is too low and needs to be updated to the latest version before it can be used normally."), "", wxAPPLY | wxOK);
@@ -6730,20 +6746,149 @@ void  GUI_App::push_notification(const MachineObject* obj, wxString msg, wxStrin
     }
 }
 
-void GUI_App::reload_settings()
+nlohmann::json GUI_App::local_agent_status() const
+{
+    const bool ready = !is_closing() && preset_bundle && app_config && mainframe;
+    return {{"ready", ready}, {"account_id", m_agent ? m_agent->get_user_id() : ""},
+            {"logged_in", m_agent && m_agent->is_user_login()},
+            {"stealth", app_config && app_config->get_stealth_mode()}, {"sync", m_local_sync_status}};
+}
+
+nlohmann::json GUI_App::local_agent_presets() const
+{
+    nlohmann::json result = local_agent_status();
+    result["collections"] = nlohmann::json::object();
+    if (!preset_bundle) return result;
+    auto config_hash = [](const DynamicPrintConfig& config) {
+        nlohmann::json canonical = nlohmann::json::object();
+        for (const auto& key : config.keys()) canonical[key] = config.opt_serialize(key);
+        const auto bytes = canonical.dump();
+        unsigned char digest[EVP_MAX_MD_SIZE];
+        unsigned int size = 0;
+        if (EVP_Digest(bytes.data(), bytes.size(), digest, &size, EVP_sha256(), nullptr) != 1)
+            throw std::runtime_error("Config fingerprint failed");
+        std::string hex;
+        static constexpr char digits[] = "0123456789abcdef";
+        for (unsigned int i = 0; i < size; ++i) { hex += digits[digest[i] >> 4]; hex += digits[digest[i] & 15]; }
+        return hex;
+    };
+    result["config_hash_format"] = "sha256 of compact sorted-key UTF-8 JSON mapping config keys to native opt_serialize strings";
+    auto snapshot = [&config_hash](PresetCollection& collection) {
+        struct Unlock { PresetCollection& collection; ~Unlock() { collection.unlock(); } };
+        collection.lock();
+        Unlock unlock{collection};
+        nlohmann::json saved = nlohmann::json::array();
+        for (const auto& preset : collection.get_presets()) {
+            if (!preset.is_user()) continue;
+            saved.push_back({{"name", preset.name}, {"setting_id", preset.setting_id},
+                             {"updated_time", preset.updated_time}, {"sync_info", preset.sync_info},
+                             {"config_sha256", config_hash(preset.config)}});
+        }
+        const auto& selected = collection.get_selected_preset();
+        const auto& edited = collection.get_edited_preset();
+        // Fingerprints/IDs/revisions and changed key names only: configs can contain printer credentials.
+        return nlohmann::json{{"saved", saved}, {"selected", {{"name", selected.name},
+            {"setting_id", selected.setting_id}, {"updated_time", selected.updated_time}, {"config_sha256", config_hash(selected.config)}}},
+            {"edited", {{"name", edited.name}, {"dirty", collection.current_is_dirty()}, {"config_sha256", config_hash(edited.config)},
+            {"changed_keys", selected.config.diff(edited.config)}}}};
+    };
+    result["collections"]["process"] = snapshot(preset_bundle->prints);
+    result["collections"]["filament"] = snapshot(preset_bundle->filaments);
+    result["collections"]["machine"] = snapshot(preset_bundle->printers);
+    return result;
+}
+
+void GUI_App::local_sync_update(const std::string& job, const std::string& state, const std::string& error)
+{
+    if (job.empty()) return;
+    const auto weak = std::weak_ptr<std::atomic<bool>>(m_local_api_lifetime);
+    auto apply = [this, weak, job, state, error] {
+        if ((weak.expired() || !weak.lock()->load()) || m_local_sync_status["job_id"] != job || !m_local_sync_status.value("busy", false)) return;
+        const bool busy = state == "accepted" || state == "waiting" || state == "pulling" || state == "reloading";
+        m_local_sync_status = {{"job_id", job}, {"state", state}, {"busy", busy}, {"error", error}};
+    };
+    if (is_main_thread_active()) apply();
+    else CallAfter(std::move(apply));
+}
+
+void GUI_App::start_local_agent_api()
+{
+    const auto weak = std::weak_ptr<std::atomic<bool>>(m_local_api_lifetime);
+    m_local_agent_api.start([this, weak](const std::string& method, const std::string& target, LocalAgentApi::Reply reply) {
+        // stop() joins transport dispatch before app teardown; queued work checks the weak gate.
+        CallAfter([this, weak, method, target, reply = std::move(reply)] {
+            if ((weak.expired() || !weak.lock()->load())) { reply(503, {{"error", "GUI is shutting down"}}); return; }
+            try {
+                if (method == "GET" && target == "/v1/status") { reply(200, local_agent_status()); return; }
+                if (method == "GET" && target == "/v1/presets") { reply(200, local_agent_presets()); return; }
+                if (method != "POST" || target != "/v1/presets/sync") {
+                    reply(404, {{"error", "Unknown endpoint"}}); return;
+                }
+                if (is_closing() || !preset_bundle || !app_config || !mainframe || !m_agent ||
+                    !m_agent->is_user_login() || !m_agent->get_cloud_agent() || app_config->get_stealth_mode()) {
+                    reply(503, {{"error", "GUI sync requires a ready, logged-in, non-stealth session"}}); return;
+                }
+                if (m_local_sync_status.value("busy", false) || m_sync_user_preset_dlg_active || m_restart_sync_pending) {
+                    reply(409, {{"error", "Preset sync is already in progress"}}); return;
+                }
+                unsigned char random_id[16];
+                if (RAND_bytes(random_id, sizeof(random_id)) != 1) {
+                    reply(500, {{"error", "Could not allocate sync job identity"}}); return;
+                }
+                std::string job;
+                static constexpr char digits[] = "0123456789abcdef";
+                for (auto byte : random_id) { job += digits[byte >> 4]; job += digits[byte & 15]; }
+                m_local_sync_status = {{"job_id", job}, {"state", "accepted"}, {"busy", true}, {"error", ""}};
+                reply(202, local_agent_status());
+                restart_sync_user_preset(false, job);
+            } catch (...) {
+                if (m_local_sync_status.value("busy", false))
+                    local_sync_update(m_local_sync_status.value("job_id", ""), "failed", "GUI request failed");
+                reply(500, {{"error", "GUI request failed"}});
+            }
+        });
+    });
+}
+
+void GUI_App::stop_local_agent_api()
+{
+    m_local_api_lifetime->store(false);
+    m_local_agent_api.stop();
+    // Both worker and restart joins must finish while CallAfter and this object still exist.
+    m_user_sync_token.reset();
+    if (m_sync_restart_thread.joinable()) m_sync_restart_thread.join();
+    if (m_sync_update_thread.joinable()) m_sync_update_thread.join();
+    for (auto& thread : m_retired_sync_threads)
+        if (thread.joinable()) thread.join();
+    m_retired_sync_threads.clear();
+}
+
+void GUI_App::reload_settings(const std::string& api_job)
 {
     if (preset_bundle && m_agent) {
+        // Capture identity before the network read, not after a possible account switch.
+        const auto expected_user = m_agent->get_user_id();
         // Load user's personal presets
         std::map<std::string, std::map<std::string, std::string>> user_presets;
         int result = m_agent->get_user_presets(&user_presets);
         if (result != 0) {
+            local_sync_update(api_job, "failed", "Could not read pulled cloud presets (code " + std::to_string(result) + ")");
             BOOST_LOG_TRIVIAL(error) << __FUNCTION__ << ": get_user_presets failed with code " << result << ", skipping sync";
             return;
         }
         BOOST_LOG_TRIVIAL(info) << __FUNCTION__ << __LINE__ << " cloud user preset number is: " << user_presets.size();
-        auto refresh_synced_ui = [this, user_presets = std::move(user_presets)]() mutable {
-            if (is_closing() || !preset_bundle || !app_config || !mainframe)
+        auto refresh_synced_ui = [this, weak = std::weak_ptr<std::atomic<bool>>(m_local_api_lifetime), api_job, expected_user, user_presets = std::move(user_presets)]() mutable {
+            if ((weak.expired() || !weak.lock()->load())) return;
+            if (is_closing() || !preset_bundle || !app_config || !mainframe) {
+                local_sync_update(api_job, "cancelled", "GUI closed before preset reload");
                 return;
+            }
+            if (!m_agent || !m_agent->is_user_login() || m_agent->get_user_id() != expected_user || app_config->get_stealth_mode()) {
+                local_sync_update(api_job, "cancelled", "Session changed before preset reload");
+                return;
+            }
+            if (!api_job.empty() && (m_local_sync_status["job_id"] != api_job || !m_local_sync_status.value("busy", false))) return;
+            local_sync_update(api_job, "reloading");
 
             // Snapshot each collection's edited config BEFORE any mutation.
             // load_pending_vendors() via apply_vendor_config() can call select_preset(0)
@@ -6754,21 +6899,11 @@ void GUI_App::reload_settings()
             auto snapshot_collection = [](const PresetCollection& col) -> PresetSnapshot {
                 auto& sel = col.get_selected_preset();
                 auto& ed  = col.get_edited_preset();
-                return {sel.name, ed.config, sel.is_dirty};
+                return {sel.name, ed.config, col.current_is_dirty()};
             };
             PresetSnapshot print_snap    = snapshot_collection(preset_bundle->prints);
             PresetSnapshot filament_snap = snapshot_collection(preset_bundle->filaments);
             PresetSnapshot printer_snap  = snapshot_collection(preset_bundle->printers);
-
-            // Check the user presets for any system vendors that need to be installed
-            for (auto data : user_presets) {
-                if (!check_preset_parent_available(data))
-                    add_pending_vendor_preset(data);
-            }
-            load_pending_vendors();
-
-            preset_bundle->load_user_presets(*app_config, user_presets, ForwardCompatibilitySubstitutionRule::Enable);
-            preset_bundle->save_user_presets(*app_config, get_delete_cache_presets());
 
             // Re-apply any edited config that was wiped during vendor loading or sync.
             auto restore_snapshot = [](PresetCollection& col, const PresetSnapshot& snap, const char* label) {
@@ -6790,29 +6925,99 @@ void GUI_App::reload_settings()
                     col.get_selected_preset().is_dirty = snap.dirty;
                     ed.is_dirty = snap.dirty;
                 } else {
-                    BOOST_LOG_TRIVIAL(info) << "reload_settings restore " << label
-                        << ": preset not found name=" << snap.name;
+                    // Cloud deletion must not discard an unsaved project config.
+                    ed.config = snap.config;
+                    col.get_selected_preset().is_dirty = true;
+                    ed.is_dirty = true;
+                    BOOST_LOG_TRIVIAL(info) << "reload_settings preserved edits on fallback " << label;
                 }
             };
-            restore_snapshot(preset_bundle->prints, print_snap, "print");
-            restore_snapshot(preset_bundle->filaments, filament_snap, "filament");
-            restore_snapshot(preset_bundle->printers, printer_snap, "printer");
+            try {
+                // Check the user presets for any system vendors that need to be installed
+                for (auto data : user_presets) {
+                    if (!check_preset_parent_available(data))
+                        add_pending_vendor_preset(data);
+                }
+                load_pending_vendors();
 
-            // Orca: settings changed, refresh ui to reflect the new preset values
-            mainframe->update_side_preset_ui();
-            for (auto tab : tabs_list) {
-                tab->reload_config();
-                tab->update_changed_ui();
-            }
-            if (plater_) {
-                plater_->sidebar().update_all_preset_comboboxes();
-                plater_->normalize_bed_types(false);
+                preset_bundle->load_user_presets(*app_config, user_presets, ForwardCompatibilitySubstitutionRule::Enable);
+                preset_bundle->save_user_presets(*app_config, get_delete_cache_presets());
+
+                restore_snapshot(preset_bundle->prints, print_snap, "print");
+                restore_snapshot(preset_bundle->filaments, filament_snap, "filament");
+                restore_snapshot(preset_bundle->printers, printer_snap, "printer");
+
+                // Orca: settings changed, refresh ui to reflect the new preset values
+                mainframe->update_side_preset_ui();
+                for (auto tab : tabs_list) {
+                    tab->reload_config();
+                    tab->update_changed_ui();
+                }
+                if (plater_) {
+                    plater_->sidebar().update_all_preset_comboboxes();
+                    plater_->normalize_bed_types(false);
+                }
+                auto has_conflicts = [](PresetCollection& collection) {
+                    struct Unlock { PresetCollection& collection; ~Unlock() { collection.unlock(); } };
+                    collection.lock();
+                    Unlock unlock{collection};
+                    for (const auto& preset : collection.get_presets())
+                        if (preset.is_user() && preset.sync_info == "hold") return true;
+                    return false;
+                };
+                // Loading can skip malformed or unresolved cloud entries without throwing.
+                // Do not claim application merely because the reload callback returned.
+                bool complete = true;
+                for (const auto& entry : user_presets) {
+                    const auto& incoming = entry.second;
+                    auto field = [&incoming](const char* key) {
+                        auto it = incoming.find(key);
+                        return it == incoming.end() ? std::string() : it->second;
+                    };
+                    const auto type = field(BBL_JSON_KEY_TYPE);
+                    const auto id = field(BBL_JSON_KEY_SETTING_ID);
+                    const auto revision = field(ORCA_JSON_KEY_UPDATE_TIME);
+                    PresetCollection* collection = type == "print" ? &preset_bundle->prints :
+                        type == "filament" ? &preset_bundle->filaments : type == "printer" ? &preset_bundle->printers : nullptr;
+                    if (!collection || id.empty() || revision.empty() || field("version").empty()) { complete = false; break; }
+                    long long expected_revision = 0;
+                    try {
+                        size_t used = 0;
+                        expected_revision = std::stoll(revision, &used);
+                        if (used != revision.size()) { complete = false; break; }
+                    } catch (...) { complete = false; break; }
+                    bool found = false;
+                    collection->lock();
+                    for (const auto& preset : collection->get_presets()) {
+                        if (preset.is_user() && preset.setting_id == id && preset.updated_time == expected_revision) {
+                            found = true;
+                            break;
+                        }
+                    }
+                    collection->unlock();
+                    if (!found) { complete = false; break; }
+                }
+                if (!complete)
+                    local_sync_update(api_job, "failed", "GUI reloaded; some cloud preset IDs or revisions were not applied");
+                else if (has_conflicts(preset_bundle->prints) || has_conflicts(preset_bundle->filaments) || has_conflicts(preset_bundle->printers))
+                    local_sync_update(api_job, "failed", "GUI reloaded; unresolved local/cloud preset conflicts remain");
+                else
+                    local_sync_update(api_job, "applied");
+            } catch (...) {
+                // Restore unsaved state even if vendor loading, cloud loading, saving or UI reload failed.
+                restore_snapshot(preset_bundle->prints, print_snap, "print");
+                restore_snapshot(preset_bundle->filaments, filament_snap, "filament");
+                restore_snapshot(preset_bundle->printers, printer_snap, "printer");
+                local_sync_update(api_job, "failed", "GUI preset reload failed");
+                if (api_job.empty()) throw;
             }
         };
         if (is_main_thread_active())
             refresh_synced_ui();
         else
             CallAfter(refresh_synced_ui);
+    } else {
+        local_sync_update(api_job, "cancelled", "Cloud session or preset collection closed before reload");
     }
 }
 
@@ -7545,17 +7750,17 @@ bool GUI_App::unsubscribe_bundle(const std::string& id)
     return orca_agent->unsubscribe_bundle(id);
 }
 
-void GUI_App::start_sync_user_preset(bool with_progress_dlg)
+void GUI_App::start_sync_user_preset(bool with_progress_dlg, const std::string& api_job)
 {
-    if (app_config->get_stealth_mode())
+    if (!app_config || app_config->get_stealth_mode() || !m_agent || !m_agent->is_user_login() || !m_agent->get_cloud_agent()) {
+        local_sync_update(api_job, "cancelled", "Session is unavailable, logged out, or in stealth mode");
         return;
-
-    if (!m_agent || !m_agent->is_user_login()) return;
-    if(!m_agent->get_cloud_agent())
+    }
+    if (m_user_sync_token) {
+        local_sync_update(api_job, "failed", "Another sync started before this job");
         return;
-
-    // has already start sync
-    if (m_user_sync_token) return;
+    }
+    local_sync_update(api_job, "pulling");
 
     // Sync only when login
     ProgressFn progressFn;
@@ -7595,7 +7800,7 @@ void GUI_App::start_sync_user_preset(bool with_progress_dlg)
     Bind(EVT_UPDATE_PRESET_BUNDLE,&GUI_App::update_single_bundle,this);
 
     m_sync_update_thread = Slic3r::create_thread(
-        [this, progressFn, cancelFn, finishFn, t = std::weak_ptr<int>(m_user_sync_token)] {
+        [this, progressFn, cancelFn, finishFn, api_job, t = std::weak_ptr<int>(m_user_sync_token)] {
             // finishFn tears down the progress dialog (and clears the re-entrancy guard), so it
             // must run on every exit path — otherwise an early bail-out would leak the modal
             // dialog and leave the guard stuck, blocking all later manual syncs.
@@ -7603,7 +7808,7 @@ void GUI_App::start_sync_user_preset(bool with_progress_dlg)
             // boost::filesystem error while scanning the preset folder) would otherwise
             // propagate out of the thread and terminate the entire application.
             try {
-            if (!m_agent) { finishFn(false); return; }
+            if (!m_agent) { finishFn(false); local_sync_update(api_job, "cancelled", "Cloud session closed"); return; }
 
             // One-time scan for orphaned .info files left over from offline deletions; queues HTTP DELETEs.
             scan_orphaned_info_files();
@@ -7639,7 +7844,9 @@ void GUI_App::start_sync_user_preset(bool with_progress_dlg)
             finishFn(ret == 0);
 
             if (ret == 0 && m_agent && !t.expired())
-                reload_settings();
+                reload_settings(api_job);
+            else
+                local_sync_update(api_job, t.expired() ? "cancelled" : "failed", "Cloud pull did not complete (code " + std::to_string(ret) + ")");
 
             // For orca specific syncing
             auto orca_agent = std::dynamic_pointer_cast<OrcaCloudServiceAgent>(m_agent->get_cloud_agent());
@@ -7848,8 +8055,10 @@ void GUI_App::start_sync_user_preset(bool with_progress_dlg)
                 }
             }
             } catch (const std::exception& e) {
+                local_sync_update(api_job, "failed", "Cloud sync worker failed");
                 BOOST_LOG_TRIVIAL(error) << "user preset sync thread terminated by exception: " << e.what();
             } catch (...) {
+                local_sync_update(api_job, "failed", "Cloud sync worker failed");
                 BOOST_LOG_TRIVIAL(error) << "user preset sync thread terminated by unknown exception";
             }
         });
@@ -7857,33 +8066,31 @@ void GUI_App::start_sync_user_preset(bool with_progress_dlg)
 
 void GUI_App::stop_sync_user_preset()
 {
-    if (!m_user_sync_token)
-        return;
-
+    local_sync_update(m_local_sync_status.value("job_id", ""), "cancelled", "Preset synchronization stopped");
     m_user_sync_token.reset();
     if (m_sync_update_thread.joinable()) {
         if (is_closing())
             m_sync_update_thread.join();
         else
-            m_sync_update_thread.detach();
+            m_retired_sync_threads.emplace_back(std::move(m_sync_update_thread));
     }
 }
 
-void GUI_App::restart_sync_user_preset()
+void GUI_App::restart_sync_user_preset(bool with_progress_dlg, const std::string& api_job)
 {
     // A manual sync's progress dialog is already on screen — ignore repeat triggers so a
     // second modal dialog can never stack. This matters most offline: each attempt blocks
     // on a long HTTP timeout and can't be cancelled mid-request, and on macOS the global
     // menu bar stays clickable even while the dialog disables the main window, so without
     // this guard repeated clicks pile up modal dialogs and wedge the UI (force-quit only).
-    if (m_sync_user_preset_dlg_active)
+    if (m_sync_user_preset_dlg_active || (api_job.empty() && m_local_sync_status.value("busy", false)))
         return;
 
     if (!m_user_sync_token) {
         // No sync running. If a restart helper is already in flight it will
         // start the new sync once the old thread is joined — don't race it.
         if (!m_restart_sync_pending)
-            start_sync_user_preset(true);
+            start_sync_user_preset(with_progress_dlg, api_job);
         return;
     }
 
@@ -7896,16 +8103,17 @@ void GUI_App::restart_sync_user_preset()
 
     auto old_thread = std::move(m_sync_update_thread);
 
-    std::thread([this, old_thread = std::move(old_thread)]() mutable {
-        if (old_thread.joinable())
-            old_thread.join();
-        m_restart_sync_pending = false;
-        if (!is_closing())
-            CallAfter([this]() {
-                if (!is_closing())
-                    start_sync_user_preset(true);
-            });
-    }).detach();
+    local_sync_update(api_job, "waiting");
+    if (m_sync_restart_thread.joinable()) m_sync_restart_thread.join();
+    m_sync_restart_thread = std::thread([this, weak = std::weak_ptr<std::atomic<bool>>(m_local_api_lifetime), with_progress_dlg, api_job, old_thread = std::move(old_thread)]() mutable {
+        if (old_thread.joinable()) old_thread.join();
+        CallAfter([this, weak, with_progress_dlg, api_job]() {
+            if ((weak.expired() || !weak.lock()->load())) return;
+            m_restart_sync_pending = false;
+            if (!is_closing() && (api_job.empty() || (m_local_sync_status["job_id"] == api_job && m_local_sync_status.value("busy", false))))
+                start_sync_user_preset(with_progress_dlg, api_job);
+        });
+    });
 }
 
 void GUI_App::force_push_conflicting_preset(const std::string& setting_id)

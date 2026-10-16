@@ -4,6 +4,8 @@
 #include <boost/algorithm/string/split.hpp>
 #include <boost/algorithm/string/classification.hpp>
 #include <atomic>
+#include <boost/thread.hpp>
+#include <nlohmann/json.hpp>
 #include <boost/optional/optional.hpp>
 #include <chrono>
 #include <cstdint>
@@ -29,6 +31,8 @@
 #include "slic3r/Utils/CloudProvider.hpp"
 #include "slic3r/GUI/Jobs/UpgradeNetworkJob.hpp"
 #include "slic3r/GUI/HttpServer.hpp"
+#include "LocalAgentApi.hpp"
+#include <thread>
 #include "../Utils/PrintHost.hpp"
 #include "libslic3r/Point.hpp"
 
@@ -364,6 +368,16 @@ private:
     bool             m_show_error_msgdlg{false};
     wxString         m_info_dialog_content;
     HttpServer       m_http_server;
+    LocalAgentApi    m_local_agent_api;
+    std::shared_ptr<std::atomic<bool>> m_local_api_lifetime = std::make_shared<std::atomic<bool>>(true);
+    std::thread     m_sync_restart_thread;
+    std::vector<boost::thread> m_retired_sync_threads;
+    nlohmann::json   m_local_sync_status = {{"job_id", ""}, {"state", "idle"}, {"busy", false}, {"error", ""}};
+    void start_local_agent_api();
+    void stop_local_agent_api();
+    nlohmann::json local_agent_status() const;
+    nlohmann::json local_agent_presets() const;
+    void local_sync_update(const std::string& job, const std::string& state, const std::string& error = "");
     bool             m_show_gcode_window{true};
     boost::thread    m_check_network_thread;
 public:
@@ -576,7 +590,7 @@ public:
     std::string     format_IP(const std::string& ip);
     void            show_dialog(wxString msg);
     void            push_notification(const MachineObject* obj, wxString msg, wxString title = wxEmptyString, UserNotificationStyle style = UserNotificationStyle::UNS_NORMAL);
-    void            reload_settings();
+    void            reload_settings(const std::string& api_job = "");
     void            remove_user_presets();
 
     bool            maybe_migrate_user_presets_on_login();
@@ -587,9 +601,9 @@ public:
     void            load_pending_vendors();
 
     void            sync_preset(Preset* preset, bool force = false);
-    void            start_sync_user_preset(bool with_progress_dlg = false);
+    void            start_sync_user_preset(bool with_progress_dlg = false, const std::string& api_job = "");
     void            stop_sync_user_preset();
-    void            restart_sync_user_preset();
+    void            restart_sync_user_preset(bool with_progress_dlg = true, const std::string& api_job = "");
     // Resolve a cloud sync 409 by force-pushing the conflicting preset: clears the "hold"
     // state the conflict left behind and queues it to be re-uploaded with force=true.
     void            force_push_conflicting_preset(const std::string& setting_id);

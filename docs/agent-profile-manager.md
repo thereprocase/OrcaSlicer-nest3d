@@ -220,11 +220,18 @@ not silently rolled back. Inspect that receipt and create a fresh three-way plan
 Retain bindings, journals and reservation files together; do not edit/delete them to
 bypass unresolved operations. Back up the managed workspace.
 
-All cloud/sync operation results report `gui_loaded: "unknown"`. `verified` proves the
-observed cloud value (and the managed file for sync), **not** that Orca's open GUI has
-loaded it or that another client cannot subsequently replace it. In the GUI, save or
-discard unsaved edits deliberately, then use **File → Sync Presets** and inspect the
-loaded preset. This tool does not offer unattended synchronization of GUI memory.
+Cloud/sync operation results report `gui_loaded: "unknown"`. `verified` establishes
+the observed cloud value (and the managed file for sync). To load it into a running
+GUI, use the authenticated [local GUI API](agent-gui-api.md):
+
+```sh
+python scripts/agent_gui.py sync --wait --token-file /private/path/gui-api-token
+python scripts/agent_gui.py presets --token-file /private/path/gui-api-token
+```
+
+The GUI must be built with the API and started with its local secret. Completion
+tracks the actual GUI reload; snapshots distinguish saved presets from unsaved
+project edits. The ordinary **Sync Presets** menu remains available in older builds.
 
 ## Tests
 
