@@ -1,10 +1,6 @@
-name: Publish tested Repro nightly
+name: Republish verified Repro build
 
 on:
-  workflow_run:
-    workflows: ["Build all"]
-    types: [completed]
-    branches: [repro-dev]
   workflow_dispatch:
     inputs:
       build_run_id:
@@ -20,8 +16,7 @@ jobs:
   verify_build:
     if: >-
       github.repository == 'thereprocase/OrcaSlicer-nest3d' &&
-      (github.event_name == 'workflow_dispatch' ||
-       (github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.event == 'push'))
+      github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-24.04
     outputs:
       sha: ${{ steps.build.outputs.sha }}
@@ -31,7 +26,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
-          RUN_ID: ${{ inputs.build_run_id || github.event.workflow_run.id }}
+          RUN_ID: ${{ inputs.build_run_id }}
         run: |
           [[ "$RUN_ID" =~ ^[0-9]+$ ]] || exit 1
           gh api "repos/$GH_REPO/actions/runs/$RUN_ID" > build-run.json

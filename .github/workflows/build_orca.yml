@@ -434,28 +434,10 @@ jobs:
         if: runner.os == 'Windows'
         uses: microsoft/setup-msbuild@30375c66a4eea26614e0d39710365f22f8b0af57 # v3
 
-      - name: Install nsis
+      - name: Install pinned NSIS
         if: runner.os == 'Windows' && !vars.SELF_HOSTED
         shell: pwsh
-        # The Chocolatey community feed intermittently 504s, and `choco install`
-        # exits 0 when package resolution fails that way. Unchecked, the job then
-        # builds for ~25 minutes before `cpack -G NSIS` reports a missing makensis.
-        # Retry the install and verify makensis itself, so a real failure stops here.
-        run: |
-          dir "C:/Program Files (x86)/Windows Kits/10/Include"
-          $nsisDir = Join-Path ${env:ProgramFiles(x86)} 'NSIS'
-          $makensis = Join-Path $nsisDir 'makensis.exe'
-          for ($attempt = 1; $attempt -le 3 -and -not (Test-Path $makensis); $attempt++) {
-            if ($attempt -gt 1) { Start-Sleep -Seconds (15 * $attempt) }
-            Write-Host "::group::choco install nsis (attempt $attempt)"
-            choco install nsis --yes --no-progress
-            Write-Host "::endgroup::"
-          }
-          if (-not (Test-Path $makensis)) {
-            throw "NSIS install failed: $makensis not found after 3 attempts."
-          }
-          & $makensis /VERSION
-          $nsisDir | Out-File -Append -FilePath $env:GITHUB_PATH -Encoding utf8
+        run: ./scripts/ci/install_nsis.ps1
 
       - name: Build slicer Win
         if: runner.os == 'Windows'
@@ -674,7 +656,10 @@ jobs:
         run: |
           test_repo_dir="${{ runner.temp }}/orca-test-repo"
           rm -rf "$test_repo_dir"
-          git clone --depth 1 https://github.com/OrcaSlicer/orca-test-repo.git "$test_repo_dir"
+          git init "$test_repo_dir"
+          git -C "$test_repo_dir" remote add origin https://github.com/OrcaSlicer/orca-test-repo.git
+          git -C "$test_repo_dir" fetch --depth 1 origin "$(cat scripts/ci/orca-test-repo.ref)"
+          git -C "$test_repo_dir" checkout --detach FETCH_HEAD
           python3 "$test_repo_dir/run_test.py" "${{ github.workspace }}/build/package/bin/orca-slicer"
 
       - name: Build orca_custom_preset_tests

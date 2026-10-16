@@ -6,11 +6,17 @@ GUI retraction controls are under **Printer → Extruder → Retraction** in Adv
 
 ## Builds and downloads
 
-Pushes and pull requests targeting `repro-dev` run **Build all**. The multi-platform pipeline builds the graphical and command-line application for Linux x86_64/aarch64, Windows x64/arm64 and universal macOS, including platform test artifacts. Linux also exercises the CLI retraction policy with the built application. The existing profile slice checks and Flatpak checks remain enabled.
+Pushes and pull requests targeting `repro-dev` run **Repro build and test**. The multi-platform pipeline builds the graphical and command-line application for Linux x86_64/aarch64, Windows x64/arm64 and universal macOS, including platform test artifacts. Linux also exercises the CLI retraction policy with the built application. The existing profile slice checks and Flatpak checks remain enabled.
 
-At **02:15 UTC daily**, the default branch's schedule builds this integration branch. A successful scheduled or manually dispatched Build all run publishes a rolling prerelease at [Repro development nightly](https://github.com/thereprocase/OrcaSlicer-nest3d/releases/tag/repro-nightly). Successful integration push builds are also published by **Publish tested Repro nightly**, reusing the completed CI artifacts. That workflow can be dispatched with an existing successful Build all run ID, so publication needs no duplicate compile. It verifies the repository, branch, workflow, conclusion and commit before checking out the tested source. The publisher waits for the listed platform build, unit-test, Flatpak and profile-slice gates. `SHA256SUMS` accompanies the downloads. The release notes and tag identify the tested commit. macOS fork builds use the existing unsigned packaging path.
+At **02:15 UTC daily**, the default branch builds this integration branch. Integration pushes and manual builds use the same graph. The final publisher waits for every listed platform build, unit-test, Flatpak and profile-slice gate, then publishes the artifacts of that exact run to [Repro development nightly](https://github.com/thereprocase/OrcaSlicer-nest3d/releases/tag/repro-nightly). Pull requests and dependency-only runs never publish. Superseded integration pushes are cancelled.
 
-Only the publisher job can write release contents; normal builds use read-only repository contents. External action versions used by this build/check workflow chain are pinned to full commit SHAs, recorded in [action-pins.json](action-pins.json). Upstream's separate release and signing routes keep their upstream-only guards.
+`SHA256SUMS` accompanies downloads; the release notes and tag identify the tested commit. macOS fork builds use the unsigned packaging path. **Republish verified Repro build** is a manual recovery operation for an existing successful integration build, not an automatic second publication pipeline.
+
+Windows packaging uses the official NSIS 3.13 portable archive with its SHA-256 pinned from [NSIS release data](https://github.com/NSIS-Dev/release-data/blob/main/data/versions.json), avoiding the Chocolatey feed. External CLI regression fixtures are pinned in `scripts/ci/orca-test-repo.ref`. Flatpak ships and runs the standalone local API transport and client tests as well as the core suites.
+
+Upstream issue assignment, AI deduplication, vendor merge delegation, OTA publication, WinGet publication, translation publication and the redundant status-badge workflow are archived outside the active workflows directory. Build/test coverage remains active; no upstream maintainer list or upstream release destination controls this fork.
+
+Only the publisher job can write release contents; normal builds use read-only repository contents. External action versions used by this build/check workflow chain are pinned to full commit SHAs, recorded in [action-pins.json](action-pins.json). Inherited signing steps retain their upstream-only guards.
 
 The upstream Nest3D PR remains separate and is not opened by these builds. No printer job, local installed GUI replacement or bridge deployment is performed by the nightly publisher.
 

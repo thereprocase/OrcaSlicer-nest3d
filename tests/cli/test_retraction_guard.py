@@ -51,8 +51,21 @@ def main():
                 gcode = archive.read('Metadata/plate_1.gcode').decode()
             for key, value in zip(('retraction_count_max', 'retraction_extrusion_window',
                                    'retraction_minimum_extrusion'), expected):
-                assert all(abs(float(item) - value) < 1e-8 for item in config[key]), (name, key, config[key])
-            print(f'{name}: settings PASS', flush=True)
+                if isinstance(value, tuple):
+                    assert tuple(map(float, config[key])) == value, (name, key, config[key])
+                else:
+                    assert config[key], (name, key, 'empty vector')
+                    assert all(abs(float(item) - value) < 1e-8 for item in config[key]), (name, key, config[key])
+            reopened = output / 'reopened.json'
+            result = subprocess.run([str(args.binary), '--datadir', str(output / 'data'),
+                '--export-settings', str(reopened), str(archive_path)],
+                stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, timeout=180)
+            assert result.returncode == 0, result.stdout[-8000:]
+            restored = json.loads(reopened.read_text())
+            for key in ('retraction_count_max', 'retraction_extrusion_window',
+                        'retraction_minimum_extrusion'):
+                assert restored[key] == config[key], (name, key, config[key], restored[key])
+            print(f'{name}: settings and non-slicing roundtrip PASS', flush=True)
             return archive_path, gcode
 
         slice_case('defaults', [], (3, 1, .3))
@@ -60,6 +73,9 @@ def main():
         assert '; travel retraction skipped:' not in gcode
         slice_case('explicit', ['--retraction-count-max', '2', '--retraction-extrusion-window', '2',
                                 '--retraction-minimum-extrusion', '.5'], (2, 2, .5))
+        slice_case('per-variant', ['--retraction-count-max', '2,4',
+            '--retraction-extrusion-window', '1,2', '--retraction-minimum-extrusion', '.3,.5'],
+            ((2, 4), (1, 2), (.3, .5)))
         hard, gcode = slice_case('hard-minimum', ['--retraction-count-max', '0',
             '--retraction-minimum-extrusion', '100000', '--retract-when-changing-layer'], (0, 1, 100000))
         assert '; travel retraction skipped: minimum extrusion' in gcode

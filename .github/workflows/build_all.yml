@@ -1,4 +1,4 @@
-name: Build all
+name: Repro build and test
 
 on:
   push:
@@ -14,8 +14,8 @@ on:
      - 'version.inc'
      - 'localization/**'
      - 'resources/**'
-     - ".github/workflows/build_*.yml"
-     - ".github/workflows/unit_tests*.yml"
+     - '.github/workflows/**'
+     - 'scripts/**'
      - 'build_linux.sh'
      - 'build_win.bat'
      - 'scripts/test_build_win.ps1'
@@ -36,8 +36,8 @@ on:
      - 'src/**'
      - '**/CMakeLists.txt'
      - 'version.inc'
-     - ".github/workflows/build_*.yml"
-     - ".github/workflows/unit_tests*.yml"
+     - '.github/workflows/**'
+     - 'scripts/**'
      - 'build_linux.sh'
      - 'build_win.bat'
      - 'scripts/test_build_win.ps1'
@@ -66,9 +66,8 @@ concurrency:
   # cancel_closed_pr_builds.yml joins this group by name, so update that file
   # with any change here.
   group: build-all-${{ github.event_name }}-${{ github.event.pull_request.number || github.ref }}
-  # Pushes don't cancel a running build, because only a finished branch build
-  # saves caches every pull request can restore.
-  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+  # Cancel superseded development pushes; release/manual jobs keep their place.
+  cancel-in-progress: ${{ github.event_name == 'pull_request' || (github.event_name == 'push' && github.ref == 'refs/heads/repro-dev') }}
   
 
 jobs:
@@ -78,6 +77,8 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - run: python3 tests/cli/test_nightly_publisher.py
+      - run: python3 tests/cli/test_ci_contract.py
+      - run: python3 tests/cli/test_agent_gui.py
 
   # build_win.bat ships a test suite. Run it before the Windows builds.
   check_build_script:
@@ -527,7 +528,7 @@ jobs:
     if: >-
       success() && github.repository == 'thereprocase/OrcaSlicer-nest3d' &&
       github.ref == 'refs/heads/repro-dev' && !inputs.build-deps-only &&
-      (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch')
+      (github.event_name == 'push' || github.event_name == 'schedule' || github.event_name == 'workflow_dispatch')
     runs-on: ubuntu-24.04
     permissions:
       contents: write

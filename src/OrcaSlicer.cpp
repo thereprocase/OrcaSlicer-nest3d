@@ -4316,6 +4316,17 @@ int CLI::run(int argc, char **argv)
         //ORCA: an option no preset or project defines has just come in as its single default value, and a
         //      command line override may hold one value per filament.
         normalize_filament_values_to_variants(m_print_config);
+        // Typed printer overrides (including the headless retraction policy) can
+        // replace a variant-sized vector with one value. Expand them before any
+        // export, just as the preset loader does on reopen. Keep explicit per-variant
+        // values; a singleton broadcasts to all variants of the selected printer.
+        const auto extruders = m_print_config.option<ConfigOptionFloats>("nozzle_diameter")->size();
+        for (const std::string &key : m_extra_config.keys()) {
+            if (printer_options_with_variant_1.count(key) == 0 && printer_options_with_variant_2.count(key) == 0)
+                continue;
+            if (auto *values = dynamic_cast<ConfigOptionVectorBase *>(m_print_config.option(key)))
+                values->resize(m_print_config.get_parameter_size(key, extruders), FullPrintConfig::defaults().option(key));
+        }
     } else {
         boost::nowide::cerr << "invalid printer_technology " << std::endl;
         record_exit_reson(outfile_dir, CLI_INVALID_PRINTER_TECH, 0, cli_errors[CLI_INVALID_PRINTER_TECH], sliced_info);
