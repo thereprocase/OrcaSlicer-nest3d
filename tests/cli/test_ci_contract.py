@@ -21,6 +21,11 @@ class PortableTests(unittest.TestCase):
         self.assertRegex(manifest, r'path: ../agent_gui.py\s+dest: scripts')
         self.assertTrue((ROOT / 'scripts/agent_gui.py').is_file())
 
+    def test_workflow_helpers_exist_in_the_checkout(self):
+        workflow = (ROOT / '.github/workflows/build_orca.yml').read_text()
+        for helper in re.findall(r'run: ./([^\s]+)', workflow):
+            self.assertTrue((ROOT / helper).is_file(), helper)
+
     def test_external_regression_suite_is_immutable(self):
         revision = (ROOT / 'scripts/ci/orca-test-repo.ref').read_text().strip()
         self.assertRegex(revision, r'^[a-f0-9]{40}$')

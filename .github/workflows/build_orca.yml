@@ -437,7 +437,7 @@ jobs:
       - name: Install pinned NSIS
         if: runner.os == 'Windows' && !vars.SELF_HOSTED
         shell: pwsh
-        run: ./scripts/ci/install_nsis.ps1
+        run: ./scripts/ci/setup_nsis.ps1
 
       - name: Build slicer Win
         if: runner.os == 'Windows'
