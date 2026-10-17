@@ -30,6 +30,7 @@
 #include "libslic3r/BoundingBox.hpp"
 #include "FillConcentric.hpp"
 #include "FillSpiralInset.hpp"
+#include "FillMorphingSpiral.hpp"
 #include "FillHoneycomb.hpp"
 #include "Fill3DHoneycomb.hpp"
 #include "FillGyroid.hpp"
@@ -63,6 +64,7 @@ Fill* Fill::new_from_type(const InfillPattern type)
     switch (type) {
     case ipConcentric:          return new FillConcentric();
     case ipSpiralInset:    return new FillSpiralInset();
+    case ipMorphingSpiral: return new FillMorphingSpiral();
     case ipHoneycomb:           return new FillHoneycomb();
     case ipLateralHoneycomb:         return new FillLateralHoneycomb();
     case ip3DHoneycomb:         return new Fill3DHoneycomb();

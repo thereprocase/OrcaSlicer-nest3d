@@ -162,6 +162,8 @@ set(lisbslic3r_sources
     Fill/FillConcentric.hpp
     Fill/FillSpiralInset.cpp
     Fill/FillSpiralInset.hpp
+    Fill/FillMorphingSpiral.cpp
+    Fill/FillMorphingSpiral.hpp
     Fill/FillConcentricInternal.cpp
     Fill/FillConcentricInternal.hpp
     Fill/FillCornerSmoothing.cpp

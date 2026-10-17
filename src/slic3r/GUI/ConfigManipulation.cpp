@@ -832,7 +832,7 @@ void ConfigManipulation::toggle_print_fff_options(DynamicPrintConfig *config, in
 
     // Orca: the concentric patterns follow the surface outline instead of crossing it, so there is
     // nothing for an infill anchor to attach to. Hide the anchor settings for them.
-    bool have_infill_anchor = have_infill && pattern != ipConcentric && pattern != ipSpiralInset;
+    bool have_infill_anchor = have_infill && pattern != ipConcentric && pattern != ipSpiralInset && pattern != ipMorphingSpiral;
     toggle_line("infill_anchor", have_infill_anchor);
     toggle_line("infill_anchor_max", have_infill_anchor);
 
@@ -930,7 +930,7 @@ void ConfigManipulation::toggle_print_fff_options(DynamicPrintConfig *config, in
     toggle_line("separated_infills", is_separable_infill_pattern(pattern));
 
     // Fill order is only meaningful for the center-based surface fill patterns; hide it otherwise.
-    auto is_centered_fill = [](InfillPattern p) { return p == ipConcentric || p == ipSpiralInset || p == ipArchimedeanChords || p == ipOctagramSpiral; };
+    auto is_centered_fill = [](InfillPattern p) { return p == ipConcentric || p == ipSpiralInset || p == ipMorphingSpiral || p == ipArchimedeanChords || p == ipOctagramSpiral; };
     toggle_line("top_surface_fill_order", has_top_shell && is_centered_fill(config->opt_enum<InfillPattern>("top_surface_pattern")));
     toggle_line("bottom_surface_fill_order", has_bottom_shell && is_centered_fill(config->opt_enum<InfillPattern>("bottom_surface_pattern")));
 
