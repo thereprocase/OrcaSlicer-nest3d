@@ -1,5 +1,7 @@
 # Repro OrcaSlicer
 
+**[Latest passing nightly](https://github.com/thereprocase/OrcaSlicer-nest3d/releases/tag/repro-nightly)** · **[Build archive](https://github.com/thereprocase/OrcaSlicer-nest3d/releases)** · **[CI builds in progress](https://github.com/thereprocase/OrcaSlicer-nest3d/actions/workflows/build_all.yml?query=branch%3Arepro-dev)**
+
 An OrcaSlicer fork for repeatable, inspectable slicing and local automation. It combines the normal desktop slicer with Nest3D plate arrangement, profile-management commands, a local GUI API, and retraction controls shared by the GUI and CLI.
 
 This is **thereprocase’s development fork**, not an official OrcaSlicer release. It retains Orca’s project/profile compatibility and credits its upstream authors. Printer operation remains an explicit user action; building or testing this repository does not send a print.
@@ -7,6 +9,8 @@ This is **thereprocase’s development fork**, not an official OrcaSlicer releas
 [![Repro build and test](https://github.com/thereprocase/OrcaSlicer-nest3d/actions/workflows/build_all.yml/badge.svg?branch=repro-dev)](https://github.com/thereprocase/OrcaSlicer-nest3d/actions/workflows/build_all.yml?query=branch%3Arepro-dev)
 
 ## Downloads
+
+The nightly link always points to the latest published passing build. Each published build also has a retained `repro-build-RUN_ID-COMMIT` release with its own downloads and checksums. Completed archived releases are left unchanged. CI artifacts are temporary and may require GitHub sign-in; use releases for bookmarks and retained downloads.
 
 [Repro development builds](https://github.com/thereprocase/OrcaSlicer-nest3d/releases/tag/repro-nightly) contain the graphical and command-line application for Linux x86_64/aarch64, Windows x64/arm64, and universal macOS, plus Linux Flatpak packages. Windows portable archives include application resources. macOS builds are unsigned.
 

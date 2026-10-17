@@ -1,9 +1,14 @@
 """Check release packaging without network access or release credentials."""
 import hashlib
 import importlib.util
+import json
+import os
+import sys
 from pathlib import Path
 import tempfile
 import unittest
+from unittest.mock import patch
+from subprocess import CompletedProcess
 import zipfile
 
 spec = importlib.util.spec_from_file_location(
@@ -64,6 +69,49 @@ class NightlyPackages(unittest.TestCase):
         self.package('OrcaSlicer_Mac_bundle_arm64_commit', 'intermediate.bin')
         assets = publisher.prepare_assets(self.artifacts, self.root / 'release')
         self.assertFalse(any('bundle' in asset.name for asset in assets))
+
+    def test_archive_only_leaves_rolling_release_and_tag_untouched(self):
+        self.platforms()
+        output = self.root / 'archive'
+        argv = ['publish', str(self.artifacts), '--sha', 'a' * 40,
+                '--run-id', '123', '--output', str(output), '--archive-only']
+        with patch.object(sys, 'argv', argv), patch.dict(os.environ, {
+                'GH_REPO': publisher.REPOSITORY, 'GITHUB_REF': 'refs/heads/repro-dev'}), \
+                patch.object(publisher, 'publish_build_archive') as archive, \
+                patch.object(publisher.subprocess, 'run') as run:
+            publisher.main()
+        archive.assert_called_once()
+        run.assert_not_called()
+
+    def test_archive_upload_finishes_before_publication(self):
+        with patch.object(publisher.subprocess, 'run') as run:
+            run.return_value = CompletedProcess([], 1, '')
+            tag = publisher.publish_build_archive('a' * 40, '123', [Path('app.exe')], Path('notes.md'))
+        commands = [call.args[0] for call in run.call_args_list]
+        self.assertEqual(tag, 'repro-build-123-aaaaaaaaaaaa')
+        self.assertIn('--draft', commands[1])
+        self.assertEqual(commands[2][:3], ['gh', 'release', 'upload'])
+        self.assertIn('--draft=false', commands[3])
+
+    def test_published_archive_is_never_overwritten(self):
+        with patch.object(publisher.subprocess, 'run') as run:
+            run.return_value = CompletedProcess([], 0, json.dumps({'isDraft': False, 'targetCommitish': 'a' * 40}))
+            publisher.publish_build_archive('a' * 40, '123', [], Path('notes.md'))
+        self.assertEqual(run.call_count, 1)
+
+    def test_unfinished_archive_can_resume_upload(self):
+        with patch.object(publisher.subprocess, 'run') as run:
+            run.return_value = CompletedProcess([], 0, json.dumps({'isDraft': True, 'targetCommitish': 'a' * 40}))
+            publisher.publish_build_archive('a' * 40, '123', [Path('app.exe')], Path('notes.md'))
+        self.assertEqual(run.call_args_list[1].args[0][:3], ['gh', 'release', 'upload'])
+        self.assertEqual(run.call_count, 3)
+
+    def test_archive_commit_collision_stops_publication(self):
+        with patch.object(publisher.subprocess, 'run') as run:
+            run.return_value = CompletedProcess([], 0, json.dumps({'isDraft': False, 'targetCommitish': 'b' * 40}))
+            with self.assertRaisesRegex(ValueError, 'different commit'):
+                publisher.publish_build_archive('a' * 40, '123', [], Path('notes.md'))
+        self.assertEqual(run.call_count, 1)
 
 
 if __name__ == '__main__':

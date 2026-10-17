@@ -10,7 +10,9 @@ Pushes and pull requests targeting `repro-dev` run **Repro build and test**. The
 
 At **02:15 UTC daily**, the default branch builds this integration branch. Integration pushes and manual builds use the same graph. The final publisher waits for every listed platform build, unit-test, Flatpak and profile-slice gate, then publishes the artifacts of that exact run to [Repro development nightly](https://github.com/thereprocase/OrcaSlicer-nest3d/releases/tag/repro-nightly). Pull requests and dependency-only runs never publish. Superseded integration pushes are cancelled.
 
-`SHA256SUMS` accompanies downloads; the release notes and tag identify the tested commit. macOS fork builds use the unsigned packaging path. **Republish verified Repro build** is a manual recovery operation for an existing successful integration build, not an automatic second publication pipeline.
+Each published build is first retained under `repro-build-RUN_ID-COMMIT` (12-character commit prefix), with installers, portable bundles and checksums. An interrupted draft can resume; a completed archive is left unchanged. The rolling `repro-nightly` tag then points to the newest published passing build. The README links directly to the nightly, archive and CI runs.
+
+`SHA256SUMS` accompanies downloads; the release notes and tag identify the tested commit. macOS fork builds use the unsigned packaging path. **Republish verified Repro build** is a manual recovery operation for an existing successful integration build, not an automatic second publication pipeline. It runs the publisher from the selected workflow revision against the verified build artifacts and their original commit/run ID. Use `archive_only` to retain an older passing build without changing the rolling nightly.
 
 Windows packaging uses the official NSIS 3.13 portable archive with its SHA-256 pinned from [NSIS release data](https://github.com/NSIS-Dev/release-data/blob/main/data/versions.json), avoiding the Chocolatey feed. External CLI regression fixtures are pinned in `scripts/ci/orca-test-repo.ref`. Flatpak ships and runs the standalone local API transport and client tests as well as the core suites.
 

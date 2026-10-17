@@ -7,6 +7,10 @@ on:
         description: Successful repro-dev Build all run to publish without rebuilding
         required: true
         type: string
+      archive_only:
+        description: Retain the build without changing the rolling nightly
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -55,7 +59,7 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
-          ref: ${{ needs.verify_build.outputs.sha }}
+          ref: ${{ github.sha }}
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
         with:
           pattern: OrcaSlicer*
@@ -67,4 +71,11 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
           BUILD_SHA: ${{ needs.verify_build.outputs.sha }}
-        run: python3 scripts/publish_repro_nightly.py nightly-artifacts --sha "$BUILD_SHA"
+          BUILD_RUN_ID: ${{ needs.verify_build.outputs.run_id }}
+          ARCHIVE_ONLY: ${{ inputs.archive_only }}
+        run: |
+          python3 tests/cli/test_nightly_publisher.py
+          git fetch --no-tags --depth=1 origin "$BUILD_SHA"
+          extra=()
+          if [[ "$ARCHIVE_ONLY" == "true" ]]; then extra+=(--archive-only); fi
+          python3 scripts/publish_repro_nightly.py nightly-artifacts --sha "$BUILD_SHA" --run-id "$BUILD_RUN_ID" "${extra[@]}"
