@@ -14,6 +14,8 @@ Each published build is first retained under `repro-build-RUN_ID-COMMIT` (12-cha
 
 `SHA256SUMS` accompanies downloads; the release notes and tag identify the tested commit. macOS fork builds use the unsigned packaging path. **Republish verified Repro build** is a manual recovery operation for an existing successful integration build, not an automatic second publication pipeline. It runs the publisher from the selected workflow revision against the verified build artifacts and their original commit/run ID. Use `archive_only` to retain an older passing build without changing the rolling nightly.
 
+For an older-build backfill, GitHub may refuse to create a release tag with the workflow token even though it has `contents: write`. In that case, a repository maintainer can create `repro-build-RUN_ID-COMMIT` at the verified full build SHA and rerun the failed publication job. Keep the existing tag intact; the archive publisher checks the release target before resuming.
+
 Windows packaging uses the official NSIS 3.13 portable archive with its SHA-256 pinned from [NSIS release data](https://github.com/NSIS-Dev/release-data/blob/main/data/versions.json), avoiding the Chocolatey feed. External CLI regression fixtures are pinned in `scripts/ci/orca-test-repo.ref`. Flatpak ships and runs the standalone local API transport and client tests as well as the core suites.
 
 Upstream issue assignment, AI deduplication, vendor merge delegation, OTA publication, WinGet publication, translation publication and the redundant status-badge workflow are archived outside the active workflows directory. Build/test coverage remains active; no upstream maintainer list or upstream release destination controls this fork.
