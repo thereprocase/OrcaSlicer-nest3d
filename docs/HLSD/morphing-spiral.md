@@ -7,8 +7,8 @@ set `top_surface_pattern`, `bottom_surface_pattern` or
 Existing defaults and saved pattern identifiers are unchanged.
 
 For a star-shaped region with exactly one hole, the generator interpolates
-radial boundary samples around the hole centroid. It emits two boundary paths
-and one continuous interior spiral with variable spacing. This is three
+radial boundary samples around the hole centroid. It emits two boundary paths,
+one continuous interior spiral and two supplemental tapered gap arcs. This is five
 extrusion paths, not a promise of a travel-free layer. The ordinary extrusion
 writer converts spacing to bead width and retains material flow limits,
 acceleration, cooling and retraction behavior.
@@ -21,15 +21,28 @@ solve a harmonic field and cannot represent arbitrary outlines.
 
 ## Experimental limits
 
-The first and last spiral turns overlap the boundary paths. Current synthetic
-80 mm circular/eight-lobed annulus checks measure approximately 2.3–2.5% excess
-swept-strip area; the acceptance ceiling is 3%. These area checks do not predict
-local molten-plastic height or establish that the endpoints print cleanly.
-Endpoint deposition remains an unresolved limitation of this preview build.
-Inspect the width/flow preview and use a small trial before applying it to a
-finished part. No physical print qualification is claimed.
+The overlapping first and last turns are removed. Two tapered arcs cover the
+resulting crescent gaps between the main spiral and its boundary paths. Near a
+thin arc tip, the boundary bead widens to absorb the residual until the arc
+can take over. The handover spans nine target spacings. Arc tips below 10% of
+the target spacing are omitted; the resulting void still has to pass the
+local area and width gates. Narrow tips remain a physical-print limitation.
+
+Gap arcs remain last for both surface fill orders, including bottom surfaces.
+The extrusion collection prohibits path sorting, so the later planner retains
+this sequence. Main and boundary paths retain nozzle width bounds; gap arcs
+are permitted to taper below the main-path minimum. Every path has a maximum
+width-change rate of 0.20 mm/mm.
+
+The geometric deposition-budget ceiling is 0.5% excess or deficit; uncovered
+and outside footprint fractions must each remain below 0.2%. Connected gaps
+must be at most 0.25 mm², outside patches at most 0.10 mm²; inscribed-width
+checks also apply. These are swept-spacing checks, not predictions of molten
+plastic height, bonding or surface finish. No physical print qualification is
+claimed. Inspect the width/flow preview and use a small trial before applying
+it to a finished part.
 
 The offline polygon tool under `experiments/morphing_spiral` produces geometry
 previews and independent raster coverage measurements, not printable G-code.
-Its widths describe path spacing; production bead width additionally includes
+It represents the initial uncorrected endpoint approach, not the native tapered-arc revision. Its widths describe path spacing; production bead width additionally includes
 the layer-height-dependent rounded cross-section correction.
