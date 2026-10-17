@@ -12,22 +12,35 @@ REPOSITORY = 'thereprocase/OrcaSlicer-nest3d'
 TAG = 'repro-nightly'
 
 
+def ensure_archive_tag(tag, sha):
+    """Verify the actual tag commit before creating or resuming a release."""
+    ref = 'refs/tags/' + tag
+    result = subprocess.run(['git', 'ls-remote', '--tags', 'origin', ref, ref + '^{}'],
+                            capture_output=True, text=True, check=True)
+    refs = dict(line.split()[::-1] for line in result.stdout.splitlines())
+    actual = refs.get(ref + '^{}', refs.get(ref))
+    if actual is not None:
+        if actual != sha:
+            raise ValueError('Existing archive tag targets a different commit: ' + tag)
+        return
+    subprocess.run(['git', 'push', 'origin', f'{sha}:{ref}'], check=True)
+
+
 def publish_build_archive(sha, run_id, assets, notes):
     """Retry unfinished drafts; leave an already published build untouched."""
     if not re.fullmatch('[a-f0-9]{40}', sha) or not re.fullmatch('[0-9]+', run_id):
         raise ValueError('Archive requires a full SHA and numeric build run ID')
     tag = f'repro-build-{run_id}-{sha[:12]}'
+    ensure_archive_tag(tag, sha)
     view = subprocess.run(
-        ['gh', 'release', 'view', tag, '--json', 'isDraft,targetCommitish'],
+        ['gh', 'release', 'view', tag, '--json', 'isDraft'],
         capture_output=True, text=True)
     if view.returncode == 0:
         release = json.loads(view.stdout)
-        if release['targetCommitish'] != sha:
-            raise ValueError(f'Existing build release targets a different commit: {tag}')
         if not release['isDraft']:
             return tag
     else:
-        subprocess.run(['gh', 'release', 'create', tag, '--target', sha,
+        subprocess.run(['gh', 'release', 'create', tag, '--verify-tag',
                         '--draft', '--prerelease', '--latest=false',
                         '--title', f'Repro build {run_id} · {sha[:12]}',
                         '--notes-file', str(notes)], check=True)

@@ -84,33 +84,51 @@ class NightlyPackages(unittest.TestCase):
         run.assert_not_called()
 
     def test_archive_upload_finishes_before_publication(self):
-        with patch.object(publisher.subprocess, 'run') as run:
+        with patch.object(publisher, 'ensure_archive_tag'), patch.object(publisher.subprocess, 'run') as run:
             run.return_value = CompletedProcess([], 1, '')
             tag = publisher.publish_build_archive('a' * 40, '123', [Path('app.exe')], Path('notes.md'))
         commands = [call.args[0] for call in run.call_args_list]
         self.assertEqual(tag, 'repro-build-123-aaaaaaaaaaaa')
         self.assertIn('--draft', commands[1])
+        self.assertIn('--verify-tag', commands[1])
+        self.assertNotIn('--target', commands[1])
         self.assertEqual(commands[2][:3], ['gh', 'release', 'upload'])
         self.assertIn('--draft=false', commands[3])
 
     def test_published_archive_is_never_overwritten(self):
-        with patch.object(publisher.subprocess, 'run') as run:
+        with patch.object(publisher, 'ensure_archive_tag'), patch.object(publisher.subprocess, 'run') as run:
             run.return_value = CompletedProcess([], 0, json.dumps({'isDraft': False, 'targetCommitish': 'a' * 40}))
             publisher.publish_build_archive('a' * 40, '123', [], Path('notes.md'))
         self.assertEqual(run.call_count, 1)
 
     def test_unfinished_archive_can_resume_upload(self):
-        with patch.object(publisher.subprocess, 'run') as run:
+        with patch.object(publisher, 'ensure_archive_tag'), patch.object(publisher.subprocess, 'run') as run:
             run.return_value = CompletedProcess([], 0, json.dumps({'isDraft': True, 'targetCommitish': 'a' * 40}))
             publisher.publish_build_archive('a' * 40, '123', [Path('app.exe')], Path('notes.md'))
         self.assertEqual(run.call_args_list[1].args[0][:3], ['gh', 'release', 'upload'])
         self.assertEqual(run.call_count, 3)
 
     def test_archive_commit_collision_stops_publication(self):
+        ref = 'refs/tags/repro-build-123-' + 'a' * 12
         with patch.object(publisher.subprocess, 'run') as run:
-            run.return_value = CompletedProcess([], 0, json.dumps({'isDraft': False, 'targetCommitish': 'b' * 40}))
+            run.return_value = CompletedProcess([], 0, 'b' * 40 + '\t' + ref + '\n')
             with self.assertRaisesRegex(ValueError, 'different commit'):
                 publisher.publish_build_archive('a' * 40, '123', [], Path('notes.md'))
+        self.assertEqual(run.call_count, 1)
+
+    def test_new_archive_tag_is_pushed_at_the_verified_commit(self):
+        with patch.object(publisher.subprocess, 'run') as run:
+            run.return_value = CompletedProcess([], 0, '')
+            publisher.ensure_archive_tag('repro-build-123-' + 'a' * 12, 'a' * 40)
+        self.assertEqual(run.call_args_list[1].args[0], [
+            'git', 'push', 'origin', 'a' * 40 + ':refs/tags/repro-build-123-' + 'a' * 12])
+
+    def test_existing_annotated_archive_tag_uses_peeled_commit(self):
+        ref = 'refs/tags/repro-build-123-' + 'a' * 12
+        with patch.object(publisher.subprocess, 'run') as run:
+            run.return_value = CompletedProcess([], 0,
+                'b' * 40 + '\t' + ref + '\n' + 'a' * 40 + '\t' + ref + '^{}\n')
+            publisher.ensure_archive_tag('repro-build-123-' + 'a' * 12, 'a' * 40)
         self.assertEqual(run.call_count, 1)
 
 
