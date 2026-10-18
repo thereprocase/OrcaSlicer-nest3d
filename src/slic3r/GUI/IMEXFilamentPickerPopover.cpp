@@ -20,6 +20,7 @@
 #include "slic3r/GUI/Widgets/ComboBox.hpp"
 #include "slic3r/GUI/PartPlate.hpp"
 #include "slic3r/GUI/GUI_App.hpp"
+#include "slic3r/GUI/I18N.hpp"
 #include "slic3r/GUI/wxExtensions.hpp"
 
 namespace Slic3r { namespace GUI {
@@ -96,7 +97,7 @@ void IMEXFilamentPickerPopover::build_row()
     };
 
     for (int L : lane_logicals) {
-        const wxString label = wxString::Format("filament %d", L + 1);
+        const wxString label = wxString::Format(_L("Filament %d"), L + 1);
         if (L >= 0 && L < (int)bmps.size() && bmps[L] && bmps[L]->IsOk())
             choice->Append(label, pad_left(*bmps[L]));
         else
