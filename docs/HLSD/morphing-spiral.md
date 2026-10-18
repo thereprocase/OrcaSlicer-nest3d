@@ -31,16 +31,15 @@ the nozzle width.
 
 ## Islands one radial spiral cannot fill
 
-When the radial spiral rejects an island, two other single-path methods try, and the fill keeps
-the one that leaves less of the island uncovered, counting half its deposition error.
+When the radial spiral rejects an island, two other single-path methods try in turn.
 
-- Radial band with Fermat pockets, for an island with at most one hole: the radial spiral is capped
-  around the hole at the thickness its bead count can cover, so the narrow sides stay one clean
-  morphing spiral. The parts beyond the cap (a square's corners, a star's arms) are pockets, each
-  filled by a Fermat spiral spliced into the band's outer loop. The band takes everything up to two
-  beads past its cap and steps down over a short smoothstep, so no pocket starts as a wedge thinner
-  than two beads.
-- Connected Fermat spiral (after Zhao et al., "Connected Fermat Spirals for Layered Fabrication",
+- Accordion spiral, for an island with one hole: rings of the outline, one middle loop and rings of
+  the hole, as one inward spiral of true offsets (rectangles in a rectangle, squares round a square
+  hole). The ring spacing is set so the rings exactly fill the narrowest part of the island. Where
+  the strip left for the middle loop is wider than one bead (the ends of a rectangle, a square's
+  corners round a round hole, a star's arms) the middle loop folds back and forth across it in
+  parallel lanes, an even number of times, so it rejoins itself where it left. Its only U-turns are
+  those folds, at full track width against an edge.- Connected Fermat spiral (after Zhao et al., "Connected Fermat Spirals for Layered Fabrication",
   SIGGRAPH 2016), for any island, holes included. The island is offset into rings, each opened by
   half a spacing so that every ring end is a U-turn of full track width rather than a pinched
   hairpin. Chains of nested rings become spirals: the outermost is a plain inward spiral, the others
@@ -48,16 +47,16 @@ the one that leaves less of the island uncovered, counting half its deposition e
   a U-turn in and a two-lane smoothstep out. Where rings of different families meet, the leftover
   strip is shared by every bead outward along the same line, so widths change gradually.
 
-Both are audited against a looser budget than the radial spiral, because every ring end and splice
-leaves a small gap: largest gap 0.45 mm2, no gap wider than half a spacing, uncovered at most 1.2%,
+Both are audited against a looser budget than the radial spiral, because every fold, ring end and
+splice leaves a small gap: largest gap 0.45 mm2, no gap wider than half a spacing, uncovered at most 1.2%,
 spill as for the radial spiral, deposition within 3% of the island area.
 
-A known limit: a band only a few beads wide that needs an odd bead count (three beads across a
-1.4 mm side, for example) cannot be met by two ring families, so such islands fall back.
+A known limit: where two families of Fermat rings meet (between two holes, for example) the seam can
+leave gaps wider than half a bead, and such islands fall back.
 
 ## When it falls back
 
-Islands that none of the three methods can fill are filled with Spiral Inset.
+Islands that no method can fill are filled with Spiral Inset.
 Each object then gets one non-critical slicing warning that gives the number of
 islands, the layer range and the reasons with counts, for example "Morphing
 spiral used Spiral Inset for 3 island(s) on layers 1-3 of frame: bead footprint
@@ -78,7 +77,7 @@ candidates: sparse density, `dont_adjust` and bridges. The usual fallback
 cases:
 
 - an island smaller than one ring
-- a narrow band that needs an odd bead count, as above
+- gaps at a Fermat seam wider than half a bead, as above
 - coverage outside the Fermat budget
 - a region that cannot be spliced to its neighbours (no stretch of three
   spacings where their rings run side by side)
