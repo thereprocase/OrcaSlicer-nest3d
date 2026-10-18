@@ -68,6 +68,41 @@ Slic3r::TriangleMesh two_hole_plate()
     return mesh;
 }
 
+// A square of the given side with a round hole, both centred on the origin.
+Slic3r::ExPolygon square_with_hole(double side, double hole_diameter)
+{
+    Slic3r::ExPolygon p;
+    const double h = side / 2;
+    for (const auto& [x, y] : {std::pair{-h, -h}, std::pair{h, -h}, std::pair{h, h}, std::pair{-h, h}})
+        p.contour.points.emplace_back(Slic3r::Point::new_scale(x, y));
+    Slic3r::Polygon hole;
+    for (int i = 0; i < 360; ++i) {
+        const double a = 6.283185307179586 * i / 360;
+        hole.points.emplace_back(Slic3r::Point::new_scale(hole_diameter / 2 * std::cos(-a), hole_diameter / 2 * std::sin(-a)));
+    }
+    p.holes.emplace_back(std::move(hole));
+    return p;
+}
+
+// A 1 mm tall 20 mm square plate with a 17.2 mm round hole. Without walls each side is a 1.4 mm
+// band: three beads wide, but only one ring fits each side, so the Fermat spiral would need beads
+// past the nozzle maximum; the corners are far too thick for one radial spiral.
+Slic3r::TriangleMesh narrow_square_frame()
+{
+    Slic3r::ExPolygon frame;
+    for (const auto& [x, y] : {std::pair{-1000, -1000}, std::pair{1000, -1000}, std::pair{1000, 1000}, std::pair{-1000, 1000}})
+        frame.contour.points.emplace_back(Slic3r::Point(x, y));
+    Slic3r::Polygon hole;
+    for (int i = 0; i < 180; ++i) {
+        const double a = 6.283185307179586 * i / 180;
+        hole.points.emplace_back(Slic3r::Point(860 * std::cos(-a), 860 * std::sin(-a)));
+    }
+    frame.holes.emplace_back(std::move(hole));
+    Slic3r::TriangleMesh mesh(Slic3r::Emboss::polygons2model(Slic3r::ExPolygons{frame}, Slic3r::Emboss::ProjectZ(100.)));
+    mesh.scale(.01f);
+    return mesh;
+}
+
 std::vector<std::string> current_morphing_warnings(const Slic3r::Print& print)
 {
     std::vector<std::string> messages;
@@ -106,6 +141,30 @@ void check_single_path(const Slic3r::MorphingSpiralResult& result, double min_sp
     CHECK(result.outside_fraction <= .002);
     CHECK(std::abs(result.excess_fraction) <= .005);
 }
+
+// The Fermat spiral's own budget (see fermat_spiral): one path, every bead inside the nozzle
+// bounds, and coverage within its looser limits.
+void check_fermat_path(const Slic3r::MorphingSpiralResult& result, double min_spacing, double max_spacing)
+{
+    CAPTURE(result.fallback_reason, result.uncovered_fraction, result.outside_fraction, result.excess_fraction,
+            result.largest_gap_mm2, result.largest_spill_mm2);
+    REQUIRE(result.paths.size() == 1);
+    const auto& path = result.paths.front();
+    REQUIRE(path.width.size() == 2 * (path.points.size() - 1));
+    for (const auto width : path.width) {
+        CHECK(Slic3r::unscale<double>(width) >= min_spacing - 1e-6);
+        CHECK(Slic3r::unscale<double>(width) <= max_spacing + 1e-6);
+    }
+    CHECK(result.largest_gap_mm2 <= .45);
+    CHECK(result.largest_spill_mm2 <= .10);
+    CHECK(result.uncovered_fraction <= .012);
+    CHECK(result.outside_fraction <= .002);
+    CHECK(std::abs(result.excess_fraction) <= .03);
+}
+
+// A 0.5 mm line on a 0.4 nozzle at 0.2 mm layers, as spacing and bead bounds.
+constexpr double rounded = .2 * (1. - .25 * 3.14159265358979323846);
+constexpr double spacing_04 = .5 - rounded, min_04 = .3 - rounded, max_04 = .6 - rounded;
 } // namespace
 
 TEST_CASE("Morphing spiral covers an annulus with one continuous path", "[Fill][MorphingSpiral]")
@@ -161,15 +220,10 @@ TEST_CASE("Morphing spiral is available by config name and preserves stock fallb
         f->print_object_config = &oc;
         return f;
     };
-    // Two holes cannot be one spiral, so the island must come out exactly as stock spiral inset.
-    Slic3r::ExPolygon two_holes = annulus();
-    Slic3r::Polygon second;
-    for (int i = 0; i < 90; ++i) {
-        const double a = 6.283185307179586 * i / 90;
-        second.points.emplace_back(Slic3r::Point::new_scale(27 + 4 * std::cos(-a), 4 * std::sin(-a)));
-    }
-    two_holes.holes.emplace_back(std::move(second));
-    Slic3r::Surface surface(Slic3r::stTop, two_holes);
+    // A 2 mm band around a 16 mm hole in a 20 mm square: too thick at the corners for the radial
+    // spiral, and three beads wide on the sides where only one Fermat ring fits each side, so
+    // neither spiral fits and the island must come out exactly as stock spiral inset.
+    Slic3r::Surface surface(Slic3r::stTop, square_with_hole(20, 16));
     auto experiment = make("morphingspiral");
     auto stock      = make("spiralinset");
     auto actual     = experiment->fill_surface_arachne(&surface, params);
@@ -183,7 +237,7 @@ TEST_CASE("Morphing spiral is available by config name and preserves stock fallb
     const auto* morphing = dynamic_cast<const Slic3r::FillMorphingSpiral*>(experiment.get());
     REQUIRE(morphing != nullptr);
     REQUIRE(morphing->fallback_reasons.size() == 1);
-    CHECK(morphing->fallback_reasons.front() == "more than one hole");
+    CHECK(!morphing->fallback_reasons.front().empty());
 }
 
 TEST_CASE("Bottom surface prints the spiral as one path in either order", "[Fill][MorphingSpiral]")
@@ -233,13 +287,14 @@ TEST_CASE("A fallback island raises one slicing warning that a stock pattern cle
     Slic3r::Print print;
     Slic3r::Model model;
     Slic3r::DynamicPrintConfig config = Slic3r::DynamicPrintConfig::full_print_config();
-    config.set_deserialize_strict({{"bottom_surface_pattern", "morphingspiral"}, {"top_surface_pattern", "morphingspiral"}});
-    Slic3r::Test::init_print(std::vector<Slic3r::TriangleMesh>{two_hole_plate()}, print, model, config);
+    config.set_deserialize_strict(
+        {{"bottom_surface_pattern", "morphingspiral"}, {"top_surface_pattern", "morphingspiral"}, {"wall_loops", "0"}});
+    Slic3r::Test::init_print(std::vector<Slic3r::TriangleMesh>{narrow_square_frame()}, print, model, config);
     print.process();
-    // Every two-hole island falls back, but they are reported as one aggregated warning.
+    // Every layer's island falls back, but they are reported as one aggregated warning.
     const auto first = current_morphing_warnings(print);
     REQUIRE(first.size() == 1);
-    CHECK(first.front().find("more than one hole") != std::string::npos);
+    CHECK(first.front().find("Spiral Inset") != std::string::npos);
 
     // Regenerating infill with the spiral still selected must give the same single report,
     // with the same island count, not an accumulated one.
@@ -250,6 +305,48 @@ TEST_CASE("A fallback island raises one slicing warning that a stock pattern cle
 
     config.set_deserialize_strict({{"bottom_surface_pattern", "monotonic"}, {"top_surface_pattern", "monotonic"}});
     print.apply(model, config);
+    print.process();
+    CHECK(current_morphing_warnings(print).empty());
+}
+
+TEST_CASE("Fermat spiral fills islands the radial spiral cannot as one path", "[Fill][MorphingSpiral][Fermat]")
+{
+    auto two_holes = annulus();
+    Slic3r::Polygon second;
+    for (int i = 0; i < 90; ++i) {
+        const double a = 6.283185307179586 * i / 90;
+        second.points.emplace_back(Slic3r::Point::new_scale(27 + 4 * std::cos(-a), 4 * std::sin(-a)));
+    }
+    two_holes.holes.emplace_back(std::move(second));
+    SECTION("two holes")
+    {
+        CHECK(Slic3r::morphing_spiral(two_holes, spacing_04, min_04, max_04).paths.empty());
+        check_fermat_path(Slic3r::fermat_spiral(two_holes, spacing_04, min_04, max_04), min_04, max_04);
+    }
+    SECTION("a square around a large round hole")
+    {
+        const auto square = square_with_hole(39.5, 28.5);
+        CHECK(Slic3r::morphing_spiral(square, spacing_04, min_04, max_04).paths.empty());
+        check_fermat_path(Slic3r::fermat_spiral(square, spacing_04, min_04, max_04), min_04, max_04);
+    }
+}
+
+TEST_CASE("Fermat spiral rejects what it cannot fill without partial output", "[Fill][MorphingSpiral][Fermat]")
+{
+    CHECK(Slic3r::fermat_spiral(disk(.4), spacing_04, min_04, max_04).paths.empty()); // smaller than one ring
+    CHECK(Slic3r::fermat_spiral(annulus(), std::numeric_limits<double>::quiet_NaN(), min_04, max_04).paths.empty());
+    const auto narrow = Slic3r::fermat_spiral(square_with_hole(20, 17.2), spacing_04, min_04, max_04);
+    CHECK(narrow.paths.empty());
+    CHECK(!narrow.fallback_reason.empty());
+}
+
+TEST_CASE("A two-hole plate spirals without a fallback warning", "[Fill][MorphingSpiral][Fermat]")
+{
+    Slic3r::Print print;
+    Slic3r::Model model;
+    Slic3r::DynamicPrintConfig config = Slic3r::DynamicPrintConfig::full_print_config();
+    config.set_deserialize_strict({{"bottom_surface_pattern", "morphingspiral"}, {"top_surface_pattern", "morphingspiral"}});
+    Slic3r::Test::init_print(std::vector<Slic3r::TriangleMesh>{two_hole_plate()}, print, model, config);
     print.process();
     CHECK(current_morphing_warnings(print).empty());
 }

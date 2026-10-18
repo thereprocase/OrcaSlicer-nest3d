@@ -1,6 +1,7 @@
 #ifndef slic3r_FillMorphingSpiral_hpp_
 #define slic3r_FillMorphingSpiral_hpp_
 #include "FillSpiralInset.hpp"
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -17,7 +18,23 @@ struct MorphingSpiralResult
     double largest_gap_mm2       = 0.;
     double largest_spill_mm2     = 0.;
 };
+// One radial spiral with no U-turns; islands with at most one hole and a bounded thickness ratio.
 MorphingSpiralResult morphing_spiral(const ExPolygon& bead_domain, double spacing_mm, double min_spacing_mm, double max_spacing_mm);
+// Connected Fermat spiral (FillFermatSpiral.cpp): any island, holes included, still one path.
+MorphingSpiralResult fermat_spiral(const ExPolygon& bead_domain, double spacing_mm, double min_spacing_mm, double max_spacing_mm);
+
+namespace morphing_spiral_detail {
+// Appends p (mm) with its width (mm) to a variable-width path.
+void append_point(ThickPolyline& path, const Vec2d& p, double width_mm);
+struct Coverage
+{
+    ExPolygons gaps;
+    ExPolygons spills;
+};
+// Swept-footprint audit of paths over the domain: fills result's fractions and largest gap and
+// spill, and returns the gaps and spills for inscribed-width checks. Nothing for an empty domain.
+std::optional<Coverage> measure_coverage(const ExPolygon& domain, const ThickPolylines& paths, MorphingSpiralResult& result);
+} // namespace morphing_spiral_detail
 
 class FillMorphingSpiral : public FillSpiralInset
 {

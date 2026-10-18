@@ -185,21 +185,7 @@ void limit_width_change(std::vector<double>& widths, const std::vector<double>& 
         widths[i] = .5 * (up[i] + low[i]);
 }
 
-void append_point(ThickPolyline& path, const Vec2d& p, double width)
-{
-    const double scaled_width = scale_(width);
-    if (path.points.empty()) {
-        path.points.emplace_back(point(p));
-        path.width.emplace_back(scaled_width);
-        return;
-    }
-    const double previous = path.width.back();
-    if (path.points.size() == 1)
-        path.width.clear();
-    path.width.emplace_back(previous);
-    path.width.emplace_back(scaled_width);
-    path.points.emplace_back(point(p));
-}
+
 // Polygonal swept-strip audit using the sampled path's vertex normals. Building
 // one strip per path avoids an expensive union of a cap at every vertex.
 // This is geometric coverage, not a molten-bead or local-height simulation.
@@ -246,6 +232,42 @@ double area_mm2(const ExPolygons& polygons)
     return area;
 }
 } // namespace
+
+namespace morphing_spiral_detail {
+void append_point(ThickPolyline& path, const Vec2d& p, double width)
+{
+    const double scaled_width = scale_(width);
+    if (path.points.empty()) {
+        path.points.emplace_back(point(p));
+        path.width.emplace_back(scaled_width);
+        return;
+    }
+    const double previous = path.width.back();
+    if (path.points.size() == 1)
+        path.width.clear();
+    path.width.emplace_back(previous);
+    path.width.emplace_back(scaled_width);
+    path.points.emplace_back(point(p));
+}
+
+std::optional<Coverage> measure_coverage(const ExPolygon& domain, const ThickPolylines& paths, MorphingSpiralResult& result)
+{
+    double strip_area      = 0;
+    const Polygons covered = footprint(paths, strip_area);
+    const double area      = unscale<double>(unscale<double>(domain.area()));
+    if (area <= 0)
+        return std::nullopt;
+    Coverage coverage{diff_ex(ExPolygons{domain}, covered), diff_ex(covered, ExPolygons{domain})};
+    result.uncovered_fraction = area_mm2(coverage.gaps) / area;
+    result.outside_fraction   = area_mm2(coverage.spills) / area;
+    for (const auto& gap : coverage.gaps)
+        result.largest_gap_mm2 = std::max(result.largest_gap_mm2, area_mm2(ExPolygons{gap}));
+    for (const auto& spill : coverage.spills)
+        result.largest_spill_mm2 = std::max(result.largest_spill_mm2, area_mm2(ExPolygons{spill}));
+    result.excess_fraction = strip_area / area - 1;
+    return coverage;
+}
+} // namespace morphing_spiral_detail
 
 MorphingSpiralResult morphing_spiral(const ExPolygon& domain, double spacing, double min_spacing, double max_spacing)
 {
@@ -477,28 +499,18 @@ MorphingSpiralResult morphing_spiral(const ExPolygon& domain, double spacing, do
             if (change > max_width_change)
                 return reject("width change per millimetre exceeds limit");
         }
-        append_point(spiral, kept[i], kept_widths[i]);
+        morphing_spiral_detail::append_point(spiral, kept[i], kept_widths[i]);
     }
     ThickPolylines candidate;
     candidate.emplace_back(std::move(spiral));
 
-    double strip_area      = 0;
-    const Polygons covered = footprint(candidate, strip_area);
-    const double area      = unscale<double>(unscale<double>(domain.area()));
-    if (area <= 0)
+    const std::optional<morphing_spiral_detail::Coverage> coverage = morphing_spiral_detail::measure_coverage(domain, candidate, result);
+    if (!coverage)
         return reject("invalid domain area");
-    const ExPolygons gaps     = diff_ex(ExPolygons{domain}, covered);
-    const ExPolygons spills   = diff_ex(covered, ExPolygons{domain});
-    result.uncovered_fraction = area_mm2(gaps) / area;
-    result.outside_fraction   = area_mm2(spills) / area;
-    for (const auto& gap : gaps)
-        result.largest_gap_mm2 = std::max(result.largest_gap_mm2, area_mm2(ExPolygons{gap}));
-    for (const auto& spill : spills)
-        result.largest_spill_mm2 = std::max(result.largest_spill_mm2, area_mm2(ExPolygons{spill}));
-    if (result.largest_gap_mm2 > .25 || result.largest_spill_mm2 > .10 || !offset_ex(gaps, -float(scale_(spacing * .15))).empty() ||
-        !offset_ex(spills, -float(scale_(spacing * .15))).empty())
+    if (result.largest_gap_mm2 > .25 || result.largest_spill_mm2 > .10 ||
+        !offset_ex(coverage->gaps, -float(scale_(spacing * .15))).empty() ||
+        !offset_ex(coverage->spills, -float(scale_(spacing * .15))).empty())
         return reject("local gap or spill exceeds area/inscribed-width limit");
-    result.excess_fraction = strip_area / area - 1;
     if (result.uncovered_fraction > .002 || result.outside_fraction > .002 || std::abs(result.excess_fraction) > .005)
         return reject("bead footprint coverage or deposition budget failed");
     result.paths = std::move(candidate);
@@ -518,8 +530,12 @@ void FillMorphingSpiral::_fill_surface_single(
     if (domains.size() == 1) {
         const double nozzle             = params.flow.nozzle_diameter();
         const double rounded_correction = params.layer_height * (1. - .25 * 3.14159265358979323846);
-        auto result                     = morphing_spiral(domains.front(), spacing, std::max(.01, .75 * nozzle - rounded_correction),
-                                                          1.5 * nozzle - rounded_correction);
+        const double min_spacing        = std::max(.01, .75 * nozzle - rounded_correction);
+        const double max_spacing        = 1.5 * nozzle - rounded_correction;
+        // The radial spiral has no U-turns, so it is tried first; the Fermat spiral fills the rest.
+        auto result = morphing_spiral(domains.front(), spacing, min_spacing, max_spacing);
+        if (result.paths.empty())
+            result = fermat_spiral(domains.front(), spacing, min_spacing, max_spacing);
         if (!result.paths.empty()) {
             // The spiral runs outer edge to centre; print it the other way for an outward fill.
             if (params.fill_order != SurfaceFillOrder::Inward)
