@@ -26,10 +26,11 @@ struct MorphingSpiralResult
 MorphingSpiralResult morphing_spiral(const ExPolygon& bead_domain, double spacing_mm, double min_spacing_mm, double max_spacing_mm);
 // Connected Fermat spiral (FillFermatSpiral.cpp): any island, holes included, still one path.
 MorphingSpiralResult fermat_spiral(const ExPolygon& bead_domain, double spacing_mm, double min_spacing_mm, double max_spacing_mm);
-// Radial band with Fermat pockets (FillFermatSpiral.cpp), for an island with at most one hole that
-// is too thick in some directions for one radial spiral: the radial spiral is capped around the
-// hole and the leftover pockets are Fermat spirals spliced into its outer loop.
-MorphingSpiralResult band_spiral(const ExPolygon& bead_domain, double spacing_mm, double min_spacing_mm, double max_spacing_mm);
+// Accordion spiral (FillFermatSpiral.cpp), for an island with one hole that one radial spiral cannot
+// fill: outline rings, one middle loop and hole rings as one inward spiral. Where the middle strip
+// is wider than a bead (the ends of a rectangle round a square hole) the middle loop folds back and
+// forth across it instead of running along it.
+MorphingSpiralResult accordion_spiral(const ExPolygon& bead_domain, double spacing_mm, double min_spacing_mm, double max_spacing_mm);
 
 namespace morphing_spiral_detail {
 // The island in polar form around its hole centroid (or, for a disk, a centre that sees the whole

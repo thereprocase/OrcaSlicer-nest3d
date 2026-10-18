@@ -635,20 +635,14 @@ void FillMorphingSpiral::_fill_surface_single(
         const double rounded_correction = params.layer_height * (1. - .25 * 3.14159265358979323846);
         const double min_spacing        = std::max(.01, .75 * nozzle - rounded_correction);
         const double max_spacing        = 1.5 * nozzle - rounded_correction;
-        // The radial spiral has no U-turns, so it is tried first. Otherwise the radial band with
-        // pockets (one hole or none) and the Fermat spiral both try, and the one that leaves less
-        // uncovered, counting half its deposition error, is kept.
+        // The radial spiral has no U-turns, so it is tried first. An island with one hole then tries
+        // the accordion spiral, whose only U-turns are its folds; the Fermat spiral is the last
+        // single-path method.
         auto result = morphing_spiral(domains.front(), spacing, min_spacing, max_spacing);
-        if (result.paths.empty()) {
-            auto score = [](const MorphingSpiralResult& r) { return r.uncovered_fraction + std::abs(r.excess_fraction) / 2; };
-            auto fermat = fermat_spiral(domains.front(), spacing, min_spacing, max_spacing);
-            auto band   = domains.front().holes.size() <= 1 ? band_spiral(domains.front(), spacing, min_spacing, max_spacing) :
-                                                              MorphingSpiralResult{};
-            if (!band.paths.empty() && (fermat.paths.empty() || score(band) < score(fermat)))
-                result = std::move(band);
-            else
-                result = std::move(fermat);
-        }
+        if (result.paths.empty() && domains.front().holes.size() == 1)
+            result = accordion_spiral(domains.front(), spacing, min_spacing, max_spacing);
+        if (result.paths.empty())
+            result = fermat_spiral(domains.front(), spacing, min_spacing, max_spacing);
         if (!result.paths.empty()) {
             // The spiral runs outer edge to centre; print it the other way for an outward fill.
             if (params.fill_order != SurfaceFillOrder::Inward)
