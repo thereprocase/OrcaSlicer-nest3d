@@ -239,6 +239,12 @@ TEST_CASE("A fallback island raises one slicing warning that a stock pattern cle
     // Every two-hole island falls back, but they are reported as one aggregated warning.
     CHECK(current_morphing_warnings(print) == 1);
 
+    // Regenerating infill with the spiral still selected must not double the report.
+    config.set_deserialize_strict({{"infill_direction", "30"}});
+    print.apply(model, config);
+    print.process();
+    CHECK(current_morphing_warnings(print) == 1);
+
     config.set_deserialize_strict({{"bottom_surface_pattern", "monotonic"}, {"top_surface_pattern", "monotonic"}});
     print.apply(model, config);
     print.process();

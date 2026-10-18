@@ -31,8 +31,14 @@ the nozzle width.
 
 ## When it falls back
 
-Rejected islands are filled with Spiral Inset, and the reason is logged at
-warning level. The fallback cases:
+Rejected islands are filled with Spiral Inset. Each object then shows one
+non-critical slicing warning in the slicing notifications and the CLI output.
+It gives the number of islands, the layer range and the reasons with counts,
+for example "Morphing spiral used Spiral Inset for 3 island(s) on layers 1-3
+of knob: more than one hole (3);". Each fallback is also logged at warning
+level. Islands deliberately skipped are not reported, because they are never
+spiral candidates: sparse density, `dont_adjust` and bridges. The fallback
+cases:
 
 - more than one hole
 - a boundary that a ray from the centre crosses more than once
