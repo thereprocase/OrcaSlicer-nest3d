@@ -189,8 +189,10 @@ using namespace Slic3r;
 #define MAX_CLONEABLE_SIZE 512
 
 // --send-to-bridge: the upload of a plate file failed. Kept here rather than with the shared codes in
-// libslic3r/Utils.hpp because only the command line produces it.
-#define CLI_BRIDGE_UPLOAD_FAILED -25
+// libslic3r/Utils.hpp because only the command line produces it. Fork codes count down from -49:
+// upstream numbers its codes upwards from -1 and took -25 for CLI_EXPORT_STATISTICS_ERROR, and a
+// repeated key in cli_errors below silently keeps only the first message.
+#define CLI_BRIDGE_UPLOAD_FAILED -49
 
 std::map<int, std::string> cli_errors = {
     {CLI_SUCCESS, "Success."},

@@ -33,8 +33,6 @@ jobs:
       ubuntu-ver: '2404'
       ubuntu-ver-str: '_Ubuntu2404'
       ORCA_UPDATER_SIG_KEY: ${{ secrets.ORCA_UPDATER_SIG_KEY }}
-      NSIS_VERSION: '3.13'
-      NSIS_SHA256: BA63DFFC4410EE89193E1CB5A41989991BD77C61068DA17E3156D136B7B0B3D8
 
     steps:
       - name: Checkout
@@ -438,13 +436,6 @@ jobs:
         if: runner.os == 'Windows'
         shell: powershell
         run: ./tests/packaging/test_preserve_printer_trust.ps1
-
-      - name: Save NSIS
-        if: runner.os == 'Windows' && !vars.SELF_HOSTED && steps.nsis-cache.outputs.cache-hit != 'true'
-        uses: actions/cache/save@v6
-        with:
-          path: ${{ runner.temp }}/nsis
-          key: nsis-${{ env.NSIS_VERSION }}
 
       - name: Build slicer Win
         if: runner.os == 'Windows'

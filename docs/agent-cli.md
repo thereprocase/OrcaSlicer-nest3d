@@ -228,7 +228,7 @@ orca-slicer ... --slice 0 --export-3mf job.3mf \
 
 Each upload is reported in `result.json` as `bridge_uploads`:
 `[{"file": ".../job-plate1.gcode.3mf", "ok": true, "status": 201, "response": "..."}]`. A failed upload
-ends the run with return code -25.
+ends the run with return code -49.
 
 ## Tests
 
