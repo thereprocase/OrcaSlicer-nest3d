@@ -223,47 +223,62 @@ Polygons footprint(const ThickPolylines& paths, double& strip_area)
     }
     return union_(strips);
 }
-// Per-segment footprint: a trapezoid per segment plus a disc wherever the path turns. Slower than
-// the single strip, but exact through tight U-turns, where a strip's inner edge folds over itself.
+// Footprint for paths with tight turns: vertex-normal strips, broken wherever the path turns more
+// sharply than a strip can follow (its inner edge would fold over itself through a U-turn one track
+// wide), with a disc at every break. Exact through U-turns and still a few pieces per path.
 Polygons segment_footprint(const ThickPolylines& paths, double& strip_area)
 {
     Polygons pieces;
     strip_area = 0;
     for (const ThickPolyline& path : paths) {
         const size_t n = path.points.size();
-        for (size_t i = 0; i + 1 < n; ++i) {
-            const Vec2d a = mm(path.points[i]), b = mm(path.points[i + 1]);
-            const double wa = unscale<double>(path.width[2 * i]), wb = unscale<double>(path.width[2 * i + 1]);
-            const Vec2d d = b - a;
-            const double length = d.norm();
-            if (length < 1e-9)
+        if (n < 2)
+            continue;
+        auto width_at = [&](size_t i) { return unscale<double>(i == 0 ? path.width.front() : path.width[2 * i - 1]); };
+        std::vector<size_t> cuts{0};
+        for (size_t i = 1; i + 1 < n; ++i) {
+            const Vec2d d0 = mm(path.points[i]) - mm(path.points[i - 1]), d1 = mm(path.points[i + 1]) - mm(path.points[i]);
+            const double l0 = d0.norm(), l1 = d1.norm();
+            if (l0 < 1e-9 || l1 < 1e-9)
                 continue;
-            strip_area += length * (wa + wb) / 2;
-            const Vec2d normal(-d.y() / length, d.x() / length);
-            Polygon quad;
-            for (const Vec2d& p : {Vec2d(a + normal * wa / 2), Vec2d(b + normal * wb / 2), Vec2d(b - normal * wb / 2), Vec2d(a - normal * wa / 2)})
-                quad.points.emplace_back(point(p));
-            quad.make_counter_clockwise();
-            pieces.emplace_back(std::move(quad));
+            const double angle = std::acos(std::clamp(d0.dot(d1) / (l0 * l1), -1., 1.));
+            if (angle > tau / 8 || std::min(l0, l1) / std::max(angle, 1e-9) < .6 * width_at(i))
+                cuts.push_back(i);
         }
-        for (size_t i = 0; i < n; ++i) {
-            bool turns = i == 0 || i + 1 == n;
-            if (!turns) {
-                const Vec2d d0 = mm(path.points[i]) - mm(path.points[i - 1]), d1 = mm(path.points[i + 1]) - mm(path.points[i]);
-                turns = d0.norm() > 1e-9 && d1.norm() > 1e-9 && d0.dot(d1) < std::cos(tau / 36) * d0.norm() * d1.norm();
+        cuts.push_back(n - 1);
+        for (size_t c = 0; c + 1 < cuts.size(); ++c) {
+            const size_t s = cuts[c], e = cuts[c + 1];
+            Polygon strip;
+            Points right;
+            for (size_t i = s; i <= e; ++i) {
+                const Vec2d p   = mm(path.points[i]);
+                Vec2d tangent   = mm(path.points[std::min(i + 1, e)]) - mm(path.points[i == s ? s : i - 1]);
+                const double ln = tangent.norm();
+                if (ln < 1e-9)
+                    continue;
+                const Vec2d normal(-tangent.y() / ln, tangent.x() / ln);
+                const double width = width_at(i);
+                strip.points.emplace_back(point(p + normal * width / 2));
+                right.emplace_back(point(p - normal * width / 2));
+                if (i < e)
+                    strip_area += (mm(path.points[i + 1]) - p).norm() * unscale<double>(path.width[2 * i] + path.width[2 * i + 1]) / 2;
             }
-            if (!turns)
-                continue;
-            const double width = unscale<double>(i == 0 ? path.width.front() : path.width[2 * i - 1]);
+            std::reverse(right.begin(), right.end());
+            append(strip.points, std::move(right));
+            if (strip.points.size() >= 3) {
+                strip.make_counter_clockwise();
+                pieces.emplace_back(std::move(strip));
+            }
+        }
+        for (size_t i : cuts) {
             Polygon disc;
             for (int j = 0; j < 16; ++j)
-                disc.points.emplace_back(point(mm(path.points[i]) + Vec2d(std::cos(tau * j / 16), std::sin(tau * j / 16)) * width / 2));
+                disc.points.emplace_back(point(mm(path.points[i]) + Vec2d(std::cos(tau * j / 16), std::sin(tau * j / 16)) * width_at(i) / 2));
             pieces.emplace_back(std::move(disc));
         }
     }
     return union_(pieces);
 }
-
 double area_mm2(const ExPolygons& polygons)
 {
     double area = 0;

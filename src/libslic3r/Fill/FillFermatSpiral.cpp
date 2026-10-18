@@ -92,16 +92,21 @@ public:
     const std::vector<Vec2d>& points() const { return m_points; }
     size_t size() const { return m_points.size(); }
 
-    // Index of the nearest point, or npos when there are no points.
-    size_t nearest(const Vec2d& p, double* distance = nullptr) const
+    // Index of the nearest point, or npos when there are none (within max_distance, if given: the
+    // search stops there, which keeps "is anything close?" queries from scanning the whole grid).
+    size_t nearest(const Vec2d& p, double* distance = nullptr, double max_distance = std::numeric_limits<double>::infinity()) const
     {
+        if (distance)
+            *distance = std::numeric_limits<double>::infinity();
         if (m_points.empty())
             return npos;
         const auto [cx, cy] = cell_of(p);
         size_t best = npos;
         double best_d2 = std::numeric_limits<double>::max();
-        const int64_t reach = std::max({std::abs(cx - m_min_x), std::abs(cx - m_max_x), std::abs(cy - m_min_y),
-                                        std::abs(cy - m_max_y)});
+        int64_t reach = std::max({std::abs(cx - m_min_x), std::abs(cx - m_max_x), std::abs(cy - m_min_y),
+                                  std::abs(cy - m_max_y)});
+        if (std::isfinite(max_distance))
+            reach = std::min<int64_t>(reach, int64_t(std::ceil(max_distance / m_cell)) + 1);
         auto visit = [&](int64_t x, int64_t y) {
             const auto it = m_cells.find(key(x, y));
             if (it == m_cells.end())
@@ -130,7 +135,9 @@ public:
             if (best != npos && std::sqrt(best_d2) <= double(r) * m_cell)
                 break;
         }
-        if (distance)
+        if (best != npos && std::sqrt(best_d2) > max_distance)
+            best = npos;
+        if (distance && best != npos)
             *distance = std::sqrt(best_d2);
         return best;
     }
@@ -229,10 +236,11 @@ struct Ring
         return pts[i] + (pts[(i + 1) % pts.size()] - pts[i]) * t;
     }
     double nearest_s(const Vec2d& p) const { return cum[grid->nearest(p)]; }
-    double distance(const Vec2d& p) const
+    // Distance to the ring, or infinity when it is farther than limit.
+    double distance(const Vec2d& p, double limit = std::numeric_limits<double>::infinity()) const
     {
         double d = 0;
-        grid->nearest(p, &d);
+        grid->nearest(p, &d, limit);
         return d;
     }
     Vec2d tangent(double s) const { return at(s + .05) - at(s - .05); }
@@ -381,7 +389,7 @@ std::pair<size_t, std::map<size_t, Attachment>> build_tree(const std::vector<Str
                         continue;
                     size_t count = 0;
                     for (const Vec2d& p : ring_a.pts)
-                        count += ring_b.distance(p) <= reach;
+                        count += ring_b.distance(p, reach) <= reach;
                     if (double(count) * step_mm >= 3 * w && (!best || count > std::get<0>(*best)))
                         best = std::make_tuple(count, reversed, hi);
                 }
@@ -610,7 +618,7 @@ private:
             std::vector<double> d(arc.size());
             std::vector<size_t> idx;
             for (size_t i = 0; i < arc.size(); ++i) {
-                d[i] = child_ring.distance(arc[i]);
+                d[i] = child_ring.distance(arc[i], seam_reach * m_w);
                 bool ok = d[i] <= seam_reach * m_w && t_arc[i] > margin && t_arc[i] < total - margin - gc;
                 for (const auto& [t0, t1] : taken)
                     ok = ok && (t_arc[i] < t0 - margin || t_arc[i] > t1 + margin);
@@ -714,8 +722,8 @@ void medial_widths(const ExPolygon& domain, std::vector<Vec2d>& pts, const std::
         const PointGrid grid(std::move(deeper_pts), .5);
         for (size_t i : by_level[size_t(k)]) {
             double d = 0;
-            const size_t nn = grid.nearest(pts[i], &d);
-            if (d <= inner_reach * w) {
+            const size_t nn = grid.nearest(pts[i], &d, inner_reach * w);
+            if (nn != npos) {
                 innermost[i]      = false;
                 nearest_deeper[i] = deeper[nn];
             }
@@ -1045,7 +1053,7 @@ MorphingSpiralResult band_spiral(const ExPolygon& domain, double spacing, double
             std::vector<double> d(host.size());
             std::vector<size_t> idx;
             for (size_t i = 0; i < host.size(); ++i) {
-                d[i] = ring0.distance(host[i]);
+                d[i] = ring0.distance(host[i], seam_reach * w);
                 bool ok = outer_loop[i] && d[i] <= seam_reach * w && t_host[i] < t_host.back() - gc - 1.;
                 for (const auto& [t0, t1] : taken)
                     ok = ok && (t_host[i] < t0 - 3 * w || t_host[i] > t1 + 3 * w);
