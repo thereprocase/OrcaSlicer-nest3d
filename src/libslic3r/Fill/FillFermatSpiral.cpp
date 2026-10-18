@@ -812,18 +812,33 @@ MorphingSpiralResult finish_path(const ExPolygon& domain, const std::vector<Vec2
         result.fallback_reason = std::move(reason);
         return result;
     };
-    ThickPolyline spiral;
-    Vec2d last(std::numeric_limits<double>::quiet_NaN(), 0.);
+    // Merge micro-segments, then limit the width change rate as the radial spiral does.
+    std::vector<Vec2d> kept;
+    std::vector<double> kept_widths;
     for (size_t i = 0; i < pts.size(); ++i) {
         if (!pts[i].allFinite() || !std::isfinite(widths[i]))
             return reject("non-finite path");
-        if (i > 0 && i + 1 < pts.size() && (pts[i] - last).norm() < min_segment_mm)
+        if (!kept.empty() && i + 1 < pts.size() && (pts[i] - kept.back()).norm() < min_segment_mm)
             continue;
-        morphing_spiral_detail::append_point(spiral, pts[i], widths[i]);
-        last = pts[i];
+        kept.push_back(pts[i]);
+        kept_widths.push_back(widths[i]);
     }
-    if (spiral.points.size() < 2)
+    if (kept.size() < 2)
         return reject("empty spiral");
+    std::vector<double> segment(kept.size() - 1);
+    for (size_t i = 0; i + 1 < kept.size(); ++i)
+        segment[i] = (kept[i + 1] - kept[i]).norm();
+    morphing_spiral_detail::limit_width_change(kept_widths, segment, .98 * morphing_spiral_detail::max_width_change);
+    ThickPolyline spiral;
+    for (size_t i = 0; i < kept.size(); ++i) {
+        if (i > 0) {
+            const double change = std::abs(kept_widths[i] - kept_widths[i - 1]) / std::max(1e-9, segment[i - 1]);
+            result.max_width_change_rate = std::max(result.max_width_change_rate, change);
+        }
+        morphing_spiral_detail::append_point(spiral, kept[i], kept_widths[i]);
+    }
+    if (result.max_width_change_rate > morphing_spiral_detail::max_width_change)
+        return reject("width change per millimetre exceeds limit");
     ThickPolylines candidate;
     candidate.emplace_back(std::move(spiral));
     const std::optional<morphing_spiral_detail::Coverage> coverage = morphing_spiral_detail::measure_coverage(domain, candidate, result);
@@ -833,6 +848,8 @@ MorphingSpiralResult finish_path(const ExPolygon& domain, const std::vector<Vec2
     // exact footprint leaves a hairline along the whole edge, one large but empty "gap". Slivers
     // under 0.05 mm wide are below what an extrusion resolves, so gaps are opened by that much
     // before they are measured.
+    result.raw_uncovered_fraction = result.uncovered_fraction;
+    result.raw_largest_gap_mm2    = result.largest_gap_mm2;
     const ExPolygons gaps = opening_ex(coverage->gaps, float(scale_(sliver_mm / 2)));
     double uncovered = 0;
     result.largest_gap_mm2 = 0;

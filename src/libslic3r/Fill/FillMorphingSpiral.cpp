@@ -42,7 +42,6 @@ constexpr double tip_fraction = .10;
 constexpr double seam_zone_mm = 4.5;
 // Points closer together than this are merged; the centre of a disk otherwise gets micron segments.
 constexpr double min_segment_mm = .05;
-constexpr double max_width_change = .20; // mm of width per mm of path
 
 double cross(const Vec2d& a, const Vec2d& b) { return a.x() * b.y() - a.y() * b.x(); }
 Vec2d mm(const Point& p) { return Vec2d(unscale<double>(p.x()), unscale<double>(p.y())); }
@@ -167,7 +166,7 @@ double smoothstep(double s)
 // Limit |dw/ds| to `limit`: the mean of the upper and lower rate-limited envelopes. Each envelope
 // is the tightest curve within the limit that stays above (or below) the commanded widths, so the
 // mean obeys the limit and equals the commanded width wherever the limit was already met.
-void limit_width_change(std::vector<double>& widths, const std::vector<double>& segment, double limit)
+void limit_width_change_impl(std::vector<double>& widths, const std::vector<double>& segment, double limit)
 {
     const size_t n = widths.size();
     if (n < 2)
@@ -234,6 +233,11 @@ double area_mm2(const ExPolygons& polygons)
 } // namespace
 
 namespace morphing_spiral_detail {
+void limit_width_change(std::vector<double>& widths, const std::vector<double>& segment, double limit)
+{
+    limit_width_change_impl(widths, segment, limit);
+}
+
 void append_point(ThickPolyline& path, const Vec2d& p, double width)
 {
     const double scaled_width = scale_(width);

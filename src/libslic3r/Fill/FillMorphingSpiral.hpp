@@ -18,6 +18,9 @@ struct MorphingSpiralResult
     double largest_gap_mm2       = 0.;
     double largest_spill_mm2     = 0.;
     int beads                    = 0; // loops of a radial spiral
+    // Before slivers under 0.05 mm are opened away (Fermat and band audits only).
+    double raw_uncovered_fraction = 0.;
+    double raw_largest_gap_mm2    = 0.;
 };
 // One radial spiral with no U-turns; islands with at most one hole and a bounded thickness ratio.
 MorphingSpiralResult morphing_spiral(const ExPolygon& bead_domain, double spacing_mm, double min_spacing_mm, double max_spacing_mm);
@@ -47,6 +50,10 @@ MorphingSpiralResult radial_spiral(const ExPolygon& domain, double spacing_mm, d
 
 // Appends p (mm) with its width (mm) to a variable-width path.
 void append_point(ThickPolyline& path, const Vec2d& p, double width_mm);
+// Limits |dw/ds| along a path to limit (mm per mm); segment[i] is the length from point i to i + 1.
+void limit_width_change(std::vector<double>& widths, const std::vector<double>& segment, double limit);
+// The width change limit both fills enforce, in mm of width per mm of path.
+constexpr double max_width_change = .20;
 struct Coverage
 {
     ExPolygons gaps;
