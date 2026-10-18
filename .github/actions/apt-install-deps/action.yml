@@ -3,6 +3,23 @@ description: 'Install the packages needed for building and deploying'
 runs:
   using: 'composite'
   steps:
+    # A LINUX_RUNNER machine shares the deps and ccache entries of hosted ubuntu-24.04
+    # jobs (same keys, same workspace path) and its AppImage ships as Ubuntu 24.04, so
+    # it must be that image. A mismatch fails here instead of as an ABI error later.
+    - name: Check a self-hosted runner matches ubuntu-24.04
+      if: runner.environment == 'self-hosted'
+      shell: bash
+      run: |
+        . /etc/os-release
+        if [ "$ID" != ubuntu ] || [ "$VERSION_ID" != 24.04 ]; then
+          echo "::error::self-hosted runner is $ID $VERSION_ID; LINUX_RUNNER needs Ubuntu 24.04"
+          exit 1
+        fi
+        case "$GITHUB_WORKSPACE" in
+          /home/runner/work/*) ;;
+          *) echo "::error::workspace $GITHUB_WORKSPACE is not under /home/runner/work, so cache paths will not match hosted runners"
+             exit 1 ;;
+        esac
     - name: Install dependencies from build_linux.sh
       shell: bash
       run: |

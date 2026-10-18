@@ -43,6 +43,14 @@ class PortableTests(unittest.TestCase):
             self.assertIn('- ' + gate + '\n', needs)
         self.assertIn('success()', publish.split('    if:', 1)[1].split('    runs-on:', 1)[0])
 
+    def test_linux_amd64_tests_run_on_the_build_runner(self):
+        # The amd64 build leg and its unit tests each compute the LINUX_RUNNER choice;
+        # if the copies drift, tests run on a different machine from the build.
+        workflow = (ROOT / '.github/workflows/build_all.yml').read_text()
+        choices = re.findall(r"\(vars\.LINUX_RUNNER && .*?'ubuntu-24\.04'\)", workflow)
+        self.assertEqual(len(choices), 2)
+        self.assertEqual(choices[0], choices[1])
+
 
 if __name__ == '__main__':
     unittest.main()
