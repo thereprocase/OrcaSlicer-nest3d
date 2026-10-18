@@ -36,6 +36,7 @@
 #include "FillTpmsD.hpp"
 #include "FillTpmsFK.hpp"
 #include "FillConcentric.hpp"
+#include "FillMorphingSpiral.hpp"
 #include "libslic3r/Flow.hpp"
 #include "libslic3r/Point.hpp"
 #include "libslic3r/Line.hpp"
@@ -1343,6 +1344,7 @@ void Layer::make_fills(const FillAdaptive::RegionOctrees* fill_octrees, FillLigh
 {
 	for (LayerRegion *layerm : m_regions)
 		layerm->fills.clear();
+    this->morphing_spiral_fallbacks.clear();
 
 
 #ifdef SLIC3R_DEBUG_SLICE_PROCESSING
@@ -1503,6 +1505,8 @@ void Layer::make_fills(const FillAdaptive::RegionOctrees* fill_octrees, FillLigh
 				params,
 				m_regions[surface_fill.region_id]->fills.entities);
 		}
+        if (const auto *morphing = dynamic_cast<const FillMorphingSpiral *>(f.get()))
+            append(this->morphing_spiral_fallbacks, morphing->fallback_reasons);
     }
 
     // add thin fill regions

@@ -174,6 +174,9 @@ public:
     // island, the 3D connected body (across all layers) it belongs to, indexing
     // PrintObject::separated_body_bboxes(). Populated by PrintObject::prepare_infill() only when needed.
     std::vector<size_t>      lslices_separated_component_ids;
+    // Orca: islands whose morphing spiral fill fell back to Spiral Inset on this layer, one reason
+    // each. Filled by make_fills(); PrintObject::infill() turns them into one slicing warning.
+    std::vector<std::string> morphing_spiral_fallbacks;
 
     // BBS
     ExPolygons              loverhangs;

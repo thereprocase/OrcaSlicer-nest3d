@@ -810,6 +810,30 @@ void PrintObject::infill()
         );
         m_print->throw_if_canceled();
         BOOST_LOG_TRIVIAL(debug) << "Filling layers in parallel - end";
+        // Orca: the morphing spiral falls back to Spiral Inset per island. Report that in the slicing
+        // warnings, so a user who selected the pattern can see where and why it was not used.
+        {
+            size_t islands = 0;
+            size_t first_layer = 0, last_layer = 0;
+            std::map<std::string, size_t> reasons;
+            for (const Layer *layer : m_layers) {
+                if (layer->morphing_spiral_fallbacks.empty())
+                    continue;
+                if (islands == 0)
+                    first_layer = layer->id() + 1;
+                last_layer = layer->id() + 1;
+                islands += layer->morphing_spiral_fallbacks.size();
+                for (const std::string &reason : layer->morphing_spiral_fallbacks)
+                    ++reasons[reason];
+            }
+            if (islands > 0) {
+                std::string message = (boost::format(L("Morphing spiral used Spiral Inset for %1% island(s) on layers %2%-%3% of %4%:")) %
+                                       islands % first_layer % last_layer % this->model_object()->name).str();
+                for (const auto &[reason, count] : reasons)
+                    message += (boost::format(" %1% (%2%);") % reason % count).str();
+                this->active_step_add_warning(PrintStateBase::WarningLevel::NON_CRITICAL, message);
+            }
+        }
         /*  we could free memory now, but this would make this step not idempotent
         ### $_->fill_surfaces->clear for map @{$_->regions}, @{$object->layers};
         */

@@ -142,6 +142,11 @@ TEST_CASE("Morphing spiral is available by config name and preserves stock fallb
         CHECK(actual[i].points == expected[i].points);
         CHECK(actual[i].width == expected[i].width);
     }
+    // The fallback is recorded so the layer can report it as a slicing warning.
+    const auto* morphing = dynamic_cast<const Slic3r::FillMorphingSpiral*>(experiment.get());
+    REQUIRE(morphing != nullptr);
+    REQUIRE(morphing->fallback_reasons.size() == 1);
+    CHECK(morphing->fallback_reasons.front() == "more than one hole");
 }
 
 TEST_CASE("Bottom surface prints the spiral as one path in either order", "[Fill][MorphingSpiral]")
