@@ -7,6 +7,11 @@
 #include "libslic3r/Flow.hpp"
 #include "libslic3r/ExtrusionEntity.hpp"
 #include "libslic3r/ExtrusionEntityCollection.hpp"
+#include "libslic3r/Emboss.hpp"
+#include "libslic3r/Model.hpp"
+#include "libslic3r/Print.hpp"
+#include "libslic3r/TriangleMesh.hpp"
+#include "test_helpers.hpp"
 #include <algorithm>
 #include <memory>
 #include <utility>
@@ -39,6 +44,38 @@ Slic3r::ExPolygon disk(double radius, int lobes = 0)
         p.contour.points.emplace_back(Slic3r::Point::new_scale(r * std::cos(a), r * std::sin(a)));
     }
     return p;
+}
+
+// A 1 mm round plate (r 20) with two holes (r 4 at x = +-9): no single spiral can fill it.
+Slic3r::TriangleMesh two_hole_plate()
+{
+    // Emboss::ProjectZ extrudes raw coordinates, so build in 0.01 mm units and scale down.
+    Slic3r::ExPolygon plate;
+    for (int i = 0; i < 360; ++i) {
+        const double a = 6.283185307179586 * i / 360;
+        plate.contour.points.emplace_back(Slic3r::Point(2000 * std::cos(a), 2000 * std::sin(a)));
+    }
+    for (int x : {-900, 900}) {
+        Slic3r::Polygon hole;
+        for (int i = 0; i < 90; ++i) {
+            const double a = 6.283185307179586 * i / 90;
+            hole.points.emplace_back(Slic3r::Point(x + 400 * std::cos(-a), 400 * std::sin(-a)));
+        }
+        plate.holes.emplace_back(std::move(hole));
+    }
+    Slic3r::TriangleMesh mesh(Slic3r::Emboss::polygons2model(Slic3r::ExPolygons{plate}, Slic3r::Emboss::ProjectZ(100.)));
+    mesh.scale(.01f);
+    return mesh;
+}
+
+size_t current_morphing_warnings(const Slic3r::Print& print)
+{
+    size_t count = 0;
+    for (const Slic3r::PrintObject* object : print.objects())
+        for (const auto& warning : object->step_state_with_warnings(Slic3r::posInfill).warnings)
+            if (warning.current && warning.message.find("Morphing spiral") != std::string::npos)
+                ++count;
+    return count;
 }
 
 void check_single_path(const Slic3r::MorphingSpiralResult& result, double min_spacing, double max_spacing)
@@ -189,4 +226,21 @@ TEST_CASE("Bottom surface prints the spiral as one path in either order", "[Fill
             CHECK(collection->entities.back()->last_point() == paths.back().points.back());
         }
     }
+}
+
+TEST_CASE("A fallback island raises one slicing warning that a stock pattern clears", "[Fill][MorphingSpiral]")
+{
+    Slic3r::Print print;
+    Slic3r::Model model;
+    Slic3r::DynamicPrintConfig config = Slic3r::DynamicPrintConfig::full_print_config();
+    config.set_deserialize_strict({{"bottom_surface_pattern", "morphingspiral"}, {"top_surface_pattern", "morphingspiral"}});
+    Slic3r::Test::init_print(std::vector<Slic3r::TriangleMesh>{two_hole_plate()}, print, model, config);
+    print.process();
+    // Every two-hole island falls back, but they are reported as one aggregated warning.
+    CHECK(current_morphing_warnings(print) == 1);
+
+    config.set_deserialize_strict({{"bottom_surface_pattern", "monotonic"}, {"top_surface_pattern", "monotonic"}});
+    print.apply(model, config);
+    print.process();
+    CHECK(current_morphing_warnings(print) == 0);
 }
