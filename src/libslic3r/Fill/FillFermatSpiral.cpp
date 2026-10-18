@@ -948,7 +948,7 @@ MorphingSpiralResult band_spiral(const ExPolygon& domain, double spacing, double
     if (!any_pocket)
         return rejected("band: nothing to cap");
     // Step from the full thickness down to the cap over a short smoothstep in arc length.
-    std::vector<double> capped(size_t(n));
+    std::vector<double> capped(size_t(n), 0.);
     for (int k = 0; k < n; ++k)
         capped[size_t(k)] = in_pocket[size_t(k)] ? cap : thick[size_t(k)];
     const int span = std::max(2, int(std::lround(band_blend_mm / (mean_r * tau_full / n))));
@@ -977,7 +977,7 @@ MorphingSpiralResult band_spiral(const ExPolygon& domain, double spacing, double
         }
         return polygon;
     };
-    std::vector<double> band_r(size_t(n)), clip_r(size_t(n));
+    std::vector<double> band_r(size_t(n), 0.), clip_r(size_t(n), 0.);
     for (int k = 0; k < n; ++k) {
         band_r[size_t(k)] = frame->inner[size_t(k)] + capped[size_t(k)];
         // Clip with the band bled past the island edge where it is not capped, so the pockets are
