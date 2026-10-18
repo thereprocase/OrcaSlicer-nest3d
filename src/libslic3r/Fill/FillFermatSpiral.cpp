@@ -53,6 +53,7 @@ constexpr double inner_reach = 1.6;        // a deeper bead this close (in spaci
 constexpr double smooth_radius_mm = 1.5;   // seam leftovers are averaged over innermost beads this close
 constexpr double seam_overlap_mm = .03;    // each innermost bead reaches past the medial axis, like infill overlap
 constexpr double min_segment_mm = .05;
+constexpr double sliver_mm = .05;          // gaps thinner than this are not counted
 constexpr double tau_full = 2 * pi;
 constexpr double band_cap_fraction = .95; // band thickness at most this fraction of beads x max width
 constexpr double band_blend_mm = 1.5;      // arc over which the band steps down to its cap
@@ -694,7 +695,8 @@ void medial_widths(const ExPolygon& domain, std::vector<Vec2d>& pts, const std::
     std::vector<int> lv(n);
     int max_level = 0;
     for (size_t i = 0; i < n; ++i) {
-        lv[i] = int(std::lround(levels[i]));
+        // U-turns and bridges sit half a level outside their ring; level -0.5 belongs to level 0.
+        lv[i] = std::max(0, int(std::lround(levels[i])));
         max_level = std::max(max_level, lv[i]);
     }
     std::vector<std::vector<size_t>> by_level(size_t(max_level) + 1);
@@ -827,10 +829,23 @@ MorphingSpiralResult finish_path(const ExPolygon& domain, const std::vector<Vec2
     const std::optional<morphing_spiral_detail::Coverage> coverage = morphing_spiral_detail::measure_coverage(domain, candidate, result);
     if (!coverage)
         return reject("invalid domain area");
+    // Ring points are chords, so the outer bead's edge sits microns inside a curved outline and the
+    // exact footprint leaves a hairline along the whole edge, one large but empty "gap". Slivers
+    // under 0.05 mm wide are below what an extrusion resolves, so gaps are opened by that much
+    // before they are measured.
+    const ExPolygons gaps = opening_ex(coverage->gaps, float(scale_(sliver_mm / 2)));
+    double uncovered = 0;
+    result.largest_gap_mm2 = 0;
+    for (const ExPolygon& gap : gaps) {
+        const double a = unscale<double>(unscale<double>(gap.area()));
+        uncovered += a;
+        result.largest_gap_mm2 = std::max(result.largest_gap_mm2, a);
+    }
+    result.uncovered_fraction = uncovered / unscale<double>(unscale<double>(domain.area()));
     // Looser than the radial spiral's budget: every ring end and splice leaves a few hundredths of a
     // square millimetre, so the island total is larger even where each gap stays small.
     if (result.largest_gap_mm2 > .45 || result.largest_spill_mm2 > .10 ||
-        !offset_ex(coverage->gaps, -float(scale_(spacing * .25))).empty() ||
+        !offset_ex(gaps, -float(scale_(spacing * .25))).empty() ||
         !offset_ex(coverage->spills, -float(scale_(spacing * .15))).empty())
         return reject("local gap or spill exceeds area/inscribed-width limit");
     if (result.uncovered_fraction > .012 || result.outside_fraction > .002 || std::abs(result.excess_fraction) > .03)
