@@ -77,7 +77,7 @@ try {
     Assert-True ($before -ceq [IO.File]::ReadAllText((Join-Path $newCert 'printer.cer'))) 'Stock-only migration changed bytes.'
     Pass 'No local additions leaves the shipped file byte-identical'
 
-    foreach ($bad in @('-----BEGIN PRIVATE KEY-----', '-----BEGIN CERTIFICATE-----AAAA-----END CERTIFICATE-----', $a.Pem + 'trailing junk', $a.Pem.Substring(0, 100))) {
+    foreach ($bad in @('-----BEGIN PRIVATE KEY-----', '-----BEGIN CERTIFICATE-----AAAA-----END CERTIFICATE-----', ($a.Pem + 'trailing junk'), $a.Pem.Substring(0, 100))) {
         Save-CertificateText (Join-Path $oldCert 'printer.cer') $bad
         Assert-Fails { Capture-PrinterTrust $old $state $legacy } 'Invalid capture was accepted.'
     }

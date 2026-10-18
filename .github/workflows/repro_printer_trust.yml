@@ -1,0 +1,28 @@
+name: Repro printer trust installer checks
+on:
+  push:
+    branches: [fix/preserve-local-printer-trust, repro-dev]
+    paths:
+      - 'cmake/repro/**'
+      - 'scripts/windows/preserve_printer_trust.ps1'
+      - 'tests/packaging/**'
+      - '.github/workflows/repro_printer_trust.yml'
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  installer:
+    if: github.repository == 'thereprocase/OrcaSlicer-nest3d'
+    runs-on: windows-2022
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      - name: Install existing pinned NSIS toolchain
+        shell: pwsh
+        run: ./scripts/ci/setup_nsis.ps1
+      - name: Certificate migration regression tests
+        shell: powershell
+        run: ./tests/packaging/test_preserve_printer_trust.ps1
+      - name: Real silent installer upgrade and uninstall
+        shell: powershell
+        run: ./tests/packaging/test_printer_trust_installer.ps1

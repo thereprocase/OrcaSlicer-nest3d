@@ -24,7 +24,7 @@ function Read-Certificates([string]$Path, [switch]$AllowEmpty) {
     }
     $seen = @{}
     foreach ($match in $matches) {
-        $der = [Convert]::FromBase64String($match.Groups[1].Value -replace '\s', '')
+        $der = [Convert]::FromBase64String(($match.Groups[1].Value -replace '\s', ''))
         $cert = [Security.Cryptography.X509Certificates.X509Certificate2]::new($der)
         try {
             if ($cert.HasPrivateKey -or [Convert]::ToBase64String($cert.RawData) -cne [Convert]::ToBase64String($der)) {
@@ -83,7 +83,7 @@ function Restore-PrinterTrust([string]$Root, [string]$State) {
         $verified = @(Read-Certificates $temporary)
         if ($verified.Count -ne $stock.Count + $additions.Count) { throw 'Merged certificate count did not match.' }
         # Atomic replacement: a failed write leaves the freshly installed stock bundle intact.
-        [IO.File]::Replace($temporary, $bundle, $null)
+        [IO.File]::Replace($temporary, $bundle, [NullString]::Value)
     } finally {
         if (Test-Path -LiteralPath $temporary) { [IO.File]::Delete($temporary) }
     }
