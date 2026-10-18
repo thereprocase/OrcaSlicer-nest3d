@@ -2507,7 +2507,8 @@ void PrintConfigDef::init_fff_params()
     def->enum_labels.push_back(L("Aligned Rectilinear"));
     def->enum_labels.push_back(L("Concentric"));
     def->enum_labels.push_back(L("Spiral Inset"));
-    def->enum_labels.push_back(L("Morphing spiral (experimental)"));
+    // Shown as "Accordion"; the stored value stays "morphingspiral" so saved presets and projects load.
+    def->enum_labels.push_back(L("Accordion (experimental)"));
     def->enum_labels.push_back(L("Hilbert Curve"));
     def->enum_labels.push_back(L("Archimedean Chords"));
     def->enum_labels.push_back(L("Octagram Spiral"));

@@ -1,10 +1,12 @@
-# Morphing spiral solid fill
+# Accordion solid fill
 
-`Morphing spiral (experimental)` is an opt-in top, bottom and internal solid
+`Accordion (experimental)` is an opt-in top, bottom and internal solid
 fill pattern. Select it in the process profile's surface-pattern controls, or
 set `top_surface_pattern`, `bottom_surface_pattern` or
 `internal_solid_infill_pattern` to `morphingspiral` in a CLI settings JSON.
-Existing defaults and saved pattern identifiers are unchanged. The first layer
+The pattern was first called Morphing spiral; its stored identifier,
+`morphingspiral`, is kept so saved presets and projects still load. Existing
+defaults are unchanged. The first layer
 uses the bottom surface pattern.
 
 ## What it prints
