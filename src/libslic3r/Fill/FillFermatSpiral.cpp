@@ -1136,7 +1136,9 @@ MorphingSpiralResult accordion_spiral(const ExPolygon& domain, double spacing_re
         }
     }
     const PointGrid middle_grid(middle, .5);
-    const PointGrid ie_grid(ie, .5);
+    // Coarse cells: fold samples lie up to a whole strip width (several millimetres at the wide
+    // ends) from the inner edge, and a fine grid makes each lookup walk many empty rings of cells.
+    const PointGrid ie_grid(ie, 2.);
     std::vector<double> widths(pts.size(), spacing);
     std::vector<size_t> near_mid(pts.size(), npos);
     for (size_t i = 0; i < pts.size(); ++i)
