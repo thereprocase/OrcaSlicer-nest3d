@@ -529,8 +529,11 @@ void FillMorphingSpiral::_fill_surface_single(
             return;
         }
         BOOST_LOG_TRIVIAL(warning) << "Morphing spiral fallback: " << result.fallback_reason;
-    } else
+        fallback_reasons.emplace_back(result.fallback_reason);
+    } else {
         BOOST_LOG_TRIVIAL(warning) << "Morphing spiral fallback: offset topology";
+        fallback_reasons.emplace_back("offset topology");
+    }
     FillSpiralInset::_fill_surface_single(params, layers, direction, std::move(expolygon), out);
 }
 } // namespace Slic3r

@@ -2,6 +2,7 @@
 #define slic3r_FillMorphingSpiral_hpp_
 #include "FillSpiralInset.hpp"
 #include <string>
+#include <vector>
 
 namespace Slic3r {
 // Geometry-only result, exposed to independent coverage/regression tests.
@@ -20,6 +21,11 @@ MorphingSpiralResult morphing_spiral(const ExPolygon& bead_domain, double spacin
 
 class FillMorphingSpiral : public FillSpiralInset
 {
+public:
+    // Why islands of this fill fell back to Spiral Inset, one entry per island, so the layer can
+    // report them as a slicing warning instead of only a log line.
+    std::vector<std::string> fallback_reasons;
+
 protected:
     Fill* clone() const override { return new FillMorphingSpiral(*this); }
     using FillSpiralInset::_fill_surface_single;
