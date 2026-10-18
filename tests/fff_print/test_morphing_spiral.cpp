@@ -8,6 +8,7 @@
 #include "libslic3r/ExtrusionEntity.hpp"
 #include "libslic3r/ExtrusionEntityCollection.hpp"
 #include "libslic3r/Emboss.hpp"
+#include "libslic3r/Layer.hpp"
 #include "libslic3r/Model.hpp"
 #include "libslic3r/Print.hpp"
 #include "libslic3r/TriangleMesh.hpp"
@@ -362,6 +363,14 @@ TEST_CASE("A rectangle around a square hole spirals without a fallback warning",
     Slic3r::Test::init_print(std::vector<Slic3r::TriangleMesh>{rectangle_with_square_hole()}, print, model, config);
     print.process();
     CHECK(current_morphing_warnings(print).empty());
+    // No warning alone would also pass if the island were skipped, so the first layer must carry its
+    // bottom surface: about 500 mm2 inside the walls, over 1000 mm of 0.4 mm bead.
+    double bottom_length = 0.;
+    for (const Slic3r::LayerRegion* region : print.objects().front()->layers().front()->regions())
+        for (const Slic3r::ExtrusionEntity* entity : region->fills.flatten().entities)
+            if (entity->role() == Slic3r::erBottomSurface)
+                bottom_length += Slic3r::unscale<double>(entity->length());
+    CHECK(bottom_length > 600.);
 }
 
 TEST_CASE("Accordion spiral fills an ellipse around a round hole as one path", "[Fill][MorphingSpiral][Accordion]")
