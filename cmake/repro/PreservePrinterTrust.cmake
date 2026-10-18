@@ -1,7 +1,8 @@
 # Patch the active CMake template instead of freezing a copy of its installer.
 # The guarded replacements fail configuration if CMake changes these lifecycle points.
-set(REPRO_TRUST_SCRIPT "${CMAKE_CURRENT_LIST_DIR}/../../scripts/windows/preserve_printer_trust.ps1")
-set(REPRO_TRUST_LEGACY "${CMAKE_CURRENT_LIST_DIR}/legacy-printer-stock.sha256")
+get_filename_component(REPRO_TRUST_SCRIPT "${CMAKE_CURRENT_LIST_DIR}/../../scripts/windows/preserve_printer_trust.ps1" ABSOLUTE)
+file(TO_NATIVE_PATH "${REPRO_TRUST_SCRIPT}" REPRO_TRUST_SCRIPT)
+file(TO_NATIVE_PATH "${CMAKE_CURRENT_LIST_DIR}/legacy-printer-stock.sha256" REPRO_TRUST_LEGACY)
 file(READ "${CMAKE_ROOT}/Modules/Internal/CPack/NSIS.template.in" _repro_nsis)
 file(READ "${CMAKE_CURRENT_LIST_DIR}/PrinterTrust.nsh.in" _repro_trust)
 string(CONFIGURE "${_repro_trust}" _repro_trust @ONLY)
