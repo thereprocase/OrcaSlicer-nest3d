@@ -1,6 +1,9 @@
 #ifndef slic3r_FillMorphingSpiral_hpp_
 #define slic3r_FillMorphingSpiral_hpp_
 #include "FillSpiralInset.hpp"
+#include "libslic3r/ExPolygon.hpp"
+#include "libslic3r/Point.hpp"
+#include "libslic3r/Polyline.hpp"
 #include <optional>
 #include <string>
 #include <vector>
