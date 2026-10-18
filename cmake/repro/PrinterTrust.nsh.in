@@ -1,0 +1,36 @@
+; Only embedded by the explicitly enabled Repro Windows installer option.
+Var ReproTrustCaptured
+
+Function ReproCapturePrinterTrust
+  Exch $R0
+  Push $R1
+  StrCmp $ReproTrustCaptured "1" repro_capture_done
+  IfFileExists "$R0\resources\cert\printer.cer" 0 repro_capture_done
+  InitPluginsDir
+  File "/oname=$PLUGINSDIR\preserve_printer_trust.ps1" "@REPRO_TRUST_SCRIPT@"
+  File "/oname=$PLUGINSDIR\legacy-printer-stock.sha256" "@REPRO_TRUST_LEGACY@"
+  nsExec::ExecToLog /TIMEOUT=60000 '"$SYSDIR\WindowsPowerShell\v1.0\powershell.exe" -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "$PLUGINSDIR\preserve_printer_trust.ps1" -Mode Capture -Installation "$R0" -StateDirectory "$PLUGINSDIR\printer-trust" -LegacyFingerprints "$PLUGINSDIR\legacy-printer-stock.sha256"'
+  Pop $R1
+  StrCmp $R1 "0" +3
+    MessageBox MB_OK|MB_ICONSTOP "Could not preserve local printer trust. Close Orca and check the installer log. The old installation has not been removed."
+    Abort
+  StrCpy $ReproTrustCaptured "1"
+repro_capture_done:
+  Pop $R1
+  Pop $R0
+FunctionEnd
+
+Function ReproRestorePrinterTrust
+  Push $R0
+  StrCmp $ReproTrustCaptured "1" 0 repro_restore_done
+  nsExec::ExecToLog /TIMEOUT=60000 '"$SYSDIR\WindowsPowerShell\v1.0\powershell.exe" -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "$PLUGINSDIR\preserve_printer_trust.ps1" -Mode Restore -Installation "$INSTDIR" -StateDirectory "$PLUGINSDIR\printer-trust"'
+  Pop $R0
+  StrCmp $R0 "0" repro_restore_done
+    ; Keep the public-only recovery file if an antivirus/file lock blocked replacement.
+    CopyFiles /SILENT "$PLUGINSDIR\printer-trust\printer-local.cer" "$INSTDIR\resources\cert\printer-local-recovery.cer"
+    MessageBox MB_OK|MB_ICONSTOP "Orca was installed, but local printer trust could not be restored. The stock trust bundle is intact. Local public certificates were saved beside it as printer-local-recovery.cer. Run bridge setup before connecting."
+    SetErrorLevel 1
+    Abort
+repro_restore_done:
+  Pop $R0
+FunctionEnd
