@@ -4,45 +4,65 @@
 fill pattern. Select it in the process profile's surface-pattern controls, or
 set `top_surface_pattern`, `bottom_surface_pattern` or
 `internal_solid_infill_pattern` to `morphingspiral` in a CLI settings JSON.
-Existing defaults and saved pattern identifiers are unchanged.
+Existing defaults and saved pattern identifiers are unchanged. The first layer
+uses the bottom surface pattern.
 
-For a star-shaped region with exactly one hole, the generator interpolates
-radial boundary samples around the hole centroid. It emits two boundary paths,
-one continuous interior spiral and two supplemental tapered gap arcs. This is five
-extrusion paths, not a promise of a travel-free layer. The ordinary extrusion
-writer converts spacing to bead width and retains material flow limits,
-acceleration, cooling and retraction behavior.
+## What it prints
 
-The generator checks nozzle width bounds, width change per distance, swept
-footprint coverage and connected local gap/spill limits. Rejected islands use
-Spiral Inset, with a debug-log reason. Disks, multiple holes, unsuitable radial
-geometry and bridges currently use that fallback. The implementation does not
-solve a harmonic field and cannot represent arbitrary outlines.
+An island with one hole, or a disk, is filled with one continuous variable-width
+path. The island is described in polar form around a centre: the hole centroid,
+or for a disk the deepest candidate point that sees the whole boundary. The
+bead loops sit at even fractions between the outer edge and the hole (a pinhole
+for a disk). Each bead's width is its local share of the thickness along the
+boundary normal, so beads widen where the island is thick and thin where it is
+narrow.
 
-## Experimental limits
+The path is a start taper on the outer loop, then each loop with a lane change
+to the next, then an end taper on the innermost loop. All lane changes share
+one seam zone, placed in the smoothest part of the boundary, so neighbouring
+beads stay parallel and the island is covered without widening any bead. A disk
+ends on its last loop, which already covers the pinhole. Loops are evaluated at
+every polygon vertex angle, so they turn real corners.
 
-The overlapping first and last turns are removed. Two tapered arcs cover the
-resulting crescent gaps between the main spiral and its boundary paths. Near a
-thin arc tip, the boundary bead widens to absorb the residual until the arc
-can take over. The handover spans nine target spacings. Arc tips below 10% of
-the target spacing are omitted; the resulting void still has to pass the
-local area and width gates. Narrow tips remain a physical-print limitation.
+The bead count is chosen inside the window where every width fits between 0.75
+and 1.5 nozzle diameters (less the rounded-bead correction), as close as
+possible to the requested line width. The requested width is not replaced by
+the nozzle width.
 
-Gap arcs remain last for both surface fill orders, including bottom surfaces.
-The extrusion collection prohibits path sorting, so the later planner retains
-this sequence. Main and boundary paths retain nozzle width bounds; gap arcs
-are permitted to taper below the main-path minimum. Every path has a maximum
-width-change rate of 0.20 mm/mm.
+## When it falls back
 
-The geometric deposition-budget ceiling is 0.5% excess or deficit; uncovered
-and outside footprint fractions must each remain below 0.2%. Connected gaps
-must be at most 0.25 mm², outside patches at most 0.10 mm²; inscribed-width
-checks also apply. These are swept-spacing checks, not predictions of molten
-plastic height, bonding or surface finish. No physical print qualification is
-claimed. Inspect the width/flow preview and use a small trial before applying
-it to a finished part.
+Rejected islands are filled with Spiral Inset, and the reason is logged at
+warning level. The fallback cases:
 
-The offline polygon tool under `experiments/morphing_spiral` produces geometry
-previews and independent raster coverage measurements, not printable G-code.
-It represents the initial uncorrected endpoint approach, not the native tapered-arc revision. Its widths describe path spacing; production bead width additionally includes
-the layer-height-dependent rounded cross-section correction.
+- more than one hole
+- a boundary that a ray from the centre crosses more than once
+- a region too narrow for two beads
+- a thickness ratio around the island larger than the width-bound ratio
+
+The last case is a limit of any single spiral in which every ray crosses the
+same number of loops, for example a wide ellipse or a triangle around a small
+hole. Steep teeth also fail the width bounds with this radial
+parameterisation; a field-based one is a possible follow-up.
+
+## Checks
+
+- Every bead outside the two tapers stays inside the nozzle width bounds after
+  smoothing.
+- Width changes along the path are rate-limited to 0.20 mm per mm. Where the
+  geometry asks for more, at the centre of a lumpy disk for example, the widths
+  are relaxed toward the limit.
+- Taper tips thinner than 10% of the spacing are not printed.
+- The swept footprint must pass the coverage audit:
+  - uncovered and outside fractions each below 0.2%
+  - connected gaps at most 0.25 mm², connected outside patches at most 0.10 mm²
+  - inscribed-width limits on both
+  - deposition within 0.5% of the island area
+
+These are geometric checks of swept spacing, not predictions of molten plastic
+height, bonding or surface finish. No physical print qualification is claimed.
+Inspect the width/flow preview and use a small trial before applying it to a
+finished part.
+
+The offline polygon tool under `experiments/morphing_spiral` predates this
+design. It produces geometry previews and raster coverage measurements of the
+earlier endpoint approach, not printable G-code.

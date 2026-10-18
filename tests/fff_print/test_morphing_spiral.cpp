@@ -13,6 +13,7 @@
 #include <cstddef>
 #include <cmath>
 #include <limits>
+#include <vector>
 
 namespace {
 Slic3r::ExPolygon annulus(int lobes = 0, double inner = 14.)
@@ -40,7 +41,7 @@ Slic3r::ExPolygon disk(double radius, int lobes = 0)
     return p;
 }
 
-void check_single_path(const Slic3r::MorphingSpiralResult& result, double spacing, double max_spacing)
+void check_single_path(const Slic3r::MorphingSpiralResult& result, double min_spacing, double max_spacing)
 {
     CAPTURE(result.fallback_reason, result.max_width_change_rate, result.uncovered_fraction, result.outside_fraction,
             result.excess_fraction, result.largest_gap_mm2, result.largest_spill_mm2);
@@ -48,10 +49,18 @@ void check_single_path(const Slic3r::MorphingSpiralResult& result, double spacin
     const auto& path = result.paths.front();
     CHECK(path.points.front() != path.points.back());
     REQUIRE(path.width.size() == 2 * (path.points.size() - 1));
-    for (double width : path.width) {
-        // Only the taper tips are thin; everything stays under the nozzle bound.
-        CHECK(Slic3r::unscale<double>(width) > 0.);
-        CHECK(Slic3r::unscale<double>(width) <= max_spacing + 1e-6);
+    // Distance along the path, so the start and end tapers can be told apart from the body.
+    std::vector<double> along{0.};
+    for (size_t i = 0; i + 1 < path.points.size(); ++i)
+        along.push_back(along.back() + Slic3r::unscale<double>((path.points[i + 1] - path.points[i]).cast<double>().norm()));
+    for (size_t i = 0; i < path.width.size(); ++i) {
+        const double width = Slic3r::unscale<double>(path.width[i]);
+        CHECK(width > 0.);
+        CHECK(width <= max_spacing + 1e-6);
+        // Away from the tapers (at most about 12 mm long here), every bead meets the nozzle minimum.
+        const double at = along[i / 2 + (i % 2)];
+        if (at > 20. && at < along.back() - 20.)
+            CHECK(width >= min_spacing - 1e-6);
     }
     CHECK(result.max_width_change_rate <= .20 + 1e-9);
     CHECK(result.largest_gap_mm2 <= .25);
@@ -65,7 +74,7 @@ void check_single_path(const Slic3r::MorphingSpiralResult& result, double spacin
 TEST_CASE("Morphing spiral covers an annulus with one continuous path", "[Fill][MorphingSpiral]")
 {
     for (int lobes : {0, 8}) {
-        DYNAMIC_SECTION("lobes " << lobes) { check_single_path(Slic3r::morphing_spiral(annulus(lobes), .6, .45, .9), .6, .9); }
+        DYNAMIC_SECTION("lobes " << lobes) { check_single_path(Slic3r::morphing_spiral(annulus(lobes), .6, .45, .9), .45, .9); }
     }
 }
 
@@ -74,13 +83,13 @@ TEST_CASE("Morphing spiral keeps a wide first-layer line inside a 0.4 nozzle's b
     // 0.5 mm first-layer line on a 0.4 nozzle at 0.2 mm: the case the earlier endpoint widening rejected.
     const double correction = .2 * (1. - .25 * 3.14159265358979323846);
     const double spacing = .5 - correction, low = .3 - correction, high = .6 - correction;
-    check_single_path(Slic3r::morphing_spiral(annulus(8), spacing, low, high), spacing, high);
+    check_single_path(Slic3r::morphing_spiral(annulus(8), spacing, low, high), low, high);
 }
 
 TEST_CASE("Morphing spiral spirals a disk into its centre", "[Fill][MorphingSpiral]")
 {
     // A round disk; lumpy disks spiral too, but their smoothed centre sits near the audit limits.
-    check_single_path(Slic3r::morphing_spiral(disk(15), .6, .45, .9), .6, .9);
+    check_single_path(Slic3r::morphing_spiral(disk(15), .6, .45, .9), .45, .9);
 }
 
 TEST_CASE("Morphing spiral rejects unsupported islands without partial output", "[Fill][MorphingSpiral]")

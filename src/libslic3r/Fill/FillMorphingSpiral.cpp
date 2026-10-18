@@ -391,6 +391,7 @@ MorphingSpiralResult morphing_spiral(const ExPolygon& domain, double spacing, do
 
     std::vector<Vec2d> points;
     std::vector<double> widths;
+    std::vector<char> taper; // start/end taper points may be thinner than the nozzle minimum
     auto width_of = [&](double eo, double ei, double so, double si, double f, double r) {
         return (eo - ei) / beads * r / std::hypot(r, so * (1 - f) + si * f);
     };
@@ -409,6 +410,7 @@ MorphingSpiralResult morphing_spiral(const ExPolygon& domain, double spacing, do
         const double r        = eo * (1 - f) + ei * f;
         points.emplace_back(center + Vec2d(std::cos(theta), std::sin(theta)) * r);
         widths.emplace_back(width_of(eo, ei, so, si, f, r) * factor);
+        taper.emplace_back(factor < 1. - 1e-12);
     };
     auto emit_loop = [&](int level) {
         const double f = (level + .5) / beads;
@@ -421,6 +423,7 @@ MorphingSpiralResult morphing_spiral(const ExPolygon& domain, double spacing, do
             // At a vertex the two sides have different slopes; use the mean of both widths.
             widths.emplace_back(.5 * (width_of(o.r, in.r, o.slope_before, in.slope_before, f, r) +
                                       width_of(o.r, in.r, o.slope_after, in.slope_after, f, r)));
+            taper.emplace_back(false);
         }
     };
     for (double t = 0; t < zone; t += step / 2) // start taper on loop 0
@@ -431,8 +434,12 @@ MorphingSpiralResult morphing_spiral(const ExPolygon& domain, double spacing, do
             for (double t = 0; t < zone; t += step / 2) // lane change j -> j+1
                 emit_zone(seam + t, j + smoothstep(t / zone), 1.);
     }
-    for (double t = 0; t < zone; t += step / 2) // end taper on the last loop
-        emit_zone(seam + t, beads - 1 + smoothstep(t / zone) / 2, 1 - smoothstep(t / zone));
+    // End taper on the last loop. A disk ends on its last loop instead: on a loop under a millimetre
+    // across, a taper inside the shared zone would be a cliff that the rate limiter smears into the
+    // body, and the crescent it would fill at the centre is a few hundredths of a square millimetre.
+    if (!disk)
+        for (double t = 0; t < zone; t += step / 2)
+            emit_zone(seam + t, beads - 1 + smoothstep(t / zone) / 2, 1 - smoothstep(t / zone));
 
     // Drop the sub-printable taper tips, merge micro-segments, then limit the width change rate.
     size_t first = 0, last = widths.size();
@@ -442,10 +449,12 @@ MorphingSpiralResult morphing_spiral(const ExPolygon& domain, double spacing, do
         --last;
     std::vector<Vec2d> kept;
     std::vector<double> kept_widths;
+    std::vector<char> kept_taper;
     for (size_t i = first; i < last; ++i)
         if (kept.empty() || i + 1 == last || (points[i] - kept.back()).norm() >= min_segment_mm) {
             kept.emplace_back(points[i]);
             kept_widths.emplace_back(widths[i]);
+            kept_taper.emplace_back(taper[i]);
         }
     if (kept.size() < 2)
         return reject("empty spiral");
@@ -459,6 +468,9 @@ MorphingSpiralResult morphing_spiral(const ExPolygon& domain, double spacing, do
     for (size_t i = 0; i < kept.size(); ++i) {
         if (!std::isfinite(kept_widths[i]) || kept_widths[i] <= 0 || kept_widths[i] > max_spacing + 1e-9)
             return reject("bead width outside nozzle bounds");
+        // Only the start and end tapers may run below the nozzle minimum, after smoothing too.
+        if (!kept_taper[i] && kept_widths[i] < min_spacing - 1e-9)
+            return reject("bead width below nozzle minimum outside the tapers");
         if (i > 0) {
             const double change = std::abs(kept_widths[i] - kept_widths[i - 1]) / std::max(1e-9, segment[i - 1]);
             result.max_width_change_rate = std::max(result.max_width_change_rate, change);
