@@ -253,10 +253,10 @@ Levels offset_rings(const ExPolygon& domain, double w)
         if (k > 2000)
             throw FermatError{"too many rings"};
         const double d = w / 2 + k * w;
-        const Polygons shrunk = offset(domain, -float(scale_(d + opening)), ClipperLib::jtRound, arc_tolerance);
+        const Polygons shrunk = offset(domain, -float(scale_(d + opening)), jtRound, arc_tolerance);
         if (shrunk.empty())
             break;
-        const Polygons opened = offset(shrunk, float(scale_(opening)), ClipperLib::jtRound, arc_tolerance);
+        const Polygons opened = offset(shrunk, float(scale_(opening)), jtRound, arc_tolerance);
         std::vector<std::unique_ptr<Ring>> loops;
         for (const Polygon& polygon : opened) {
             if (polygon.points.size() < 3)
