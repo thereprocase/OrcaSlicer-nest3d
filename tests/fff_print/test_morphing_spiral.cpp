@@ -140,7 +140,8 @@ void check_single_path(const Slic3r::MorphingSpiralResult& result, double min_sp
 
 // The Fermat spiral's own budget (see fermat_spiral): one path, every bead inside the nozzle
 // bounds, and coverage within its looser limits.
-// With tapered_ends (a radial band), beads within 20 mm of either end may run below the minimum.
+// With tapered_ends (the accordion's start and end tapers), beads within 20 mm of either end may run
+// below the minimum.
 void check_fermat_path(const Slic3r::MorphingSpiralResult& result, double min_spacing, double max_spacing, bool tapered_ends = false)
 {
     CAPTURE(result.fallback_reason, result.uncovered_fraction, result.outside_fraction, result.excess_fraction,
@@ -342,7 +343,7 @@ TEST_CASE("Fermat and accordion spirals fill islands the radial spiral cannot as
     {
         const auto square = square_with_hole(39.5, 28.5);
         CHECK(Slic3r::morphing_spiral(square, spacing_04, min_04, max_04).paths.empty());
-        check_fermat_path(Slic3r::accordion_spiral(square, spacing_04, min_04, max_04), min_04, max_04);
+        check_fermat_path(Slic3r::accordion_spiral(square, spacing_04, min_04, max_04), min_04, max_04, true);
     }
 }
 
@@ -389,5 +390,5 @@ TEST_CASE("Accordion spiral fills an ellipse around a round hole as one path", "
     }
     ellipse.holes.emplace_back(std::move(hole));
     CHECK(Slic3r::morphing_spiral(ellipse, spacing_04, min_04, max_04).paths.empty());
-    check_fermat_path(Slic3r::accordion_spiral(ellipse, spacing_04, min_04, max_04), min_04, max_04);
+    check_fermat_path(Slic3r::accordion_spiral(ellipse, spacing_04, min_04, max_04), min_04, max_04, true);
 }

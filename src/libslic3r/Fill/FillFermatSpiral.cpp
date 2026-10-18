@@ -800,9 +800,11 @@ double straightest(const Ring& ring)
     }
     return ring.cum[best];
 }
-// Builds the variable-width path and audits it against the Fermat budget.
+// Builds the variable-width path and audits it against the Fermat budget. The first exempt_head and
+// last exempt_tail input points are start and end tapers, which may change width faster than the
+// limit: they ramp from nothing to a full bead where the path begins and ends.
 MorphingSpiralResult finish_path(const ExPolygon& domain, const std::vector<Vec2d>& pts, const std::vector<double>& widths,
-                                 double spacing)
+                                 double spacing, size_t exempt_head = 0, size_t exempt_tail = 0)
 {
     MorphingSpiralResult result;
     auto reject = [&](std::string reason) {
@@ -813,6 +815,7 @@ MorphingSpiralResult finish_path(const ExPolygon& domain, const std::vector<Vec2
     // Merge micro-segments, then limit the width change rate as the radial spiral does.
     std::vector<Vec2d> kept;
     std::vector<double> kept_widths;
+    std::vector<char> kept_exempt;
     for (size_t i = 0; i < pts.size(); ++i) {
         if (!pts[i].allFinite() || !std::isfinite(widths[i]))
             return reject("non-finite path");
@@ -820,16 +823,30 @@ MorphingSpiralResult finish_path(const ExPolygon& domain, const std::vector<Vec2
             continue;
         kept.push_back(pts[i]);
         kept_widths.push_back(widths[i]);
+        kept_exempt.push_back(i < exempt_head || i + exempt_tail >= pts.size());
     }
     if (kept.size() < 2)
         return reject("empty spiral");
     std::vector<double> segment(kept.size() - 1);
     for (size_t i = 0; i + 1 < kept.size(); ++i)
         segment[i] = (kept[i + 1] - kept[i]).norm();
-    morphing_spiral_detail::limit_width_change(kept_widths, segment, .98 * morphing_spiral_detail::max_width_change);
+    {
+        // Only the stretch between the tapers is rate-limited.
+        size_t lo = 0, hi = kept.size();
+        while (lo < hi && kept_exempt[lo])
+            ++lo;
+        while (hi > lo && kept_exempt[hi - 1])
+            --hi;
+        if (hi - lo >= 2) {
+            std::vector<double> body(kept_widths.begin() + lo, kept_widths.begin() + hi);
+            const std::vector<double> body_segment(segment.begin() + lo, segment.begin() + (hi - 1));
+            morphing_spiral_detail::limit_width_change(body, body_segment, .98 * morphing_spiral_detail::max_width_change);
+            std::copy(body.begin(), body.end(), kept_widths.begin() + lo);
+        }
+    }
     ThickPolyline spiral;
     for (size_t i = 0; i < kept.size(); ++i) {
-        if (i > 0) {
+        if (i > 0 && !kept_exempt[i] && !kept_exempt[i - 1]) {
             const double change = std::abs(kept_widths[i] - kept_widths[i - 1]) / std::max(1e-9, segment[i - 1]);
             result.max_width_change_rate = std::max(result.max_width_change_rate, change);
         }
@@ -1051,23 +1068,36 @@ MorphingSpiralResult accordion_spiral(const ExPolygon& domain, double spacing_re
         loops.emplace_back(std::move(r));
     }
 
-    // Lane-change zone where the middle strip is narrow and the rings are straightest.
-    const double zone = zone_spacings * spacing;
+    // Lane-change zone where the middle strip is narrow and the rings are straightest. The first
+    // ring's lane change has no lap arriving beside it and the last ring's none leaving, so each
+    // leaves a wedge up to a bead wide that a taper fills. A zone long enough for those tapers to stay
+    // within the width change limit (smoothstep peaks at 1.5x its mean slope) is preferred; where no
+    // narrow stretch is that long, the short zone is used and the audit exempts the tapers. Every
+    // ring uses the same length: a lane change between rings stepping at different rates hooks back
+    // on itself and stops covering either ring.
     const size_t n = ie.size();
-    const size_t win = std::max<size_t>(3, size_t(zone / step_mm));
+    double zone = 0;
     size_t k0 = npos;
-    double best = std::numeric_limits<double>::infinity();
-    for (size_t k = 0; k < n; ++k) {
-        double score = 0;
-        bool narrow = true;
-        for (size_t m = 0; m < win && narrow; ++m) {
-            const size_t j = (k + m) % n;
-            narrow = !wide[j];
-            score += std::abs(cross(nn[(j + n - 1) % n], nn[j]));
+    for (const double candidate : {std::max(zone_spacings * spacing, 1.6 * spacing / morphing_spiral_detail::max_width_change),
+                                   zone_spacings * spacing}) {
+        const size_t win = std::max<size_t>(3, size_t(candidate / step_mm));
+        double best = std::numeric_limits<double>::infinity();
+        for (size_t k = 0; k < n; ++k) {
+            double score = 0;
+            bool narrow = true;
+            for (size_t m = 0; m < win && narrow; ++m) {
+                const size_t j = (k + m) % n;
+                narrow = !wide[j];
+                score += std::abs(cross(nn[(j + n - 1) % n], nn[j]));
+            }
+            if (narrow && score < best) {
+                best = score;
+                k0   = k;
+            }
         }
-        if (narrow && score < best) {
-            best = score;
-            k0   = k;
+        if (k0 != npos) {
+            zone = candidate;
+            break;
         }
     }
     if (k0 == npos)
@@ -1080,22 +1110,22 @@ MorphingSpiralResult accordion_spiral(const ExPolygon& domain, double spacing_re
     const size_t nz = std::max<size_t>(8, size_t(std::ceil(zone / step_mm)));
     std::vector<Vec2d> pts;
     std::vector<double> levels;
+    std::vector<double> zone_len, cut;
+    for (size_t i = 0; i < loops.size(); ++i) {
+        zone_len.push_back(std::min(zone, loops[i]->length() / 4));
+        cut.push_back(int(i) == outer_n ? loops[i]->cum[k0] : loops[i]->nearest_s(anchor));
+    }
     {
-        std::vector<double> g, b;
-        for (size_t i = 0; i < loops.size(); ++i) {
-            g.push_back(std::min(zone, loops[i]->length() / 4));
-            b.push_back(int(i) == outer_n ? loops[i]->cum[k0] : loops[i]->nearest_s(anchor));
-        }
         for (size_t i = 0; i < loops.size(); ++i) {
             const Ring& r = *loops[i];
-            const std::vector<Vec2d> arc = r.arc(b[i] + g[i], r.length() - g[i], +1);
+            const std::vector<Vec2d> arc = r.arc(cut[i] + zone_len[i], r.length() - zone_len[i], +1);
             append(pts, arc);
             levels.insert(levels.end(), arc.size(), double(r.level));
             if (i + 1 < loops.size()) {
                 const Ring& next = *loops[i + 1];
                 for (size_t k = 1; k + 1 < nz; ++k) {
                     const double u = double(k) / double(nz - 1), s = smoothstep(u);
-                    pts.push_back(r.at(b[i] + u * g[i]) * (1 - s) + next.at(b[i + 1] + u * g[i + 1]) * s);
+                    pts.push_back(r.at(cut[i] + u * zone_len[i]) * (1 - s) + next.at(cut[i + 1] + u * zone_len[i + 1]) * s);
                     levels.push_back(r.level * (1 - s) + next.level * s);
                 }
             }
@@ -1154,14 +1184,57 @@ MorphingSpiralResult accordion_spiral(const ExPolygon& domain, double spacing_re
                     c_lo = std::min(c_lo, c);
                     c_hi = std::max(c_hi, c);
                 }
-        const int m = std::max(2, int(std::lround((c_hi - c_lo) / w / 2)) * 2);
-        const double lane_w = (c_hi - c_lo) / m;
-        if (lane_w < min_spacing || lane_w > max_spacing)
+        const bool reverse = pts[b].dot(v) < pts[a].dot(v);
+        // A sharp outer corner (the outer edge peaking along u, as at a square's corner) must sit in
+        // the middle of an outer U-turn: lanes 2i and 2i + 1 in travel order turn together at the
+        // outer end, and a corner between two such pairs is a V pocket neither reaches. The lane
+        // count (always even) is chosen so the corner's position in lanes is close to an odd number.
+        double reach_max = -std::numeric_limits<double>::infinity(), apex = 0;
+        for (size_t j = 0; j < n; ++j)
+            if (stretch[j]) {
+                const Vec2d q = ie[j] + nn[j] * strip[j];
+                if (q.dot(u) > reach_max) {
+                    reach_max = q.dot(u);
+                    apex      = q.dot(v);
+                }
+            }
+        double near_lo = std::numeric_limits<double>::infinity(), near_hi = -near_lo;
+        for (size_t j = 0; j < n; ++j)
+            if (stretch[j]) {
+                const Vec2d q = ie[j] + nn[j] * strip[j];
+                if (q.dot(u) > reach_max - .5 * w) {
+                    near_lo = std::min(near_lo, q.dot(v));
+                    near_hi = std::max(near_hi, q.dot(v));
+                }
+            }
+        const bool sharp = near_hi - near_lo < 2 * w;
+        const int m0 = std::max(2, int(std::lround((c_hi - c_lo) / w / 2)) * 2);
+        int m = 0;
+        bool best_off = true;
+        double best_dw = std::numeric_limits<double>::infinity();
+        for (int cand = std::max(2, m0 - 4); cand <= m0 + 4; cand += 2) {
+            const double lw = (c_hi - c_lo) / cand;
+            if (lw < min_spacing || lw > max_spacing)
+                continue;
+            bool off = false;
+            if (sharp) {
+                const double j = (reverse ? c_hi - apex : apex - c_lo) / lw;
+                off = std::abs(j - (2 * std::floor(j / 2) + 1)) > .4;
+            }
+            const double dw = std::abs(lw - w);
+            if (m == 0 || (!off && best_off) || (off == best_off && dw < best_dw)) {
+                m        = cand;
+                best_off = off;
+                best_dw  = dw;
+            }
+        }
+        if (m == 0)
             return rejected("accordion: fold spacing outside the width bounds");
+        const double lane_w = (c_hi - c_lo) / m;
         std::vector<double> cs;
         for (int k = 0; k < m; ++k)
             cs.push_back(c_lo + (k + .5) * lane_w);
-        if (pts[b].dot(v) < pts[a].dot(v))
+        if (reverse)
             std::reverse(cs.begin(), cs.end());
         std::vector<std::vector<Vec2d>> lanes;
         for (double c : cs) {
@@ -1228,7 +1301,37 @@ MorphingSpiralResult accordion_spiral(const ExPolygon& domain, double spacing_re
         out_pts.push_back(pts[p]);
         out_w.push_back(widths[p]);
     }
-    MorphingSpiralResult result = finish_path(domain, out_pts, out_w, spacing);
+
+    // Tapers over the first and last lane-change stretches. At step u of the first, the lap leaving
+    // the outermost ring has moved s(u) of a lane inwards, so the bead fills the outer s(u) of the
+    // lane and ends where the first arc begins; the last mirrors it on the innermost ring after the
+    // final arc.
+    const size_t nt = std::max<size_t>(8, size_t(std::ceil(zone / step_mm)) + 1);
+    std::vector<Vec2d> taper_pts;
+    std::vector<double> taper_w;
+    {
+        const Ring &first = *loops[0], &second = *loops[1];
+        for (size_t k = 0; k + 1 < nt; ++k) {
+            const double u = double(k) / double(nt - 1), s = smoothstep(u);
+            const Vec2d pa = first.at(cut[0] + u * zone_len[0]), pb = second.at(cut[1] + u * zone_len[1]);
+            taper_pts.push_back(pa + (pb - pa) * ((s - 1) / 2));
+            taper_w.push_back(std::max(s, .02) * spacing);
+        }
+    }
+    const size_t head = taper_pts.size();
+    out_pts.insert(out_pts.begin(), taper_pts.begin(), taper_pts.end());
+    out_w.insert(out_w.begin(), taper_w.begin(), taper_w.end());
+    {
+        const size_t nl = loops.size();
+        const Ring &last = *loops[nl - 1], &before = *loops[nl - 2];
+        for (size_t k = 1; k < nt; ++k) {
+            const double u = double(k) / double(nt - 1), s = smoothstep(u);
+            const Vec2d pa = before.at(cut[nl - 2] + u * zone_len[nl - 2]), pb = last.at(cut[nl - 1] + u * zone_len[nl - 1]);
+            out_pts.push_back(pb + (pb - pa) * (s / 2));
+            out_w.push_back(std::max(1 - s, .02) * spacing);
+        }
+    }
+    MorphingSpiralResult result = finish_path(domain, out_pts, out_w, spacing, head, nt - 1);
     result.beads = slots;
     return result;
 }} // namespace Slic3r
