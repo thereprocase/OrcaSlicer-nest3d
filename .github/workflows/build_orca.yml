@@ -439,6 +439,11 @@ jobs:
         shell: pwsh
         run: ./scripts/ci/setup_nsis.ps1
 
+      - name: Test local printer trust migration (Windows PowerShell 5.1)
+        if: runner.os == 'Windows'
+        shell: powershell
+        run: ./tests/packaging/test_preserve_printer_trust.ps1
+
       - name: Build slicer Win
         if: runner.os == 'Windows'
         working-directory: ${{ github.workspace }}
@@ -448,6 +453,10 @@ jobs:
         #   WindowsSDKVersion: '10.0.26100.0\'
         # --tests builds the unit tests too; the unit_tests_windows_* jobs run them.
         run: |
+          # Fork-only packaging extension. Upstream and ordinary builds stay unchanged.
+          if ("${{ github.repository }}" -eq "thereprocase/OrcaSlicer-nest3d" -and "${{ github.ref }}" -eq "refs/heads/repro-dev") {
+            $env:ORCA_SLICER_CMAKE_ARGS = "$env:ORCA_SLICER_CMAKE_ARGS -DORCA_REPRO_PRESERVE_LOCAL_TRUST=ON"
+          }
           # cache-path is the install directory inside the deps build directory.
           $deps = (Split-Path "${{ github.workspace }}/${{ inputs.cache-path }}").Replace('\', '/')
           # -l compiles with Visual Studio's clang-cl and -x builds with Ninja; --msvc --msbuild is cl under the Visual Studio generator.

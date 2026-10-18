@@ -1398,4 +1398,8 @@ set (CPACK_RESOURCE_FILE_LICENSE ${CMAKE_SOURCE_DIR}/LICENSE.txt) # must also in
 
 set(CPACK_WIX_UPGRADE_GUID "058245e8-20e0-4a95-9ab7-1acfe17ad511")
 set(CPACK_GENERATOR NSIS)
+option(ORCA_REPRO_PRESERVE_LOCAL_TRUST "Preserve local public printer certificates during Repro Windows installer upgrades" OFF)
+if(WIN32 AND ORCA_REPRO_PRESERVE_LOCAL_TRUST)
+    include(cmake/repro/PreservePrinterTrust.cmake)
+endif()
 include(CPack)
