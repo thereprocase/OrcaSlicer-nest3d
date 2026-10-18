@@ -42,7 +42,6 @@ constexpr double tip_fraction = .10;
 constexpr double seam_zone_mm = 4.5;
 // Points closer together than this are merged; the centre of a disk otherwise gets micron segments.
 constexpr double min_segment_mm = .05;
-constexpr double max_width_change = .20; // mm of width per mm of path
 
 double cross(const Vec2d& a, const Vec2d& b) { return a.x() * b.y() - a.y() * b.x(); }
 Vec2d mm(const Point& p) { return Vec2d(unscale<double>(p.x()), unscale<double>(p.y())); }
@@ -167,7 +166,7 @@ double smoothstep(double s)
 // Limit |dw/ds| to `limit`: the mean of the upper and lower rate-limited envelopes. Each envelope
 // is the tightest curve within the limit that stays above (or below) the commanded widths, so the
 // mean obeys the limit and equals the commanded width wherever the limit was already met.
-void limit_width_change(std::vector<double>& widths, const std::vector<double>& segment, double limit)
+void limit_width_change_impl(std::vector<double>& widths, const std::vector<double>& segment, double limit)
 {
     const size_t n = widths.size();
     if (n < 2)
@@ -185,21 +184,7 @@ void limit_width_change(std::vector<double>& widths, const std::vector<double>& 
         widths[i] = .5 * (up[i] + low[i]);
 }
 
-void append_point(ThickPolyline& path, const Vec2d& p, double width)
-{
-    const double scaled_width = scale_(width);
-    if (path.points.empty()) {
-        path.points.emplace_back(point(p));
-        path.width.emplace_back(scaled_width);
-        return;
-    }
-    const double previous = path.width.back();
-    if (path.points.size() == 1)
-        path.width.clear();
-    path.width.emplace_back(previous);
-    path.width.emplace_back(scaled_width);
-    path.points.emplace_back(point(p));
-}
+
 // Polygonal swept-strip audit using the sampled path's vertex normals. Building
 // one strip per path avoids an expensive union of a cap at every vertex.
 // This is geometric coverage, not a molten-bead or local-height simulation.
@@ -238,6 +223,62 @@ Polygons footprint(const ThickPolylines& paths, double& strip_area)
     }
     return union_(strips);
 }
+// Footprint for paths with tight turns: vertex-normal strips, broken wherever the path turns more
+// sharply than a strip can follow (its inner edge would fold over itself through a U-turn one track
+// wide), with a disc at every break. Exact through U-turns and still a few pieces per path.
+Polygons segment_footprint(const ThickPolylines& paths, double& strip_area)
+{
+    Polygons pieces;
+    strip_area = 0;
+    for (const ThickPolyline& path : paths) {
+        const size_t n = path.points.size();
+        if (n < 2)
+            continue;
+        auto width_at = [&](size_t i) { return unscale<double>(i == 0 ? path.width.front() : path.width[2 * i - 1]); };
+        std::vector<size_t> cuts{0};
+        for (size_t i = 1; i + 1 < n; ++i) {
+            const Vec2d d0 = mm(path.points[i]) - mm(path.points[i - 1]), d1 = mm(path.points[i + 1]) - mm(path.points[i]);
+            const double l0 = d0.norm(), l1 = d1.norm();
+            if (l0 < 1e-9 || l1 < 1e-9)
+                continue;
+            const double angle = std::acos(std::clamp(d0.dot(d1) / (l0 * l1), -1., 1.));
+            if (angle > tau / 8 || std::min(l0, l1) / std::max(angle, 1e-9) < .6 * width_at(i))
+                cuts.push_back(i);
+        }
+        cuts.push_back(n - 1);
+        for (size_t c = 0; c + 1 < cuts.size(); ++c) {
+            const size_t s = cuts[c], e = cuts[c + 1];
+            Polygon strip;
+            Points right;
+            for (size_t i = s; i <= e; ++i) {
+                const Vec2d p   = mm(path.points[i]);
+                Vec2d tangent   = mm(path.points[std::min(i + 1, e)]) - mm(path.points[i == s ? s : i - 1]);
+                const double ln = tangent.norm();
+                if (ln < 1e-9)
+                    continue;
+                const Vec2d normal(-tangent.y() / ln, tangent.x() / ln);
+                const double width = width_at(i);
+                strip.points.emplace_back(point(p + normal * width / 2));
+                right.emplace_back(point(p - normal * width / 2));
+                if (i < e)
+                    strip_area += (mm(path.points[i + 1]) - p).norm() * unscale<double>(path.width[2 * i] + path.width[2 * i + 1]) / 2;
+            }
+            std::reverse(right.begin(), right.end());
+            append(strip.points, std::move(right));
+            if (strip.points.size() >= 3) {
+                strip.make_counter_clockwise();
+                pieces.emplace_back(std::move(strip));
+            }
+        }
+        for (size_t i : cuts) {
+            Polygon disc;
+            for (int j = 0; j < 16; ++j)
+                disc.points.emplace_back(point(mm(path.points[i]) + Vec2d(std::cos(tau * j / 16), std::sin(tau * j / 16)) * width_at(i) / 2));
+            pieces.emplace_back(std::move(disc));
+        }
+    }
+    return union_(pieces);
+}
 double area_mm2(const ExPolygons& polygons)
 {
     double area = 0;
@@ -247,7 +288,100 @@ double area_mm2(const ExPolygons& polygons)
 }
 } // namespace
 
-MorphingSpiralResult morphing_spiral(const ExPolygon& domain, double spacing, double min_spacing, double max_spacing)
+namespace morphing_spiral_detail {
+void limit_width_change(std::vector<double>& widths, const std::vector<double>& segment, double limit)
+{
+    limit_width_change_impl(widths, segment, limit);
+}
+
+void append_point(ThickPolyline& path, const Vec2d& p, double width)
+{
+    const double scaled_width = scale_(width);
+    if (path.points.empty()) {
+        path.points.emplace_back(point(p));
+        path.width.emplace_back(scaled_width);
+        return;
+    }
+    const double previous = path.width.back();
+    if (path.points.size() == 1)
+        path.width.clear();
+    path.width.emplace_back(previous);
+    path.width.emplace_back(scaled_width);
+    path.points.emplace_back(point(p));
+}
+
+std::optional<Coverage> measure_coverage(const ExPolygon& domain, const ThickPolylines& paths, MorphingSpiralResult& result,
+                                         bool per_segment)
+{
+    double strip_area      = 0;
+    const Polygons covered = per_segment ? segment_footprint(paths, strip_area) : footprint(paths, strip_area);
+    const double area      = unscale<double>(unscale<double>(domain.area()));
+    if (area <= 0)
+        return std::nullopt;
+    Coverage coverage{diff_ex(ExPolygons{domain}, covered), diff_ex(covered, ExPolygons{domain})};
+    result.uncovered_fraction = area_mm2(coverage.gaps) / area;
+    result.outside_fraction   = area_mm2(coverage.spills) / area;
+    for (const auto& gap : coverage.gaps)
+        result.largest_gap_mm2 = std::max(result.largest_gap_mm2, area_mm2(ExPolygons{gap}));
+    for (const auto& spill : coverage.spills)
+        result.largest_spill_mm2 = std::max(result.largest_spill_mm2, area_mm2(ExPolygons{spill}));
+    result.excess_fraction = strip_area / area - 1;
+    return coverage;
+}
+} // namespace morphing_spiral_detail
+
+namespace morphing_spiral_detail {
+int polar_samples() { return samples; }
+double polar_angle(int k) { return phase + k * tau / samples; }
+
+std::optional<PolarFrame> polar_frame(const ExPolygon& domain, double spacing, std::string& reason)
+{
+    if (domain.holes.size() > 1) {
+        reason = "more than one hole";
+        return std::nullopt;
+    }
+    // Edges in polar form around the centre.
+    PolarFrame frame;
+    frame.disk = domain.holes.empty();
+    if (frame.disk) {
+        const auto c = disk_center(domain.contour);
+        if (!c) {
+            reason = "no centre sees the whole boundary";
+            return std::nullopt;
+        }
+        frame.center   = *c;
+        const auto out = radii(domain.contour, frame.center);
+        if (!out) {
+            reason = "boundary is not single-valued around the centre";
+            return std::nullopt;
+        }
+        frame.outer       = out->r;
+        frame.outer_slope = out->slope;
+        // A pinhole at the centre: the last loop closes onto it.
+        frame.inner.assign(samples, tip_fraction * spacing);
+        frame.inner_slope.assign(samples, 0.);
+    } else {
+        if (domain.holes.front().points.size() < 3) {
+            reason = "degenerate hole";
+            return std::nullopt;
+        }
+        frame.center   = mm(domain.holes.front().centroid());
+        const auto out = radii(domain.contour, frame.center);
+        const auto in  = radii(domain.holes.front(), frame.center);
+        if (!out || !in) {
+            reason = "boundaries are not single-valued around the hole centre";
+            return std::nullopt;
+        }
+        frame.outer       = out->r;
+        frame.outer_slope = out->slope;
+        frame.inner       = in->r;
+        frame.inner_slope = in->slope;
+    }
+    return frame;
+}
+
+MorphingSpiralResult radial_spiral(const ExPolygon& domain, double spacing, double min_spacing, double max_spacing,
+                                   const std::vector<char>* seam_allowed)
 {
     MorphingSpiralResult result;
     auto reject = [&](std::string reason) {
@@ -258,39 +392,13 @@ MorphingSpiralResult morphing_spiral(const ExPolygon& domain, double spacing, do
     if (!std::isfinite(spacing) || !std::isfinite(min_spacing) || !std::isfinite(max_spacing) || min_spacing <= 0 ||
         spacing < min_spacing || spacing > max_spacing)
         return reject("invalid spacing limits");
-    if (domain.holes.size() > 1)
-        return reject("more than one hole");
-
-    // Edges in polar form around the centre.
-    const bool disk = domain.holes.empty();
-    Vec2d center;
-    std::vector<double> e_o, d_o, e_i, d_i;
-    if (disk) {
-        const auto c = disk_center(domain.contour);
-        if (!c)
-            return reject("no centre sees the whole boundary");
-        center         = *c;
-        const auto out = radii(domain.contour, center);
-        if (!out)
-            return reject("boundary is not single-valued around the centre");
-        e_o = out->r;
-        d_o = out->slope;
-        // A pinhole at the centre: the last loop closes onto it.
-        e_i.assign(samples, tip_fraction * spacing);
-        d_i.assign(samples, 0.);
-    } else {
-        if (domain.holes.front().points.size() < 3)
-            return reject("degenerate hole");
-        center         = mm(domain.holes.front().centroid());
-        const auto out = radii(domain.contour, center);
-        const auto in  = radii(domain.holes.front(), center);
-        if (!out || !in)
-            return reject("boundaries are not single-valued around the hole centre");
-        e_o = out->r;
-        d_o = out->slope;
-        e_i = in->r;
-        d_i = in->slope;
-    }
+    std::string frame_reason;
+    const std::optional<PolarFrame> frame = polar_frame(domain, spacing, frame_reason);
+    if (!frame)
+        return reject(frame_reason);
+    const bool disk = frame->disk;
+    const Vec2d center = frame->center;
+    const std::vector<double>&e_o = frame->outer, &d_o = frame->outer_slope, &e_i = frame->inner, &d_i = frame->inner_slope;
     for (int k = 0; k < samples; ++k)
         if (e_o[k] - e_i[k] < 2 * min_spacing)
             return reject("region too narrow for two beads");
@@ -334,20 +442,30 @@ MorphingSpiralResult morphing_spiral(const ExPolygon& domain, double spacing, do
     const double zone      = zone_samples * step;
     // Seam at the smoothest window, so lane changes and tapers never straddle a corner.
     int seam_k = 0;
+    bool seam_found = false;
     {
         double best = std::numeric_limits<double>::max();
         for (int k = 0; k < samples; ++k) {
+            // A caller may keep the zone, and the tapers in it, inside some angles only.
+            bool allowed = true;
+            for (int m = 0; seam_allowed && m <= zone_samples; ++m)
+                allowed = allowed && (*seam_allowed)[size_t((k + m) % samples)];
+            if (!allowed)
+                continue;
             double rough = 0;
             for (int m = 0; m < zone_samples; ++m) {
                 const int a = (k + m) % samples, b = (k + m + 1) % samples;
                 rough += std::abs(d_o[b] - d_o[a]) + std::abs(d_i[b] - d_i[a]);
             }
             if (rough < best) {
-                best   = rough;
-                seam_k = k;
+                best       = rough;
+                seam_k     = k;
+                seam_found = true;
             }
         }
     }
+    if (!seam_found)
+        return reject("no allowed place for the lane-change zone");
     const double seam = phase + seam_k * step;
 
     // Flat loops run on the sample angles plus every polygon vertex angle, evaluated exactly, so loops
@@ -477,32 +595,29 @@ MorphingSpiralResult morphing_spiral(const ExPolygon& domain, double spacing, do
             if (change > max_width_change)
                 return reject("width change per millimetre exceeds limit");
         }
-        append_point(spiral, kept[i], kept_widths[i]);
+        morphing_spiral_detail::append_point(spiral, kept[i], kept_widths[i]);
     }
     ThickPolylines candidate;
     candidate.emplace_back(std::move(spiral));
 
-    double strip_area      = 0;
-    const Polygons covered = footprint(candidate, strip_area);
-    const double area      = unscale<double>(unscale<double>(domain.area()));
-    if (area <= 0)
+    const std::optional<morphing_spiral_detail::Coverage> coverage = morphing_spiral_detail::measure_coverage(domain, candidate, result);
+    if (!coverage)
         return reject("invalid domain area");
-    const ExPolygons gaps     = diff_ex(ExPolygons{domain}, covered);
-    const ExPolygons spills   = diff_ex(covered, ExPolygons{domain});
-    result.uncovered_fraction = area_mm2(gaps) / area;
-    result.outside_fraction   = area_mm2(spills) / area;
-    for (const auto& gap : gaps)
-        result.largest_gap_mm2 = std::max(result.largest_gap_mm2, area_mm2(ExPolygons{gap}));
-    for (const auto& spill : spills)
-        result.largest_spill_mm2 = std::max(result.largest_spill_mm2, area_mm2(ExPolygons{spill}));
-    if (result.largest_gap_mm2 > .25 || result.largest_spill_mm2 > .10 || !offset_ex(gaps, -float(scale_(spacing * .15))).empty() ||
-        !offset_ex(spills, -float(scale_(spacing * .15))).empty())
+    if (result.largest_gap_mm2 > .25 || result.largest_spill_mm2 > .10 ||
+        !offset_ex(coverage->gaps, -float(scale_(spacing * .15))).empty() ||
+        !offset_ex(coverage->spills, -float(scale_(spacing * .15))).empty())
         return reject("local gap or spill exceeds area/inscribed-width limit");
-    result.excess_fraction = strip_area / area - 1;
     if (result.uncovered_fraction > .002 || result.outside_fraction > .002 || std::abs(result.excess_fraction) > .005)
         return reject("bead footprint coverage or deposition budget failed");
+    result.beads = beads;
     result.paths = std::move(candidate);
     return result;
+}
+} // namespace morphing_spiral_detail
+
+MorphingSpiralResult morphing_spiral(const ExPolygon& domain, double spacing, double min_spacing, double max_spacing)
+{
+    return morphing_spiral_detail::radial_spiral(domain, spacing, min_spacing, max_spacing, nullptr);
 }
 
 void FillMorphingSpiral::_fill_surface_single(
@@ -518,8 +633,16 @@ void FillMorphingSpiral::_fill_surface_single(
     if (domains.size() == 1) {
         const double nozzle             = params.flow.nozzle_diameter();
         const double rounded_correction = params.layer_height * (1. - .25 * 3.14159265358979323846);
-        auto result                     = morphing_spiral(domains.front(), spacing, std::max(.01, .75 * nozzle - rounded_correction),
-                                                          1.5 * nozzle - rounded_correction);
+        const double min_spacing        = std::max(.01, .75 * nozzle - rounded_correction);
+        const double max_spacing        = 1.5 * nozzle - rounded_correction;
+        // The radial spiral has no U-turns, so it is tried first. An island with one hole then tries
+        // the accordion spiral, whose only U-turns are its folds; the Fermat spiral is the last
+        // single-path method.
+        auto result = morphing_spiral(domains.front(), spacing, min_spacing, max_spacing);
+        if (result.paths.empty() && domains.front().holes.size() == 1)
+            result = accordion_spiral(domains.front(), spacing, min_spacing, max_spacing);
+        if (result.paths.empty())
+            result = fermat_spiral(domains.front(), spacing, min_spacing, max_spacing);
         if (!result.paths.empty()) {
             // The spiral runs outer edge to centre; print it the other way for an outward fill.
             if (params.fill_order != SurfaceFillOrder::Inward)

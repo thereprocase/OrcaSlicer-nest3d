@@ -828,7 +828,7 @@ void PrintObject::infill()
                     ++reasons[reason];
             }
             if (islands > 0) {
-                std::string message = (boost::format(L("Morphing spiral used Spiral Inset for %1% island(s) on layers %2%-%3% of %4%:")) %
+                std::string message = (boost::format(L("Accordion used Spiral Inset for %1% island(s) on layers %2%-%3% of %4%:")) %
                                        islands % first_layer % last_layer % this->model_object()->name).str();
                 for (const auto &[reason, count] : reasons)
                     message += (boost::format(" %1% (%2%);") % reason % count).str();

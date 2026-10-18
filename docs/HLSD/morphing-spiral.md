@@ -1,10 +1,12 @@
-# Morphing spiral solid fill
+# Accordion solid fill
 
-`Morphing spiral (experimental)` is an opt-in top, bottom and internal solid
+`Accordion (experimental)` is an opt-in top, bottom and internal solid
 fill pattern. Select it in the process profile's surface-pattern controls, or
 set `top_surface_pattern`, `bottom_surface_pattern` or
 `internal_solid_infill_pattern` to `morphingspiral` in a CLI settings JSON.
-Existing defaults and saved pattern identifiers are unchanged. The first layer
+The pattern was first called Morphing spiral; its stored identifier,
+`morphingspiral`, is kept so saved presets and projects still load. Existing
+defaults are unchanged. The first layer
 uses the bottom surface pattern.
 
 ## What it prints
@@ -29,12 +31,39 @@ and 1.5 nozzle diameters (less the rounded-bead correction), as close as
 possible to the requested line width. The requested width is not replaced by
 the nozzle width.
 
+## Islands one radial spiral cannot fill
+
+When the radial spiral rejects an island, two other single-path methods try in turn.
+
+- Accordion spiral, for an island with one hole: rings of the outline, one middle loop and rings of
+  the hole, as one inward spiral of true offsets (rectangles in a rectangle, squares round a square
+  hole). The ring spacing is set so the rings exactly fill the narrowest part of the island. Where
+  the strip left for the middle loop is wider than one bead (the ends of a rectangle, a square's
+  corners round a round hole, a star's arms) the middle loop folds back and forth across it in
+  parallel lanes, an even number of times, so it rejoins itself where it left. Its only U-turns are
+  those folds, at full track width against an edge.- Connected Fermat spiral (after Zhao et al., "Connected Fermat Spirals for Layered Fabrication",
+  SIGGRAPH 2016), for any island, holes included. The island is offset into rings, each opened by
+  half a spacing so that every ring end is a U-turn of full track width rather than a pinched
+  hairpin. Chains of nested rings become spirals: the outermost is a plain inward spiral, the others
+  go in on alternate rings and come back out on the rest, and each is spliced into a neighbour with
+  a U-turn in and a two-lane smoothstep out. Where rings of different families meet, the leftover
+  strip is shared by every bead outward along the same line, so widths change gradually.
+
+Both are audited against a looser budget than the radial spiral, because every fold, ring end and
+splice leaves a small gap: largest gap 0.45 mm2, no gap wider than half a spacing, uncovered at most 1.2%,
+spill as for the radial spiral, deposition within 3% of the island area.
+
+A known limit: where two families of Fermat rings meet (between two holes, for example) the seam can
+leave gaps wider than half a bead, and such islands fall back.
+
 ## When it falls back
 
-Rejected islands are filled with Spiral Inset. Each object then gets one
-non-critical slicing warning that gives the number of islands, the layer range
-and the reasons with counts, for example "Morphing spiral used Spiral Inset
-for 3 island(s) on layers 1-3 of knob: more than one hole (3);".
+Islands that no method can fill are filled with Spiral Inset.
+Each object then gets one non-critical slicing warning that gives the number of
+islands, the layer range and the reasons with counts, for example "Morphing
+spiral used Spiral Inset for 3 island(s) on layers 1-3 of frame: bead footprint
+coverage or deposition budget failed (3);". The reason given is the Fermat
+spiral's, the last method to try.
 
 Where the warning appears:
 
@@ -46,17 +75,14 @@ Where the warning appears:
   shows it only in the log, with `--logfile PATH`.
 
 Islands deliberately skipped are not reported, because they are never spiral
-candidates: sparse density, `dont_adjust` and bridges. The fallback cases:
+candidates: sparse density, `dont_adjust` and bridges. The usual fallback
+cases:
 
-- more than one hole
-- a boundary that a ray from the centre crosses more than once
-- a region too narrow for two beads
-- a thickness ratio around the island larger than the width-bound ratio
-
-The last case is a limit of any single spiral in which every ray crosses the
-same number of loops, for example a wide ellipse or a triangle around a small
-hole. Steep teeth also fail the width bounds with this radial
-parameterisation; a field-based one is a possible follow-up.
+- an island smaller than one ring
+- gaps at a Fermat seam wider than half a bead, as above
+- coverage outside the Fermat budget
+- a region that cannot be spliced to its neighbours (no stretch of three
+  spacings where their rings run side by side)
 
 ## Checks
 

@@ -8,6 +8,7 @@
 #include "libslic3r/ExtrusionEntity.hpp"
 #include "libslic3r/ExtrusionEntityCollection.hpp"
 #include "libslic3r/Emboss.hpp"
+#include "libslic3r/Layer.hpp"
 #include "libslic3r/Model.hpp"
 #include "libslic3r/Print.hpp"
 #include "libslic3r/TriangleMesh.hpp"
@@ -68,6 +69,36 @@ Slic3r::TriangleMesh two_hole_plate()
     return mesh;
 }
 
+// A square of the given side with a round hole, both centred on the origin.
+Slic3r::ExPolygon square_with_hole(double side, double hole_diameter)
+{
+    Slic3r::ExPolygon p;
+    const double h = side / 2;
+    for (const auto& [x, y] : {std::pair{-h, -h}, std::pair{h, -h}, std::pair{h, h}, std::pair{-h, h}})
+        p.contour.points.emplace_back(Slic3r::Point::new_scale(x, y));
+    Slic3r::Polygon hole;
+    for (int i = 0; i < 360; ++i) {
+        const double a = 6.283185307179586 * i / 360;
+        hole.points.emplace_back(Slic3r::Point::new_scale(hole_diameter / 2 * std::cos(-a), hole_diameter / 2 * std::sin(-a)));
+    }
+    p.holes.emplace_back(std::move(hole));
+    return p;
+}
+
+// A 1 mm tall 40 x 20 mm plate with a 10 mm square hole: the accordion spiral's case.
+Slic3r::TriangleMesh rectangle_with_square_hole()
+{
+    Slic3r::ExPolygon plate;
+    for (const auto& [x, y] : {std::pair{-2000, -1000}, std::pair{2000, -1000}, std::pair{2000, 1000}, std::pair{-2000, 1000}})
+        plate.contour.points.emplace_back(Slic3r::Point(x, y));
+    Slic3r::Polygon hole;
+    for (const auto& [x, y] : {std::pair{-500, -500}, std::pair{-500, 500}, std::pair{500, 500}, std::pair{500, -500}})
+        hole.points.emplace_back(Slic3r::Point(x, y));
+    plate.holes.emplace_back(std::move(hole));
+    Slic3r::TriangleMesh mesh(Slic3r::Emboss::polygons2model(Slic3r::ExPolygons{plate}, Slic3r::Emboss::ProjectZ(100.)));
+    mesh.scale(.01f);
+    return mesh;
+}
 std::vector<std::string> current_morphing_warnings(const Slic3r::Print& print)
 {
     std::vector<std::string> messages;
@@ -106,6 +137,39 @@ void check_single_path(const Slic3r::MorphingSpiralResult& result, double min_sp
     CHECK(result.outside_fraction <= .002);
     CHECK(std::abs(result.excess_fraction) <= .005);
 }
+
+// The Fermat spiral's own budget (see fermat_spiral): one path, every bead inside the nozzle
+// bounds, and coverage within its looser limits.
+// With tapered_ends (the accordion's start and end tapers), beads within 20 mm of either end may run
+// below the minimum.
+void check_fermat_path(const Slic3r::MorphingSpiralResult& result, double min_spacing, double max_spacing, bool tapered_ends = false)
+{
+    CAPTURE(result.fallback_reason, result.uncovered_fraction, result.outside_fraction, result.excess_fraction,
+            result.largest_gap_mm2, result.largest_spill_mm2);
+    REQUIRE(result.paths.size() == 1);
+    const auto& path = result.paths.front();
+    REQUIRE(path.width.size() == 2 * (path.points.size() - 1));
+    std::vector<double> along{0.};
+    for (size_t i = 0; i + 1 < path.points.size(); ++i)
+        along.push_back(along.back() + Slic3r::unscale<double>((path.points[i + 1] - path.points[i]).cast<double>().norm()));
+    for (size_t i = 0; i < path.width.size(); ++i) {
+        const double width = Slic3r::unscale<double>(path.width[i]);
+        const double at    = along[i / 2 + (i % 2)];
+        if (!tapered_ends || (at > 20. && at < along.back() - 20.))
+            CHECK(width >= min_spacing - 1e-6);
+        CHECK(width > 0.);
+        CHECK(width <= max_spacing + 1e-6);
+    }
+    CHECK(result.largest_gap_mm2 <= .45);
+    CHECK(result.largest_spill_mm2 <= .10);
+    CHECK(result.uncovered_fraction <= .012);
+    CHECK(result.outside_fraction <= .002);
+    CHECK(std::abs(result.excess_fraction) <= .03);
+}
+
+// A 0.5 mm line on a 0.4 nozzle at 0.2 mm layers, as spacing and bead bounds.
+constexpr double rounded = .2 * (1. - .25 * 3.14159265358979323846);
+constexpr double spacing_04 = .5 - rounded, min_04 = .3 - rounded, max_04 = .6 - rounded;
 } // namespace
 
 TEST_CASE("Morphing spiral covers an annulus with one continuous path", "[Fill][MorphingSpiral]")
@@ -161,7 +225,8 @@ TEST_CASE("Morphing spiral is available by config name and preserves stock fallb
         f->print_object_config = &oc;
         return f;
     };
-    // Two holes cannot be one spiral, so the island must come out exactly as stock spiral inset.
+    // Two holes: no radial or accordion spiral, and the Fermat spiral leaves seam gaps wider than its
+    // budget between the holes, so the island must come out exactly as stock spiral inset.
     Slic3r::ExPolygon two_holes = annulus();
     Slic3r::Polygon second;
     for (int i = 0; i < 90; ++i) {
@@ -183,7 +248,7 @@ TEST_CASE("Morphing spiral is available by config name and preserves stock fallb
     const auto* morphing = dynamic_cast<const Slic3r::FillMorphingSpiral*>(experiment.get());
     REQUIRE(morphing != nullptr);
     REQUIRE(morphing->fallback_reasons.size() == 1);
-    CHECK(morphing->fallback_reasons.front() == "more than one hole");
+    CHECK(!morphing->fallback_reasons.front().empty());
 }
 
 TEST_CASE("Bottom surface prints the spiral as one path in either order", "[Fill][MorphingSpiral]")
@@ -236,10 +301,10 @@ TEST_CASE("A fallback island raises one slicing warning that a stock pattern cle
     config.set_deserialize_strict({{"bottom_surface_pattern", "morphingspiral"}, {"top_surface_pattern", "morphingspiral"}});
     Slic3r::Test::init_print(std::vector<Slic3r::TriangleMesh>{two_hole_plate()}, print, model, config);
     print.process();
-    // Every two-hole island falls back, but they are reported as one aggregated warning.
+    // Every layer's island falls back, but they are reported as one aggregated warning.
     const auto first = current_morphing_warnings(print);
     REQUIRE(first.size() == 1);
-    CHECK(first.front().find("more than one hole") != std::string::npos);
+    CHECK(first.front().find("Spiral Inset") != std::string::npos);
 
     // Regenerating infill with the spiral still selected must give the same single report,
     // with the same island count, not an accumulated one.
@@ -252,4 +317,78 @@ TEST_CASE("A fallback island raises one slicing warning that a stock pattern cle
     print.apply(model, config);
     print.process();
     CHECK(current_morphing_warnings(print).empty());
+}
+
+TEST_CASE("Fermat and accordion spirals fill islands the radial spiral cannot as one path", "[Fill][MorphingSpiral][Fermat]")
+{
+    auto two_holes = annulus();
+    Slic3r::Polygon second;
+    for (int i = 0; i < 90; ++i) {
+        const double a = 6.283185307179586 * i / 90;
+        second.points.emplace_back(Slic3r::Point::new_scale(27 + 4 * std::cos(-a), 4 * std::sin(-a)));
+    }
+    two_holes.holes.emplace_back(std::move(second));
+    SECTION("two holes: one path within the budget, or a clean rejection")
+    {
+        // Seams between two hole families can leave gaps wider than the budget allows; the result
+        // must then be no path at all, never a partial one.
+        CHECK(Slic3r::morphing_spiral(two_holes, spacing_04, min_04, max_04).paths.empty());
+        const auto result = Slic3r::fermat_spiral(two_holes, spacing_04, min_04, max_04);
+        if (result.paths.empty())
+            CHECK(!result.fallback_reason.empty());
+        else
+            check_fermat_path(result, min_04, max_04);
+    }
+    SECTION("a square around a large round hole, as an accordion")
+    {
+        const auto square = square_with_hole(39.5, 28.5);
+        CHECK(Slic3r::morphing_spiral(square, spacing_04, min_04, max_04).paths.empty());
+        check_fermat_path(Slic3r::accordion_spiral(square, spacing_04, min_04, max_04), min_04, max_04, true);
+    }
+}
+
+TEST_CASE("Fermat spiral rejects what it cannot fill without partial output", "[Fill][MorphingSpiral][Fermat]")
+{
+    CHECK(Slic3r::fermat_spiral(disk(.4), spacing_04, min_04, max_04).paths.empty()); // smaller than one ring
+    CHECK(Slic3r::fermat_spiral(annulus(), std::numeric_limits<double>::quiet_NaN(), min_04, max_04).paths.empty());
+    CHECK(Slic3r::accordion_spiral(annulus(), std::numeric_limits<double>::quiet_NaN(), min_04, max_04).paths.empty());
+    CHECK(Slic3r::accordion_spiral(disk(15), spacing_04, min_04, max_04).paths.empty()); // needs one hole
+}
+
+TEST_CASE("A rectangle around a square hole spirals without a fallback warning", "[Fill][MorphingSpiral][Accordion]")
+{
+    Slic3r::Print print;
+    Slic3r::Model model;
+    Slic3r::DynamicPrintConfig config = Slic3r::DynamicPrintConfig::full_print_config();
+    config.set_deserialize_strict({{"bottom_surface_pattern", "morphingspiral"}, {"top_surface_pattern", "morphingspiral"}});
+    Slic3r::Test::init_print(std::vector<Slic3r::TriangleMesh>{rectangle_with_square_hole()}, print, model, config);
+    print.process();
+    CHECK(current_morphing_warnings(print).empty());
+    // No warning alone would also pass if the island were skipped, so the first layer must carry its
+    // bottom surface: about 500 mm2 inside the walls, over 1000 mm of 0.4 mm bead.
+    double bottom_length = 0.;
+    for (const Slic3r::LayerRegion* region : print.objects().front()->layers().front()->regions())
+        for (const Slic3r::ExtrusionEntity* entity : region->fills.flatten().entities)
+            if (entity->role() == Slic3r::erBottomSurface)
+                bottom_length += Slic3r::unscale<double>(entity->length());
+    CHECK(bottom_length > 600.);
+}
+
+TEST_CASE("Accordion spiral fills an ellipse around a round hole as one path", "[Fill][MorphingSpiral][Accordion]")
+{
+    // 45 x 25 mm semi-axes around an 8 mm hole: the long ends are far too thick for one radial
+    // spiral, so the middle loop folds across them.
+    Slic3r::ExPolygon ellipse;
+    for (int i = 0; i < 720; ++i) {
+        const double a = 6.283185307179586 * i / 720;
+        ellipse.contour.points.emplace_back(Slic3r::Point::new_scale(44.75 * std::cos(a), 24.75 * std::sin(a)));
+    }
+    Slic3r::Polygon hole;
+    for (int i = 0; i < 360; ++i) {
+        const double a = 6.283185307179586 * i / 360;
+        hole.points.emplace_back(Slic3r::Point::new_scale(8.25 * std::cos(-a), 8.25 * std::sin(-a)));
+    }
+    ellipse.holes.emplace_back(std::move(hole));
+    CHECK(Slic3r::morphing_spiral(ellipse, spacing_04, min_04, max_04).paths.empty());
+    check_fermat_path(Slic3r::accordion_spiral(ellipse, spacing_04, min_04, max_04), min_04, max_04, true);
 }
