@@ -24,6 +24,7 @@ repro_insert_before([=[  ExecWait '"$0" /S _?=$3']=] [=[  Push $3
 repro_insert_before("  @CPACK_NSIS_EXTRA_PREINSTALL_COMMANDS@" [=[  Push $INSTDIR
   Call ReproCapturePrinterTrust]=])
 repro_insert_before("@CPACK_NSIS_EXTRA_INSTALL_COMMANDS@" "  Call ReproRestorePrinterTrust")
+repro_insert_before("@CPACK_NSIS_EXTRA_UNINSTALL_COMMANDS@" [=[  Delete "$INSTDIR\resources\cert\printer-local-recovery.cer"]=])
 
 set(_repro_template_dir "${CMAKE_CURRENT_BINARY_DIR}/repro-cpack")
 file(MAKE_DIRECTORY "${_repro_template_dir}")
