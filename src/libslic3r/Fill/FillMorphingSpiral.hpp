@@ -17,13 +17,34 @@ struct MorphingSpiralResult
     double max_width_change_rate = 0.;
     double largest_gap_mm2       = 0.;
     double largest_spill_mm2     = 0.;
+    int beads                    = 0; // loops of a radial spiral
 };
 // One radial spiral with no U-turns; islands with at most one hole and a bounded thickness ratio.
 MorphingSpiralResult morphing_spiral(const ExPolygon& bead_domain, double spacing_mm, double min_spacing_mm, double max_spacing_mm);
 // Connected Fermat spiral (FillFermatSpiral.cpp): any island, holes included, still one path.
 MorphingSpiralResult fermat_spiral(const ExPolygon& bead_domain, double spacing_mm, double min_spacing_mm, double max_spacing_mm);
+// Radial band with Fermat pockets (FillFermatSpiral.cpp), for an island with at most one hole that
+// is too thick in some directions for one radial spiral: the radial spiral is capped around the
+// hole and the leftover pockets are Fermat spirals spliced into its outer loop.
+MorphingSpiralResult band_spiral(const ExPolygon& bead_domain, double spacing_mm, double min_spacing_mm, double max_spacing_mm);
 
 namespace morphing_spiral_detail {
+// The island in polar form around its hole centroid (or, for a disk, a centre that sees the whole
+// boundary): edge radii and their slopes at polar_angle(k) for k < polar_samples().
+struct PolarFrame
+{
+    Vec2d center;
+    bool disk = false;
+    std::vector<double> outer, outer_slope, inner, inner_slope;
+};
+int polar_samples();
+double polar_angle(int k);
+std::optional<PolarFrame> polar_frame(const ExPolygon& domain, double spacing_mm, std::string& reason);
+// The radial spiral; with seam_allowed (one entry per polar sample) its lane-change zone stays
+// inside the allowed angles.
+MorphingSpiralResult radial_spiral(const ExPolygon& domain, double spacing_mm, double min_spacing_mm, double max_spacing_mm,
+                                   const std::vector<char>* seam_allowed);
+
 // Appends p (mm) with its width (mm) to a variable-width path.
 void append_point(ThickPolyline& path, const Vec2d& p, double width_mm);
 struct Coverage

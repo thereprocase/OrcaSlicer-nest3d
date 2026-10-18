@@ -269,7 +269,58 @@ std::optional<Coverage> measure_coverage(const ExPolygon& domain, const ThickPol
 }
 } // namespace morphing_spiral_detail
 
-MorphingSpiralResult morphing_spiral(const ExPolygon& domain, double spacing, double min_spacing, double max_spacing)
+namespace morphing_spiral_detail {
+int polar_samples() { return samples; }
+double polar_angle(int k) { return phase + k * tau / samples; }
+
+std::optional<PolarFrame> polar_frame(const ExPolygon& domain, double spacing, std::string& reason)
+{
+    if (domain.holes.size() > 1) {
+        reason = "more than one hole";
+        return std::nullopt;
+    }
+    // Edges in polar form around the centre.
+    PolarFrame frame;
+    frame.disk = domain.holes.empty();
+    if (frame.disk) {
+        const auto c = disk_center(domain.contour);
+        if (!c) {
+            reason = "no centre sees the whole boundary";
+            return std::nullopt;
+        }
+        frame.center   = *c;
+        const auto out = radii(domain.contour, frame.center);
+        if (!out) {
+            reason = "boundary is not single-valued around the centre";
+            return std::nullopt;
+        }
+        frame.outer       = out->r;
+        frame.outer_slope = out->slope;
+        // A pinhole at the centre: the last loop closes onto it.
+        frame.inner.assign(samples, tip_fraction * spacing);
+        frame.inner_slope.assign(samples, 0.);
+    } else {
+        if (domain.holes.front().points.size() < 3) {
+            reason = "degenerate hole";
+            return std::nullopt;
+        }
+        frame.center   = mm(domain.holes.front().centroid());
+        const auto out = radii(domain.contour, frame.center);
+        const auto in  = radii(domain.holes.front(), frame.center);
+        if (!out || !in) {
+            reason = "boundaries are not single-valued around the hole centre";
+            return std::nullopt;
+        }
+        frame.outer       = out->r;
+        frame.outer_slope = out->slope;
+        frame.inner       = in->r;
+        frame.inner_slope = in->slope;
+    }
+    return frame;
+}
+
+MorphingSpiralResult radial_spiral(const ExPolygon& domain, double spacing, double min_spacing, double max_spacing,
+                                   const std::vector<char>* seam_allowed)
 {
     MorphingSpiralResult result;
     auto reject = [&](std::string reason) {
@@ -280,39 +331,13 @@ MorphingSpiralResult morphing_spiral(const ExPolygon& domain, double spacing, do
     if (!std::isfinite(spacing) || !std::isfinite(min_spacing) || !std::isfinite(max_spacing) || min_spacing <= 0 ||
         spacing < min_spacing || spacing > max_spacing)
         return reject("invalid spacing limits");
-    if (domain.holes.size() > 1)
-        return reject("more than one hole");
-
-    // Edges in polar form around the centre.
-    const bool disk = domain.holes.empty();
-    Vec2d center;
-    std::vector<double> e_o, d_o, e_i, d_i;
-    if (disk) {
-        const auto c = disk_center(domain.contour);
-        if (!c)
-            return reject("no centre sees the whole boundary");
-        center         = *c;
-        const auto out = radii(domain.contour, center);
-        if (!out)
-            return reject("boundary is not single-valued around the centre");
-        e_o = out->r;
-        d_o = out->slope;
-        // A pinhole at the centre: the last loop closes onto it.
-        e_i.assign(samples, tip_fraction * spacing);
-        d_i.assign(samples, 0.);
-    } else {
-        if (domain.holes.front().points.size() < 3)
-            return reject("degenerate hole");
-        center         = mm(domain.holes.front().centroid());
-        const auto out = radii(domain.contour, center);
-        const auto in  = radii(domain.holes.front(), center);
-        if (!out || !in)
-            return reject("boundaries are not single-valued around the hole centre");
-        e_o = out->r;
-        d_o = out->slope;
-        e_i = in->r;
-        d_i = in->slope;
-    }
+    std::string frame_reason;
+    const std::optional<PolarFrame> frame = polar_frame(domain, spacing, frame_reason);
+    if (!frame)
+        return reject(frame_reason);
+    const bool disk = frame->disk;
+    const Vec2d center = frame->center;
+    const std::vector<double>&e_o = frame->outer, &d_o = frame->outer_slope, &e_i = frame->inner, &d_i = frame->inner_slope;
     for (int k = 0; k < samples; ++k)
         if (e_o[k] - e_i[k] < 2 * min_spacing)
             return reject("region too narrow for two beads");
@@ -356,20 +381,30 @@ MorphingSpiralResult morphing_spiral(const ExPolygon& domain, double spacing, do
     const double zone      = zone_samples * step;
     // Seam at the smoothest window, so lane changes and tapers never straddle a corner.
     int seam_k = 0;
+    bool seam_found = false;
     {
         double best = std::numeric_limits<double>::max();
         for (int k = 0; k < samples; ++k) {
+            // A caller may keep the zone, and the tapers in it, inside some angles only.
+            bool allowed = true;
+            for (int m = 0; seam_allowed && m <= zone_samples; ++m)
+                allowed = allowed && (*seam_allowed)[size_t((k + m) % samples)];
+            if (!allowed)
+                continue;
             double rough = 0;
             for (int m = 0; m < zone_samples; ++m) {
                 const int a = (k + m) % samples, b = (k + m + 1) % samples;
                 rough += std::abs(d_o[b] - d_o[a]) + std::abs(d_i[b] - d_i[a]);
             }
             if (rough < best) {
-                best   = rough;
-                seam_k = k;
+                best       = rough;
+                seam_k     = k;
+                seam_found = true;
             }
         }
     }
+    if (!seam_found)
+        return reject("no allowed place for the lane-change zone");
     const double seam = phase + seam_k * step;
 
     // Flat loops run on the sample angles plus every polygon vertex angle, evaluated exactly, so loops
@@ -513,8 +548,15 @@ MorphingSpiralResult morphing_spiral(const ExPolygon& domain, double spacing, do
         return reject("local gap or spill exceeds area/inscribed-width limit");
     if (result.uncovered_fraction > .002 || result.outside_fraction > .002 || std::abs(result.excess_fraction) > .005)
         return reject("bead footprint coverage or deposition budget failed");
+    result.beads = beads;
     result.paths = std::move(candidate);
     return result;
+}
+} // namespace morphing_spiral_detail
+
+MorphingSpiralResult morphing_spiral(const ExPolygon& domain, double spacing, double min_spacing, double max_spacing)
+{
+    return morphing_spiral_detail::radial_spiral(domain, spacing, min_spacing, max_spacing, nullptr);
 }
 
 void FillMorphingSpiral::_fill_surface_single(
@@ -532,10 +574,20 @@ void FillMorphingSpiral::_fill_surface_single(
         const double rounded_correction = params.layer_height * (1. - .25 * 3.14159265358979323846);
         const double min_spacing        = std::max(.01, .75 * nozzle - rounded_correction);
         const double max_spacing        = 1.5 * nozzle - rounded_correction;
-        // The radial spiral has no U-turns, so it is tried first; the Fermat spiral fills the rest.
+        // The radial spiral has no U-turns, so it is tried first. Otherwise the radial band with
+        // pockets (one hole or none) and the Fermat spiral both try, and the one that leaves less
+        // uncovered, counting half its deposition error, is kept.
         auto result = morphing_spiral(domains.front(), spacing, min_spacing, max_spacing);
-        if (result.paths.empty())
-            result = fermat_spiral(domains.front(), spacing, min_spacing, max_spacing);
+        if (result.paths.empty()) {
+            auto score = [](const MorphingSpiralResult& r) { return r.uncovered_fraction + std::abs(r.excess_fraction) / 2; };
+            auto fermat = fermat_spiral(domains.front(), spacing, min_spacing, max_spacing);
+            auto band   = domains.front().holes.size() <= 1 ? band_spiral(domains.front(), spacing, min_spacing, max_spacing) :
+                                                              MorphingSpiralResult{};
+            if (!band.paths.empty() && (fermat.paths.empty() || score(band) < score(fermat)))
+                result = std::move(band);
+            else
+                result = std::move(fermat);
+        }
         if (!result.paths.empty()) {
             // The spiral runs outer edge to centre; print it the other way for an outward fill.
             if (params.fill_order != SurfaceFillOrder::Inward)

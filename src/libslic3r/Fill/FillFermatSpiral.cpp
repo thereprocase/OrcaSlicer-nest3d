@@ -53,6 +53,10 @@ constexpr double inner_reach = 1.6;        // a deeper bead this close (in spaci
 constexpr double smooth_radius_mm = 1.5;   // seam leftovers are averaged over innermost beads this close
 constexpr double seam_overlap_mm = .03;    // each innermost bead reaches past the medial axis, like infill overlap
 constexpr double min_segment_mm = .05;
+constexpr double tau_full = 2 * pi;
+constexpr double band_cap_fraction = .95; // band thickness at most this fraction of beads x max width
+constexpr double band_blend_mm = 1.5;      // arc over which the band steps down to its cap
+constexpr double min_pocket_mm2 = .5;     // smaller pockets are left to the coverage audit
 constexpr size_t npos = std::numeric_limits<size_t>::max();
 
 struct FermatError
@@ -476,6 +480,13 @@ public:
         return path;
     }
 
+    // Fermat spiral of a child strand from a0 on its first ring, returning onto a host through exit.
+    Path child_path(size_t si, double a0, const std::function<Vec2d(double)>& exit, double exit_level)
+    {
+        return strand_path(si, a0, exit, exit_level);
+    }
+    double first_gap(size_t si) const { return gaps(si).front(); }
+
 private:
     std::vector<double> gaps(size_t si) const
     {
@@ -789,9 +800,9 @@ double straightest(const Ring& ring)
     }
     return ring.cum[best];
 }
-} // namespace
-
-MorphingSpiralResult fermat_spiral(const ExPolygon& domain, double spacing, double min_spacing, double max_spacing)
+// Builds the variable-width path and audits it against the Fermat budget.
+MorphingSpiralResult finish_path(const ExPolygon& domain, const std::vector<Vec2d>& pts, const std::vector<double>& widths,
+                                 double spacing)
 {
     MorphingSpiralResult result;
     auto reject = [&](std::string reason) {
@@ -799,27 +810,6 @@ MorphingSpiralResult fermat_spiral(const ExPolygon& domain, double spacing, doub
         result.fallback_reason = std::move(reason);
         return result;
     };
-    if (!std::isfinite(spacing) || !std::isfinite(min_spacing) || !std::isfinite(max_spacing) || min_spacing <= 0 ||
-        spacing < min_spacing || spacing > max_spacing)
-        return reject("invalid spacing bounds");
-    std::vector<Vec2d> pts;
-    std::vector<double> levels;
-    try {
-        Levels rings = offset_rings(domain, spacing);
-        if (rings.empty())
-            return reject("island too small for one bead");
-        std::vector<Strand> strands = build_strands(rings);
-        auto [root, parent] = build_tree(strands, spacing);
-        Builder builder(strands, parent, spacing);
-        Path path = builder.spiral_path(root, straightest(*strands[root].front()));
-        pts    = std::move(path.pts);
-        levels = std::move(path.levels);
-    } catch (const FermatError& e) {
-        return reject(e.reason);
-    }
-    std::vector<double> widths;
-    medial_widths(domain, pts, levels, spacing, min_spacing, max_spacing, widths);
-
     ThickPolyline spiral;
     Vec2d last(std::numeric_limits<double>::quiet_NaN(), 0.);
     for (size_t i = 0; i < pts.size(); ++i) {
@@ -834,8 +824,7 @@ MorphingSpiralResult fermat_spiral(const ExPolygon& domain, double spacing, doub
         return reject("empty spiral");
     ThickPolylines candidate;
     candidate.emplace_back(std::move(spiral));
-
-    std::optional<morphing_spiral_detail::Coverage> coverage = morphing_spiral_detail::measure_coverage(domain, candidate, result);
+    const std::optional<morphing_spiral_detail::Coverage> coverage = morphing_spiral_detail::measure_coverage(domain, candidate, result);
     if (!coverage)
         return reject("invalid domain area");
     // Looser than the radial spiral's budget: every ring end and splice leaves a few hundredths of a
@@ -848,5 +837,265 @@ MorphingSpiralResult fermat_spiral(const ExPolygon& domain, double spacing, doub
         return reject("bead footprint coverage or deposition budget failed");
     result.paths = std::move(candidate);
     return result;
+}
+
+bool valid_bounds(double spacing, double min_spacing, double max_spacing)
+{
+    return std::isfinite(spacing) && std::isfinite(min_spacing) && std::isfinite(max_spacing) && min_spacing > 0 &&
+           spacing >= min_spacing && spacing <= max_spacing;
+}
+
+MorphingSpiralResult rejected(std::string reason)
+{
+    MorphingSpiralResult result;
+    result.fallback_reason = std::move(reason);
+    return result;
+}
+
+std::vector<double> point_widths(const ThickPolyline& path)
+{
+    std::vector<double> widths;
+    for (size_t i = 0; i < path.points.size(); ++i)
+        widths.push_back(unscale<double>(i + 1 < path.points.size() ? path.width[2 * i] : path.width.back()));
+    return widths;
+}
+} // namespace
+
+MorphingSpiralResult fermat_spiral(const ExPolygon& domain, double spacing, double min_spacing, double max_spacing)
+{
+    if (!valid_bounds(spacing, min_spacing, max_spacing))
+        return rejected("invalid spacing bounds");
+    std::vector<Vec2d> pts;
+    std::vector<double> levels;
+    try {
+        Levels rings = offset_rings(domain, spacing);
+        if (rings.empty())
+            return rejected("island too small for one bead");
+        std::vector<Strand> strands = build_strands(rings);
+        auto [root, parent] = build_tree(strands, spacing);
+        Builder builder(strands, parent, spacing);
+        Path path = builder.spiral_path(root, straightest(*strands[root].front()));
+        pts    = std::move(path.pts);
+        levels = std::move(path.levels);
+    } catch (const FermatError& e) {
+        return rejected(e.reason);
+    }
+    std::vector<double> widths;
+    medial_widths(domain, pts, levels, spacing, min_spacing, max_spacing, widths);
+    return finish_path(domain, pts, widths, spacing);
+}
+
+MorphingSpiralResult band_spiral(const ExPolygon& domain, double spacing, double min_spacing, double max_spacing)
+{
+    using namespace morphing_spiral_detail;
+    if (!valid_bounds(spacing, min_spacing, max_spacing))
+        return rejected("invalid spacing bounds");
+    std::string reason;
+    const std::optional<PolarFrame> frame = polar_frame(domain, spacing, reason);
+    if (!frame)
+        return rejected(reason);
+    const int n = polar_samples();
+    const double w = spacing;
+    std::vector<double> thick(size_t(n), 0.);
+    double thinnest = std::numeric_limits<double>::max(), mean_r = 0;
+    for (int k = 0; k < n; ++k) {
+        thick[size_t(k)] = frame->outer[size_t(k)] - frame->inner[size_t(k)];
+        thinnest = std::min(thinnest, thick[size_t(k)]);
+        mean_r += frame->outer[size_t(k)] / n;
+    }
+    // The band swallows everything up to two beads past its cap, so no pocket starts thinner than
+    // two beads (a thinner start is a wedge no ring can reach); the cap leaves room for that within
+    // the width bound.
+    const int beads = std::max(2, int(std::lround(thinnest / w)));
+    const double pocket_start = 2 * w;
+    const double cap = beads * band_cap_fraction * max_spacing - pocket_start;
+    std::vector<char> in_pocket(size_t(n), 0);
+    bool any_pocket = false;
+    for (int k = 0; k < n; ++k)
+        any_pocket |= bool(in_pocket[size_t(k)] = thick[size_t(k)] > cap + pocket_start);
+    if (!any_pocket)
+        return rejected("band: nothing to cap");
+    // Step from the full thickness down to the cap over a short smoothstep in arc length.
+    std::vector<double> capped(size_t(n));
+    for (int k = 0; k < n; ++k)
+        capped[size_t(k)] = in_pocket[size_t(k)] ? cap : thick[size_t(k)];
+    const int span = std::max(2, int(std::lround(band_blend_mm / (mean_r * tau_full / n))));
+    std::vector<int> edges;
+    for (int k = 0; k < n; ++k)
+        if (in_pocket[size_t(k)] != in_pocket[size_t((k + n - 1) % n)])
+            edges.push_back(k);
+    std::vector<char> seam_allowed(size_t(n), 1);
+    for (int e : edges) {
+        const bool entering = in_pocket[size_t(e)];
+        for (int k = -span; k <= span; ++k) {
+            const size_t i = size_t(((e + k) % n + n) % n);
+            double s = smoothstep(.5 * (1. + double(k) / span));
+            s = entering ? s : 1 - s;
+            capped[i] = std::min(thick[i], thick[i] * (1 - s) + cap * s);
+            // The lane-change zone and its thin tapers stay off the steps into the pockets.
+            seam_allowed[i] = 0;
+        }
+    }
+    auto ring_at = [&](const std::vector<double>& r) {
+        Polygon polygon;
+        for (int k = 0; k < n; ++k) {
+            const double a = polar_angle(k);
+            polygon.points.emplace_back(Point::new_scale(frame->center.x() + std::cos(a) * r[size_t(k)],
+                                                         frame->center.y() + std::sin(a) * r[size_t(k)]));
+        }
+        return polygon;
+    };
+    std::vector<double> band_r(size_t(n)), clip_r(size_t(n));
+    for (int k = 0; k < n; ++k) {
+        band_r[size_t(k)] = frame->inner[size_t(k)] + capped[size_t(k)];
+        // Clip with the band bled past the island edge where it is not capped, so the pockets are
+        // the capped parts only and are not joined by slivers along the edge.
+        clip_r[size_t(k)] = frame->inner[size_t(k)] + (thick[size_t(k)] - capped[size_t(k)] < 1e-6 ? thick[size_t(k)] + 1. : capped[size_t(k)]);
+    }
+    ExPolygon band_domain;
+    band_domain.contour = ring_at(band_r);
+    band_domain.holes   = domain.holes;
+    MorphingSpiralResult band = radial_spiral(band_domain, spacing, min_spacing, max_spacing, &seam_allowed);
+    if (band.paths.empty() && band.fallback_reason == "no allowed place for the lane-change zone")
+        band = radial_spiral(band_domain, spacing, min_spacing, max_spacing, nullptr); // a zone beside a step still covers
+    if (band.paths.empty())
+        return rejected("band: " + band.fallback_reason);
+    const ThickPolyline& host_path = band.paths.front();
+    std::vector<Vec2d> host;
+    for (const Point& p : host_path.points)
+        host.push_back(mm(p));
+    const std::vector<double> host_w = point_widths(host_path);
+    std::vector<double> t_host{0.};
+    for (size_t i = 1; i < host.size(); ++i)
+        t_host.push_back(t_host.back() + (host[i] - host[i - 1]).norm());
+    auto host_at = [&](double t) {
+        const size_t i = std::clamp<size_t>(size_t(std::upper_bound(t_host.begin(), t_host.end(), t) - t_host.begin()), 1, host.size() - 1);
+        const double span_t = t_host[i] - t_host[i - 1];
+        const double x = span_t > 0 ? std::clamp((t - t_host[i - 1]) / span_t, 0., 1.) : 0.;
+        return Vec2d(host[i - 1] + (host[i] - host[i - 1]) * x);
+    };
+    // Host points on the band's outer loop, well away from its lane-change zone, can take a pocket.
+    std::vector<char> outer_loop(host.size(), 0);
+    const Vec2d seam_dir = host.front() - frame->center;
+    const double seam_angle = std::atan2(seam_dir.y(), seam_dir.x());
+    for (size_t i = 0; i < host.size(); ++i) {
+        const Vec2d rel = host[i] - frame->center;
+        const double r = rel.norm();
+        const double a = std::atan2(rel.y(), rel.x());
+        const double rel_angle = std::fmod(std::fmod(a - polar_angle(0), tau_full) + tau_full, tau_full);
+        const int k = std::clamp(int(rel_angle / tau_full * n), 0, n - 1);
+        const double frac = (band_r[size_t(k)] - r) / std::max(band_r[size_t(k)] - frame->inner[size_t(k)], 1e-9);
+        const double from_seam = std::abs(std::remainder(a - seam_angle, tau_full));
+        outer_loop[i] = frac < 1. / std::max(band.beads, 1) && from_seam * r > 6.;
+    }
+
+    struct Insert
+    {
+        double t1, t2;
+        std::vector<Vec2d> pts;
+        std::vector<double> widths;
+    };
+    std::vector<Insert> inserts;
+    std::vector<std::pair<double, double>> taken;
+    try {
+        const Polygons clip{ring_at(clip_r)};
+        for (const ExPolygon& pocket : diff_ex(ExPolygons{domain}, clip)) {
+            if (unscale<double>(unscale<double>(pocket.area())) < min_pocket_mm2)
+                continue;
+            Levels rings = offset_rings(pocket, w);
+            if (rings.empty())
+                continue;
+            std::vector<Strand> strands = build_strands(rings);
+            auto [root, parent] = build_tree(strands, w);
+            Builder builder(strands, parent, w);
+            Ring& ring0 = *strands[root].front();
+            const double gc = builder.first_gap(root);
+            std::vector<double> d(host.size());
+            std::vector<size_t> idx;
+            for (size_t i = 0; i < host.size(); ++i) {
+                d[i] = ring0.distance(host[i]);
+                bool ok = outer_loop[i] && d[i] <= seam_reach * w && t_host[i] < t_host.back() - gc - 1.;
+                for (const auto& [t0, t1] : taken)
+                    ok = ok && (t_host[i] < t0 - 3 * w || t_host[i] > t1 + 3 * w);
+                if (ok)
+                    idx.push_back(i);
+            }
+            if (idx.empty())
+                throw FermatError{"no room to splice a pocket"};
+            double closest = std::numeric_limits<double>::max();
+            for (size_t i : idx)
+                closest = std::min(closest, d[i]);
+            idx.erase(std::remove_if(idx.begin(), idx.end(), [&](size_t i) { return d[i] > closest + .15 * w; }), idx.end());
+            size_t best_start = 0, best_len = 0;
+            for (size_t s = 0; s < idx.size();) {
+                size_t e = s + 1;
+                while (e < idx.size() && idx[e] == idx[e - 1] + 1)
+                    ++e;
+                if (e - s > best_len) {
+                    best_len   = e - s;
+                    best_start = s;
+                }
+                s = e;
+            }
+            const size_t j = idx[best_start + best_len / 2];
+            const double t1 = t_host[j], t2 = t1 + gc;
+            taken.emplace_back(t1, t2);
+            const Vec2d h1 = host[j];
+            const Vec2d host_dir = host[std::min(j + 1, host.size() - 1)] - host[j == 0 ? 0 : j - 1];
+            double a0 = ring0.nearest_s(h1);
+            if (ring0.tangent(a0).dot(host_dir) > 0) {
+                for (Ring* r : strands[root])
+                    r->reverse();
+                a0 = ring0.nearest_s(h1);
+            }
+            Path child = builder.child_path(root, a0, [&](double x) { return host_at(t1 + x * gc); }, -1.);
+            Insert ins{t1, t2, uturn(h1, ring0.at(a0), host_dir), {}};
+            std::vector<double> levels(ins.pts.size(), -1.);
+            append(ins.pts, child.pts);
+            append(levels, child.levels);
+            // Widths inside the pocket from its own geometry; bridges out to the band keep the spacing.
+            std::vector<size_t> inside;
+            std::vector<Vec2d> inside_pts;
+            std::vector<double> inside_levels;
+            for (size_t i = 0; i < ins.pts.size(); ++i)
+                if (levels[i] >= -.25) {
+                    inside.push_back(i);
+                    inside_pts.push_back(ins.pts[i]);
+                    inside_levels.push_back(std::max(levels[i], 0.));
+                }
+            ins.widths.assign(ins.pts.size(), w);
+            if (!inside.empty()) {
+                std::vector<double> inside_widths;
+                medial_widths(pocket, inside_pts, inside_levels, w, min_spacing, max_spacing, inside_widths);
+                for (size_t m = 0; m < inside.size(); ++m) {
+                    ins.pts[inside[m]]    = inside_pts[m];
+                    ins.widths[inside[m]] = inside_widths[m];
+                }
+            }
+            inserts.emplace_back(std::move(ins));
+        }
+    } catch (const FermatError& e) {
+        return rejected("band: " + e.reason);
+    }
+    std::sort(inserts.begin(), inserts.end(), [](const Insert& l, const Insert& r) { return l.t1 < r.t1; });
+    std::vector<Vec2d> pts;
+    std::vector<double> widths;
+    size_t cur = 0;
+    for (const Insert& ins : inserts) {
+        const size_t j1 = size_t(std::upper_bound(t_host.begin(), t_host.end(), ins.t1) - t_host.begin());
+        const size_t j2 = size_t(std::upper_bound(t_host.begin(), t_host.end(), ins.t2) - t_host.begin());
+        for (size_t i = cur; i < std::max(cur, j1); ++i) {
+            pts.push_back(host[i]);
+            widths.push_back(host_w[i]);
+        }
+        append(pts, ins.pts);
+        append(widths, ins.widths);
+        cur = std::max(cur, j2);
+    }
+    for (size_t i = cur; i < host.size(); ++i) {
+        pts.push_back(host[i]);
+        widths.push_back(host_w[i]);
+    }
+    return finish_path(domain, pts, widths, spacing);
 }
 } // namespace Slic3r

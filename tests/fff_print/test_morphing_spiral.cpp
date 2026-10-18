@@ -144,16 +144,24 @@ void check_single_path(const Slic3r::MorphingSpiralResult& result, double min_sp
 
 // The Fermat spiral's own budget (see fermat_spiral): one path, every bead inside the nozzle
 // bounds, and coverage within its looser limits.
-void check_fermat_path(const Slic3r::MorphingSpiralResult& result, double min_spacing, double max_spacing)
+// With tapered_ends (a radial band), beads within 20 mm of either end may run below the minimum.
+void check_fermat_path(const Slic3r::MorphingSpiralResult& result, double min_spacing, double max_spacing, bool tapered_ends = false)
 {
     CAPTURE(result.fallback_reason, result.uncovered_fraction, result.outside_fraction, result.excess_fraction,
             result.largest_gap_mm2, result.largest_spill_mm2);
     REQUIRE(result.paths.size() == 1);
     const auto& path = result.paths.front();
     REQUIRE(path.width.size() == 2 * (path.points.size() - 1));
-    for (const auto width : path.width) {
-        CHECK(Slic3r::unscale<double>(width) >= min_spacing - 1e-6);
-        CHECK(Slic3r::unscale<double>(width) <= max_spacing + 1e-6);
+    std::vector<double> along{0.};
+    for (size_t i = 0; i + 1 < path.points.size(); ++i)
+        along.push_back(along.back() + Slic3r::unscale<double>((path.points[i + 1] - path.points[i]).cast<double>().norm()));
+    for (size_t i = 0; i < path.width.size(); ++i) {
+        const double width = Slic3r::unscale<double>(path.width[i]);
+        const double at    = along[i / 2 + (i % 2)];
+        if (!tapered_ends || (at > 20. && at < along.back() - 20.))
+            CHECK(width >= min_spacing - 1e-6);
+        CHECK(width > 0.);
+        CHECK(width <= max_spacing + 1e-6);
     }
     CHECK(result.largest_gap_mm2 <= .45);
     CHECK(result.largest_spill_mm2 <= .10);
@@ -349,4 +357,23 @@ TEST_CASE("A two-hole plate spirals without a fallback warning", "[Fill][Morphin
     Slic3r::Test::init_print(std::vector<Slic3r::TriangleMesh>{two_hole_plate()}, print, model, config);
     print.process();
     CHECK(current_morphing_warnings(print).empty());
+}
+
+TEST_CASE("Radial band with Fermat pockets fills an ellipse around a round hole as one path", "[Fill][MorphingSpiral][Fermat]")
+{
+    // 45 x 25 mm semi-axes around an 8 mm hole: the long ends are far too thick for one radial
+    // spiral, so the band is capped and the ends become pockets.
+    Slic3r::ExPolygon ellipse;
+    for (int i = 0; i < 720; ++i) {
+        const double a = 6.283185307179586 * i / 720;
+        ellipse.contour.points.emplace_back(Slic3r::Point::new_scale(44.75 * std::cos(a), 24.75 * std::sin(a)));
+    }
+    Slic3r::Polygon hole;
+    for (int i = 0; i < 360; ++i) {
+        const double a = 6.283185307179586 * i / 360;
+        hole.points.emplace_back(Slic3r::Point::new_scale(8.25 * std::cos(-a), 8.25 * std::sin(-a)));
+    }
+    ellipse.holes.emplace_back(std::move(hole));
+    CHECK(Slic3r::morphing_spiral(ellipse, spacing_04, min_04, max_04).paths.empty());
+    check_fermat_path(Slic3r::band_spiral(ellipse, spacing_04, min_04, max_04), min_04, max_04, true);
 }
