@@ -841,7 +841,7 @@ MorphingSpiralResult finish_path(const ExPolygon& domain, const std::vector<Vec2
         return reject("width change per millimetre exceeds limit");
     ThickPolylines candidate;
     candidate.emplace_back(std::move(spiral));
-    const std::optional<morphing_spiral_detail::Coverage> coverage = morphing_spiral_detail::measure_coverage(domain, candidate, result);
+    const std::optional<morphing_spiral_detail::Coverage> coverage = morphing_spiral_detail::measure_coverage(domain, candidate, result, true);
     if (!coverage)
         return reject("invalid domain area");
     // Ring points are chords, so the outer bead's edge sits microns inside a curved outline and the

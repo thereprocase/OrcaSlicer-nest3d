@@ -61,7 +61,9 @@ struct Coverage
 };
 // Swept-footprint audit of paths over the domain: fills result's fractions and largest gap and
 // spill, and returns the gaps and spills for inscribed-width checks. Nothing for an empty domain.
-std::optional<Coverage> measure_coverage(const ExPolygon& domain, const ThickPolylines& paths, MorphingSpiralResult& result);
+// per_segment sweeps each segment on its own, which stays exact through tight U-turns.
+std::optional<Coverage> measure_coverage(const ExPolygon& domain, const ThickPolylines& paths, MorphingSpiralResult& result,
+                                         bool per_segment = false);
 } // namespace morphing_spiral_detail
 
 class FillMorphingSpiral : public FillSpiralInset

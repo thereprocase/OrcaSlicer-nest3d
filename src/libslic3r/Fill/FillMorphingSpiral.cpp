@@ -223,6 +223,47 @@ Polygons footprint(const ThickPolylines& paths, double& strip_area)
     }
     return union_(strips);
 }
+// Per-segment footprint: a trapezoid per segment plus a disc wherever the path turns. Slower than
+// the single strip, but exact through tight U-turns, where a strip's inner edge folds over itself.
+Polygons segment_footprint(const ThickPolylines& paths, double& strip_area)
+{
+    Polygons pieces;
+    strip_area = 0;
+    for (const ThickPolyline& path : paths) {
+        const size_t n = path.points.size();
+        for (size_t i = 0; i + 1 < n; ++i) {
+            const Vec2d a = mm(path.points[i]), b = mm(path.points[i + 1]);
+            const double wa = unscale<double>(path.width[2 * i]), wb = unscale<double>(path.width[2 * i + 1]);
+            const Vec2d d = b - a;
+            const double length = d.norm();
+            if (length < 1e-9)
+                continue;
+            strip_area += length * (wa + wb) / 2;
+            const Vec2d normal(-d.y() / length, d.x() / length);
+            Polygon quad;
+            for (const Vec2d& p : {Vec2d(a + normal * wa / 2), Vec2d(b + normal * wb / 2), Vec2d(b - normal * wb / 2), Vec2d(a - normal * wa / 2)})
+                quad.points.emplace_back(point(p));
+            quad.make_counter_clockwise();
+            pieces.emplace_back(std::move(quad));
+        }
+        for (size_t i = 0; i < n; ++i) {
+            bool turns = i == 0 || i + 1 == n;
+            if (!turns) {
+                const Vec2d d0 = mm(path.points[i]) - mm(path.points[i - 1]), d1 = mm(path.points[i + 1]) - mm(path.points[i]);
+                turns = d0.norm() > 1e-9 && d1.norm() > 1e-9 && d0.dot(d1) < std::cos(tau / 36) * d0.norm() * d1.norm();
+            }
+            if (!turns)
+                continue;
+            const double width = unscale<double>(i == 0 ? path.width.front() : path.width[2 * i - 1]);
+            Polygon disc;
+            for (int j = 0; j < 16; ++j)
+                disc.points.emplace_back(point(mm(path.points[i]) + Vec2d(std::cos(tau * j / 16), std::sin(tau * j / 16)) * width / 2));
+            pieces.emplace_back(std::move(disc));
+        }
+    }
+    return union_(pieces);
+}
+
 double area_mm2(const ExPolygons& polygons)
 {
     double area = 0;
@@ -254,10 +295,11 @@ void append_point(ThickPolyline& path, const Vec2d& p, double width)
     path.points.emplace_back(point(p));
 }
 
-std::optional<Coverage> measure_coverage(const ExPolygon& domain, const ThickPolylines& paths, MorphingSpiralResult& result)
+std::optional<Coverage> measure_coverage(const ExPolygon& domain, const ThickPolylines& paths, MorphingSpiralResult& result,
+                                         bool per_segment)
 {
     double strip_area      = 0;
-    const Polygons covered = footprint(paths, strip_area);
+    const Polygons covered = per_segment ? segment_footprint(paths, strip_area) : footprint(paths, strip_area);
     const double area      = unscale<double>(unscale<double>(domain.area()));
     if (area <= 0)
         return std::nullopt;
