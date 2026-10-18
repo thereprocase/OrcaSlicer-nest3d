@@ -1038,6 +1038,7 @@ MorphingSpiralResult accordion_spiral(const ExPolygon& domain, double spacing_re
     if (!inner_edge || !outer_edge)
         return rejected("accordion: the middle strip split");
     const std::vector<Vec2d> outer_edge_mm = to_mm(*outer_edge);
+    const std::vector<Vec2d> inner_edge_mm = to_mm(*inner_edge);
 
     // Middle loop: along the inner edge's outward normals, the centre of the strip out to the outer
     // edge, as wide as the strip where one bead can fill it.
@@ -1241,17 +1242,27 @@ MorphingSpiralResult accordion_spiral(const ExPolygon& domain, double spacing_re
             std::reverse(cs.begin(), cs.end());
         std::vector<std::vector<Vec2d>> lanes;
         for (double c : cs) {
-            const std::vector<double> hits = line_hits(outer_edge_mm, u, v, c);
+            std::vector<double> hits = line_hits(outer_edge_mm, u, v, c);
             if (hits.size() < 2)
                 continue;
-            const double t0 = *std::min_element(hits.begin(), hits.end()), t1 = *std::max_element(hits.begin(), hits.end());
-            // Longest run of samples inside the strip and owned by this stretch.
+            std::sort(hits.begin(), hits.end());
+            std::vector<double> inner_hits = line_hits(inner_edge_mm, u, v, c);
+            std::sort(inner_hits.begin(), inner_hits.end());
+            const double t0 = hits.front(), t1 = hits.back();
+            // Longest run of samples inside the strip and owned by this stretch. A sample is inside a
+            // loop when an odd number of the loop's crossings lie before it on the line; counting
+            // crossings as t advances replaces a point-in-polygon test per sample, which dominated
+            // the run time on long loops.
             double run_s = 0, run_e = -1, cur_s = 0;
             bool in = false;
+            size_t outer_passed = 0, inner_passed = 0;
             for (double t = t0; t <= t1; t += step_mm / 2) {
+                while (outer_passed < hits.size() && hits[outer_passed] <= t)
+                    ++outer_passed;
+                while (inner_passed < inner_hits.size() && inner_hits[inner_passed] <= t)
+                    ++inner_passed;
                 const Vec2d q = u * t + v * c;
-                const bool keep = outer_edge->contains(Point::new_scale(q.x(), q.y())) &&
-                                  !inner_edge->contains(Point::new_scale(q.x(), q.y())) && stretch[ie_grid.nearest(q)];
+                const bool keep = outer_passed % 2 == 1 && inner_passed % 2 == 0 && stretch[ie_grid.nearest(q)];
                 if (keep && !in)
                     cur_s = t;
                 if (keep && t - cur_s > run_e - run_s) {
