@@ -831,7 +831,8 @@ void PrintObject::infill()
                                        islands % first_layer % last_layer % this->model_object()->name).str();
                 for (const auto &[reason, count] : reasons)
                     message += (boost::format(" %1% (%2%);") % reason % count).str();
-                this->active_step_add_warning(PrintStateBase::WarningLevel::NON_CRITICAL, message);
+                this->active_step_add_warning(PrintStateBase::WarningLevel::NON_CRITICAL, message,
+                                              PrintStateBase::SlicingMorphingSpiralFallback);
             }
         }
         /*  we could free memory now, but this would make this step not idempotent

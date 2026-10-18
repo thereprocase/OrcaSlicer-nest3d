@@ -68,14 +68,14 @@ Slic3r::TriangleMesh two_hole_plate()
     return mesh;
 }
 
-size_t current_morphing_warnings(const Slic3r::Print& print)
+std::vector<std::string> current_morphing_warnings(const Slic3r::Print& print)
 {
-    size_t count = 0;
+    std::vector<std::string> messages;
     for (const Slic3r::PrintObject* object : print.objects())
         for (const auto& warning : object->step_state_with_warnings(Slic3r::posInfill).warnings)
-            if (warning.current && warning.message.find("Morphing spiral") != std::string::npos)
-                ++count;
-    return count;
+            if (warning.current && warning.message_id == Slic3r::PrintStateBase::SlicingMorphingSpiralFallback)
+                messages.push_back(warning.message);
+    return messages;
 }
 
 void check_single_path(const Slic3r::MorphingSpiralResult& result, double min_spacing, double max_spacing)
@@ -237,16 +237,19 @@ TEST_CASE("A fallback island raises one slicing warning that a stock pattern cle
     Slic3r::Test::init_print(std::vector<Slic3r::TriangleMesh>{two_hole_plate()}, print, model, config);
     print.process();
     // Every two-hole island falls back, but they are reported as one aggregated warning.
-    CHECK(current_morphing_warnings(print) == 1);
+    const auto first = current_morphing_warnings(print);
+    REQUIRE(first.size() == 1);
+    CHECK(first.front().find("more than one hole") != std::string::npos);
 
-    // Regenerating infill with the spiral still selected must not double the report.
+    // Regenerating infill with the spiral still selected must give the same single report,
+    // with the same island count, not an accumulated one.
     config.set_deserialize_strict({{"infill_direction", "30"}});
     print.apply(model, config);
     print.process();
-    CHECK(current_morphing_warnings(print) == 1);
+    CHECK(current_morphing_warnings(print) == first);
 
     config.set_deserialize_strict({{"bottom_surface_pattern", "monotonic"}, {"top_surface_pattern", "monotonic"}});
     print.apply(model, config);
     print.process();
-    CHECK(current_morphing_warnings(print) == 0);
+    CHECK(current_morphing_warnings(print).empty());
 }
