@@ -953,21 +953,6 @@ double ray_hit(const std::vector<Vec2d>& loop, const Vec2d& o, const Vec2d& d)
     return best;
 }
 
-// Positions along u where the line {q : q . v = c} crosses the closed loop.
-std::vector<double> line_hits(const std::vector<Vec2d>& loop, const Vec2d& u, const Vec2d& v, double c)
-{
-    std::vector<double> out;
-    for (size_t i = 0; i < loop.size(); ++i) {
-        const Vec2d a = loop[i], b = loop[(i + 1) % loop.size()];
-        const double va = a.dot(v) - c, vb = b.dot(v) - c;
-        if (va == 0 || va * vb < 0) {
-            const double t = va == vb ? 0. : va / (va - vb);
-            out.push_back((a + (b - a) * t).dot(u));
-        }
-    }
-    return out;
-}
-
 // Outward normals of a counter-clockwise loop (right of the direction of travel).
 std::vector<Vec2d> outward_normals(const std::vector<Vec2d>& loop)
 {
@@ -992,6 +977,23 @@ std::optional<Polygon> single_loop(Polygons loops)
 
 constexpr double accordion_turn_reach = .7; // lane widths a fold's U-turn bead reaches past its lane end
 } // namespace
+
+// Positions along u where the line {q : q . v = c} crosses the closed loop.
+std::vector<double> morphing_spiral_detail::line_crossings(const std::vector<Vec2d>& loop, const Vec2d& u, const Vec2d& v, double c)
+{
+    std::vector<double> out;
+    for (size_t i = 0; i < loop.size(); ++i) {
+        const Vec2d a = loop[i], b = loop[(i + 1) % loop.size()];
+        const double va = a.dot(v) - c, vb = b.dot(v) - c;
+        // Half-open edges count a tangent vertex twice or not at all, so touching the
+        // loop never flips parity. Collinear edges contribute no crossings.
+        if ((va > 0) != (vb > 0)) {
+            const double t = va / (va - vb);
+            out.push_back((a + (b - a) * t).dot(u));
+        }
+    }
+    return out;
+}
 
 MorphingSpiralResult accordion_spiral(const ExPolygon& domain, double spacing_req, double min_spacing, double max_spacing)
 {
@@ -1038,6 +1040,7 @@ MorphingSpiralResult accordion_spiral(const ExPolygon& domain, double spacing_re
     if (!inner_edge || !outer_edge)
         return rejected("accordion: the middle strip split");
     const std::vector<Vec2d> outer_edge_mm = to_mm(*outer_edge);
+    const std::vector<Vec2d> inner_edge_mm = to_mm(*inner_edge);
 
     // Middle loop: along the inner edge's outward normals, the centre of the strip out to the outer
     // edge, as wide as the strip where one bead can fill it.
@@ -1135,7 +1138,9 @@ MorphingSpiralResult accordion_spiral(const ExPolygon& domain, double spacing_re
         }
     }
     const PointGrid middle_grid(middle, .5);
-    const PointGrid ie_grid(ie, .5);
+    // Coarse cells: fold samples lie up to a whole strip width (several millimetres at the wide
+    // ends) from the inner edge, and a fine grid makes each lookup walk many empty rings of cells.
+    const PointGrid ie_grid(ie, 2.);
     std::vector<double> widths(pts.size(), spacing);
     std::vector<size_t> near_mid(pts.size(), npos);
     for (size_t i = 0; i < pts.size(); ++i)
@@ -1241,17 +1246,27 @@ MorphingSpiralResult accordion_spiral(const ExPolygon& domain, double spacing_re
             std::reverse(cs.begin(), cs.end());
         std::vector<std::vector<Vec2d>> lanes;
         for (double c : cs) {
-            const std::vector<double> hits = line_hits(outer_edge_mm, u, v, c);
+            std::vector<double> hits = morphing_spiral_detail::line_crossings(outer_edge_mm, u, v, c);
             if (hits.size() < 2)
                 continue;
-            const double t0 = *std::min_element(hits.begin(), hits.end()), t1 = *std::max_element(hits.begin(), hits.end());
-            // Longest run of samples inside the strip and owned by this stretch.
+            std::sort(hits.begin(), hits.end());
+            std::vector<double> inner_hits = morphing_spiral_detail::line_crossings(inner_edge_mm, u, v, c);
+            std::sort(inner_hits.begin(), inner_hits.end());
+            const double t0 = hits.front(), t1 = hits.back();
+            // Longest run of samples inside the strip and owned by this stretch. A sample is inside a
+            // loop when an odd number of the loop's crossings lie before it on the line; counting
+            // crossings as t advances replaces a point-in-polygon test per sample, which dominated
+            // the run time on long loops.
             double run_s = 0, run_e = -1, cur_s = 0;
             bool in = false;
+            size_t outer_passed = 0, inner_passed = 0;
             for (double t = t0; t <= t1; t += step_mm / 2) {
+                while (outer_passed < hits.size() && hits[outer_passed] <= t)
+                    ++outer_passed;
+                while (inner_passed < inner_hits.size() && inner_hits[inner_passed] <= t)
+                    ++inner_passed;
                 const Vec2d q = u * t + v * c;
-                const bool keep = outer_edge->contains(Point::new_scale(q.x(), q.y())) &&
-                                  !inner_edge->contains(Point::new_scale(q.x(), q.y())) && stretch[ie_grid.nearest(q)];
+                const bool keep = outer_passed % 2 == 1 && inner_passed % 2 == 0 && stretch[ie_grid.nearest(q)];
                 if (keep && !in)
                     cur_s = t;
                 if (keep && t - cur_s > run_e - run_s) {

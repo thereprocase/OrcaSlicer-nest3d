@@ -36,6 +36,8 @@ MorphingSpiralResult fermat_spiral(const ExPolygon& bead_domain, double spacing_
 MorphingSpiralResult accordion_spiral(const ExPolygon& bead_domain, double spacing_mm, double min_spacing_mm, double max_spacing_mm);
 
 namespace morphing_spiral_detail {
+// Half-open crossings along u of the line q.dot(v) == c. Tangencies preserve parity.
+std::vector<double> line_crossings(const std::vector<Vec2d>& loop, const Vec2d& u, const Vec2d& v, double c);
 // The island in polar form around its hole centroid (or, for a disk, a centre that sees the whole
 // boundary): edge radii and their slopes at polar_angle(k) for k < polar_samples().
 struct PolarFrame
