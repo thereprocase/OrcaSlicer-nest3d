@@ -106,10 +106,20 @@ jobs:
       # SELF_HOSTED skips arm64 (no arm self-hosted server). amd64's empty arch
       # is load-bearing: it keeps the historical 'linux-clang' deps cache key and
       # the unsuffixed asset names.
+      # LINUX_RUNNER (a repository variable naming a self-hosted runner label)
+      # moves only the amd64 leg, and only for pushes and same-repository pull
+      # requests: a fork's pull request never reaches the self-hosted machine.
+      # The value is a single label, inserted into JSON unescaped. The runner must be
+      # Ubuntu 24.04 with its work folder at /home/runner/work, which apt-install-deps
+      # checks. There is no fallback: if that runner is offline, its jobs queue until
+      # they time out, so unset LINUX_RUNNER to move them back to hosted runners.
+      # unit_tests_linux_x86_64 repeats this expression; test_ci_contract.py keeps
+      # the two copies identical.
       matrix:
         include: ${{ fromJSON(vars.SELF_HOSTED
           && '[{"arch":"","os":"orca-lnx-server"}]'
-          || '[{"arch":"","os":"ubuntu-24.04"},{"arch":"aarch64","os":"ubuntu-24.04-arm"}]') }}
+          || format('[{{"arch":"","os":"{0}"}},{{"arch":"aarch64","os":"ubuntu-24.04-arm"}}]',
+            (vars.LINUX_RUNNER && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)) && vars.LINUX_RUNNER || 'ubuntu-24.04')) }}
     # Scheduled builds also run on this fork's integration branch.
     if: ${{ !cancelled() && (github.event_name != 'schedule' || github.repository == 'OrcaSlicer/OrcaSlicer' || (github.repository == 'thereprocase/OrcaSlicer-nest3d' && github.ref == 'refs/heads/repro-dev')) }}
     uses: ./.github/workflows/build_check_cache.yml
@@ -171,7 +181,8 @@ jobs:
     if: ${{ !cancelled() && success() }}
     uses: ./.github/workflows/unit_tests.yml
     with:
-      os: ${{ vars.SELF_HOSTED && 'orca-lnx-server' || 'ubuntu-24.04' }}
+      # Same runner as the amd64 build leg (see build_linux).
+      os: ${{ vars.SELF_HOSTED && 'orca-lnx-server' || ((vars.LINUX_RUNNER && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)) && vars.LINUX_RUNNER || 'ubuntu-24.04') }}
       artifact: ${{ github.sha }}-tests-linux-x86_64
   unit_tests_linux_aarch64:
     name: Linux aarch64
