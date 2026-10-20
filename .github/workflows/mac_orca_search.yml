@@ -1,4 +1,4 @@
-# Launches the PR's macOS arm64 app bundle on a hosted runner with an isolated data directory,
+# Launches the PR's macOS app bundles (arm64 and x86_64) on hosted runners with an isolated data directory,
 # drives the sidebar filament combo with cliclick and uploads a screenshot after every step.
 # Runs only on pushes to this branch; the bundle comes from the fork's build run.
 name: macOS Orca filament search
@@ -13,17 +13,23 @@ permissions:
 
 env:
   BUILD_RUN_ID: "39463011863"
-  BUNDLE: OrcaSlicer_Mac_bundle_arm64_16f49782c9f7facacd14d88369022f57fff54395
+  HEAD_SHA: 16f49782c9f7facacd14d88369022f57fff54395
 
 jobs:
   search:
-    runs-on: macos-14
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { runner: macos-14, arch: arm64 }
+          - { runner: macos-15-intel, arch: x86_64 }
+    runs-on: ${{ matrix.runner }}
     timeout-minutes: 30
     steps:
       - name: Download app bundle
         uses: actions/download-artifact@v7
         with:
-          name: ${{ env.BUNDLE }}
+          name: OrcaSlicer_Mac_bundle_${{ matrix.arch }}_${{ env.HEAD_SHA }}
           run-id: ${{ env.BUILD_RUN_ID }}
           github-token: ${{ github.token }}
           path: bundle
@@ -104,7 +110,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v7
         with:
-          name: mac-orca-search-arm64
+          name: mac-orca-search-${{ matrix.arch }}
           path: |
             *.png
             orca-stdout.log
