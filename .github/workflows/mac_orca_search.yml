@@ -15,8 +15,10 @@ env:
   BUILD_RUN_ID: "39463011863"
   HEAD_SHA: 16f49782c9f7facacd14d88369022f57fff54395
   # Screen points on the 1920x1080 runner display, read off the previous run's captures.
-  PREPARE_X: "481"
+  PREPARE_X: ""
   PREPARE_Y: "130"
+  CALIBRATION_X: "1025"
+  CALIBRATION_Y: "130"
   COMBO_X: ""
   COMBO_Y: ""
 
@@ -103,7 +105,17 @@ jobs:
           sample "$(cat orca.pid)" 3 -file orca-sample.txt >/dev/null 2>&1 || true
 
       # Loading the 3D scene is where a GPU-less macOS VM deadlocks, so sample here too.
+      # The Calibration tab has a search-enabled filament combo and no 3D scene.
+      - name: Open the Calibration tab
+        if: env.CALIBRATION_X != ''
+        run: |
+          cliclick c:"$CALIBRATION_X","$CALIBRATION_Y"
+          sleep 15
+          screencapture -x 04-calibration.png
+          sample "$(cat orca.pid)" 3 -file orca-sample-calibration.txt >/dev/null 2>&1 || true
+
       - name: Open the Prepare tab
+        if: env.PREPARE_X != ''
         run: |
           cliclick c:"$PREPARE_X","$PREPARE_Y"
           sleep 20
