@@ -1811,6 +1811,11 @@ void PreferencesDialog::create_items()
         SPEED_DIAL_RECENT_COUNT_MAX);
     g_sizer->Add(item_speed_dial_recents);
 
+    auto item_filament_search = create_item_checkbox(_L("Search in filament lists"),
+        _L("If enabled, filament dropdowns open with a search field. Type to filter the list by name."),
+        "enable_filament_search", _L("(Requires restart)"));
+    g_sizer->Add(item_filament_search);
+
 #ifdef SLIC3R_CAD
     auto item_cad_feature      = create_item_checkbox(_L("CAD feature (experimental)"),
         _L("With this option enabled, the Design tab is shown, where models can be built and edited "

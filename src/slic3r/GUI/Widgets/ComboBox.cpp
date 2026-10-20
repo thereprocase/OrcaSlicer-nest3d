@@ -15,6 +15,8 @@
 #include <wx/gdicmn.h>
 #include <wx/event.h>
 #include "slic3r/GUI/Widgets/StateColor.hpp"
+#include "slic3r/GUI/GUI_App.hpp"
+#include "libslic3r/AppConfig.hpp"
 
 BEGIN_EVENT_TABLE(ComboBox, TextInput)
 
@@ -222,6 +224,12 @@ bool ComboBox::SetFont(wxFont const& font)
         return GetTextCtrl()->SetFont(font);
     else
         return TextInput::SetFont(font);
+}
+
+void ComboBox::EnableTypeToFilter()
+{
+    if (Slic3r::GUI::wxGetApp().app_config->get_bool("enable_filament_search"))
+        drop.EnableSearch();
 }
 
 int ComboBox::Append(const wxString &item, const wxBitmap &bitmap, int style)
