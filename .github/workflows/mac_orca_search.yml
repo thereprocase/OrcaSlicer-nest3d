@@ -109,13 +109,15 @@ jobs:
       - name: Open the Calibration tab
         if: env.CALIBRATION_X != ''
         run: |
+          # The modal update-check dialog arrives late and swallows clicks: wait for it and
+          # press its Cancel button first. Without the dialog that point is empty page.
+          sleep 20
+          screencapture -x 04-before-calibration.png
+          cliclick c:1229,755
+          sleep 3
           cliclick c:"$CALIBRATION_X","$CALIBRATION_Y"
           sleep 15
-          screencapture -x 04-calibration.png
-          # The update-check dialog arrives late and covers the page; its Cancel button.
-          cliclick c:1229,755
-          sleep 5
-          screencapture -x 05-calibration-clear.png
+          screencapture -x 05-calibration.png
           sample "$(cat orca.pid)" 3 -file orca-sample-calibration.txt >/dev/null 2>&1 || true
 
       - name: Open the Prepare tab
