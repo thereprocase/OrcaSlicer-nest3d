@@ -1,0 +1,111 @@
+# Launches the PR's macOS arm64 app bundle on a hosted runner with an isolated data directory,
+# drives the sidebar filament combo with cliclick and uploads a screenshot after every step.
+# Runs only on pushes to this branch; the bundle comes from the fork's build run.
+name: macOS Orca filament search
+
+on:
+  push:
+    branches: [ci/mac-gui-diagnostic]
+
+permissions:
+  contents: read
+  actions: read
+
+env:
+  BUILD_RUN_ID: "39463011863"
+  BUNDLE: OrcaSlicer_Mac_bundle_arm64_16f49782c9f7facacd14d88369022f57fff54395
+
+jobs:
+  search:
+    runs-on: macos-14
+    timeout-minutes: 30
+    steps:
+      - name: Download app bundle
+        uses: actions/download-artifact@v7
+        with:
+          name: ${{ env.BUNDLE }}
+          run-id: ${{ env.BUILD_RUN_ID }}
+          github-token: ${{ github.token }}
+          path: bundle
+
+      - name: Unpack
+        run: |
+          mkdir -p app
+          tar -xzf bundle/*.tar.gz -C app
+          APP=$(find app -maxdepth 3 -name '*.app' -type d | head -1)
+          echo "APP=$PWD/$APP" >> "$GITHUB_ENV"
+          xattr -cr "$APP"
+          ls "$APP/Contents/MacOS"
+
+      # Skips the setup wizard with stock P1S presets; no account, no network features.
+      - name: Isolated data directory
+        run: |
+          mkdir -p "$HOME/orca-test"
+          cat > "$HOME/orca-test/OrcaSlicer.conf" <<'EOF'
+          {
+              "app": {
+                  "dark_color_mode": "0",
+                  "enable_ota": false,
+                  "language": "en_US",
+                  "preset_bundle_auto_update": false,
+                  "region": "North America",
+                  "show_daily_tips": false,
+                  "show_splash_screen": false,
+                  "stealth_mode": true,
+                  "user_mode": "simple"
+              },
+              "filaments": [
+                  "Bambu PLA Basic @BBL P1S 0.4 nozzle",
+                  "Bambu PLA Matte @BBL P1S 0.4 nozzle",
+                  "Bambu PETG HF @BBL P1S 0.4 nozzle",
+                  "Generic PETG",
+                  "Generic PETG HF @BBL P1S 0.4 nozzle",
+                  "Generic PLA",
+                  "Generic PLA Silk",
+                  "Elegoo PLA Matte @System",
+                  "PolyLite PLA @System"
+              ],
+              "firstguide": { "finish": true },
+              "models": [ { "model": "Bambu Lab P1S", "nozzle_diameter": "0.4", "vendor": "BBL" } ],
+              "presets": { "machine": "Bambu Lab P1S 0.4 nozzle" }
+          }
+          EOF
+
+      - name: Install cliclick
+        run: brew install cliclick
+
+      - name: Launch
+        run: |
+          "$APP/Contents/MacOS/OrcaSlicer" --datadir "$HOME/orca-test" > orca-stdout.log 2>&1 &
+          echo $! > orca.pid
+          sleep 60
+          screencapture -x 01-launched.png
+          # Dismiss any startup dialog, then capture again.
+          cliclick kp:esc
+          sleep 3
+          screencapture -x 02-after-esc.png
+          system_profiler SPDisplaysDataType | grep -i resolution || true
+
+      - name: Drive the filament combo
+        if: env.COMBO_X != ''
+        run: |
+          shot() { sleep 2; screencapture -x "$1"; }
+          cliclick c:"$COMBO_X","$COMBO_Y"; shot 10-open.png
+          cliclick t:"pla"; shot 11-pla.png
+          cliclick kp:esc; sleep 1; cliclick c:"$COMBO_X","$COMBO_Y"; sleep 1
+          cliclick t:"generic petg"; shot 12-generic-petg.png
+          cliclick kp:arrow-down; shot 13-down.png
+          cliclick kp:return; shot 14-enter.png
+          cliclick c:"$COMBO_X","$COMBO_Y"; sleep 1
+          cliclick t:"zzqx"; shot 15-no-match.png
+          cliclick kp:esc; shot 16-esc.png
+
+      - name: Upload captures and log
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: mac-orca-search-arm64
+          path: |
+            *.png
+            orca-stdout.log
+          if-no-files-found: warn

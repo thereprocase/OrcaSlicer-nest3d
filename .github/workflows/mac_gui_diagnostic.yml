@@ -1,10 +1,9 @@
 # Probes whether a GitHub-hosted macOS runner has a usable GUI session: a WindowServer, screen
-# capture and System Events keystrokes into a focused text field. Runs only on pushes to this branch.
+# capture and System Events keystrokes into a focused text field. Manual dispatch only.
 name: macOS GUI diagnostic
 
 on:
-  push:
-    branches: [ci/mac-gui-diagnostic]
+  workflow_dispatch:
 
 permissions:
   contents: read
