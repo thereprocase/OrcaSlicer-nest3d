@@ -125,6 +125,10 @@ jobs:
       - name: Open the Prepare tab
         if: matrix.route == 'prepare'
         run: |
+          sleep 20
+          screencapture -x 03-before-prepare.png
+          cliclick c:1229,755
+          sleep 3
           cliclick c:"$PREPARE_X","$PREPARE_Y"
           sleep 20
           screencapture -x 03-prepare.png
