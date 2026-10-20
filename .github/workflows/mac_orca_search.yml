@@ -14,6 +14,11 @@ permissions:
 env:
   BUILD_RUN_ID: "39463011863"
   HEAD_SHA: 16f49782c9f7facacd14d88369022f57fff54395
+  # Screen points on the 1920x1080 runner display, read off the previous run's captures.
+  PREPARE_X: "481"
+  PREPARE_Y: "130"
+  COMBO_X: ""
+  COMBO_Y: ""
 
 jobs:
   search:
@@ -97,6 +102,14 @@ jobs:
           # A GPU-less GL deadlock leaves the main thread parked; a stack sample shows it.
           sample "$(cat orca.pid)" 3 -file orca-sample.txt >/dev/null 2>&1 || true
 
+      # Loading the 3D scene is where a GPU-less macOS VM deadlocks, so sample here too.
+      - name: Open the Prepare tab
+        run: |
+          cliclick c:"$PREPARE_X","$PREPARE_Y"
+          sleep 20
+          screencapture -x 03-prepare.png
+          sample "$(cat orca.pid)" 3 -file orca-sample-prepare.txt >/dev/null 2>&1 || true
+
       - name: Drive the filament combo
         if: env.COMBO_X != ''
         run: |
@@ -119,5 +132,5 @@ jobs:
           path: |
             *.png
             orca-stdout.log
-            orca-sample.txt
+            orca-sample*.txt
           if-no-files-found: warn
