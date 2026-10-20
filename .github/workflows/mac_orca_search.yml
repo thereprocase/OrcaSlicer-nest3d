@@ -1,5 +1,5 @@
-# Launches the PR's macOS app bundles (arm64 and x86_64) on hosted runners with an isolated
-# data directory, drives the sidebar filament combo with cliclick and uploads a screenshot after every step.
+# Launches the PR's macOS arm64 app bundle on a hosted runner with an isolated data directory,
+# drives the sidebar filament combo with cliclick and uploads a screenshot after every step.
 # Runs only on pushes to this branch; the bundle comes from the fork's build run.
 name: macOS Orca filament search
 
@@ -28,25 +28,35 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          # Intel macOS VMs fall back to software GL and deadlock loading the 3D scene,
-          # so the Intel leg uses the Calibration tab's filament combo instead.
-          - { runner: macos-14, arch: arm64, route: prepare }
-          - { runner: macos-15-intel, arch: x86_64, route: calibration }
+          - { runner: macos-14, arch: arm64, route: prepare, source: pr }
+          # Control: upstream's released app on the same runner, to separate runner
+          # behaviour from the PR's.
+          - { runner: macos-14, arch: arm64-release-2.4.2, route: prepare, source: release }
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 30
     steps:
       - name: Download app bundle
+        if: matrix.source == 'pr'
         uses: actions/download-artifact@v7
         with:
-          name: OrcaSlicer_Mac_bundle_${{ matrix.arch }}_${{ env.HEAD_SHA }}
+          name: OrcaSlicer_Mac_bundle_arm64_${{ env.HEAD_SHA }}
           run-id: ${{ env.BUILD_RUN_ID }}
           github-token: ${{ github.token }}
           path: bundle
 
+      - name: Download upstream release
+        if: matrix.source == 'release'
+        run: |
+          curl -fsSL -o orca.dmg https://github.com/OrcaSlicer/OrcaSlicer/releases/download/v2.4.2/OrcaSlicer_Mac_universal_V2.4.2.dmg
+          shasum -a 256 orca.dmg
+          hdiutil attach -nobrowse -readonly -mountpoint /Volumes/orca orca.dmg
+          mkdir -p app && cp -R /Volumes/orca/OrcaSlicer.app app/
+          hdiutil detach /Volumes/orca
+
       - name: Unpack
         run: |
           mkdir -p app
-          tar -xzf bundle/*.tar.gz -C app
+          if [ -d bundle ]; then tar -xzf bundle/*.tar.gz -C app; fi
           APP=$(find app -maxdepth 3 -name 'OrcaSlicer.app' -type d | head -1)
           test -n "$APP" || { echo 'OrcaSlicer.app not found'; find app -maxdepth 3; exit 1; }
           echo "APP=$PWD/$APP" >> "$GITHUB_ENV"
