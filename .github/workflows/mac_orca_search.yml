@@ -112,6 +112,10 @@ jobs:
           cliclick c:"$CALIBRATION_X","$CALIBRATION_Y"
           sleep 15
           screencapture -x 04-calibration.png
+          # The update-check dialog arrives late and covers the page; its Cancel button.
+          cliclick c:1229,755
+          sleep 5
+          screencapture -x 05-calibration-clear.png
           sample "$(cat orca.pid)" 3 -file orca-sample-calibration.txt >/dev/null 2>&1 || true
 
       - name: Open the Prepare tab
