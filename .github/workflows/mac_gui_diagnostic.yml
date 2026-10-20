@@ -32,21 +32,36 @@ jobs:
           screencapture -x desktop.png
           ls -l desktop.png
 
+      - name: Privacy grants (TCC)
+        run: |
+          for db in "/Library/Application Support/com.apple.TCC/TCC.db" "$HOME/Library/Application Support/com.apple.TCC/TCC.db"; do
+            echo "== $db"
+            sudo sqlite3 "$db" "select service, client, auth_value from access where service in ('kTCCServiceAccessibility','kTCCServiceAppleEvents','kTCCServicePostEvent','kTCCServiceScreenCapture') order by service;" || true
+          done
+
+      # No AppleEvents to TextEdit: opening a file needs no automation consent, so a hang here
+      # cannot be a consent prompt. Each event source gets its own short timeout.
       - name: Keystrokes into a focused text field
         run: |
-          open -a TextEdit
-          sleep 5
-          osascript -e 'tell application "TextEdit" to activate' -e 'tell application "TextEdit" to make new document'
-          sleep 2
-          if osascript -e 'tell application "System Events" to keystroke "typed by System Events"'; then
-            echo "KEYSTROKE_SENT"
+          printf '' > "$PWD/probe.txt"
+          open -a TextEdit "$PWD/probe.txt"
+          sleep 6
+          screencapture -x 1-textedit-open.png
+          if timeout 30 osascript -e 'tell application "System Events" to keystroke "typed by System Events"'; then
+            echo "SYSTEM_EVENTS_KEYSTROKE_SENT"
           else
-            echo "KEYSTROKE_REFUSED"
+            echo "SYSTEM_EVENTS_KEYSTROKE_FAILED rc=$?"
           fi
           sleep 1
-          osascript -e 'tell application "TextEdit" to get text of front document' || echo "READBACK_FAILED"
-          osascript -e 'tell application "System Events" to get name of first application process whose frontmost is true' || true
-          screencapture -x textedit.png
+          screencapture -x 2-after-system-events.png
+          brew install cliclick >/dev/null 2>&1 || echo "CLICLICK_INSTALL_FAILED"
+          if timeout 30 cliclick t:" typed by cliclick"; then
+            echo "CLICLICK_KEYSTROKE_SENT"
+          else
+            echo "CLICLICK_KEYSTROKE_FAILED rc=$?"
+          fi
+          sleep 1
+          screencapture -x 3-after-cliclick.png
 
       - name: Upload captures
         if: always()
