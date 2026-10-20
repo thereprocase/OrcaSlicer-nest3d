@@ -28,10 +28,10 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - { runner: macos-14, arch: arm64, route: prepare, source: pr }
-          # Control: upstream's released app on the same runner, to separate runner
-          # behaviour from the PR's.
-          - { runner: macos-14, arch: arm64-release-2.4.2, route: prepare, source: release }
+          # The PR's universal DMG beside upstream main's nightly (same base, no search
+          # changes) on the same runner, to separate a PR effect from an upstream one.
+          - { runner: macos-14, arch: arm64-pr, route: prepare, source: pr }
+          - { runner: macos-14, arch: arm64-upstream-nightly, route: prepare, source: nightly }
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 30
     steps:
@@ -39,29 +39,31 @@ jobs:
         if: matrix.source == 'pr'
         uses: actions/download-artifact@v7
         with:
-          name: OrcaSlicer_Mac_bundle_arm64_${{ env.HEAD_SHA }}
+          name: OrcaSlicer_Mac_universal_V2.5.0-dev
           run-id: ${{ env.BUILD_RUN_ID }}
           github-token: ${{ github.token }}
           path: bundle
 
-      - name: Download upstream release
-        if: matrix.source == 'release'
+      - name: Download upstream nightly
+        if: matrix.source == 'nightly'
         run: |
-          curl -fsSL -o orca.dmg https://github.com/OrcaSlicer/OrcaSlicer/releases/download/v2.4.2/OrcaSlicer_Mac_universal_V2.4.2.dmg
-          shasum -a 256 orca.dmg
-          hdiutil attach -nobrowse -readonly -mountpoint /Volumes/orca orca.dmg
-          mkdir -p app && cp -R /Volumes/orca/OrcaSlicer.app app/
-          hdiutil detach /Volumes/orca
+          mkdir -p bundle
+          curl -fsSL -o bundle/orca.dmg https://github.com/OrcaSlicer/OrcaSlicer/releases/download/nightly-builds/OrcaSlicer_Mac_universal_nightly.dmg
 
       - name: Unpack
         run: |
           mkdir -p app
-          if [ -d bundle ]; then tar -xzf bundle/*.tar.gz -C app; fi
+          DMG=$(find bundle -name '*.dmg' | head -1)
+          shasum -a 256 "$DMG"
+          hdiutil attach -nobrowse -readonly -mountpoint /Volumes/orca "$DMG"
+          cp -R /Volumes/orca/OrcaSlicer.app app/
+          hdiutil detach /Volumes/orca
           APP=$(find app -maxdepth 3 -name 'OrcaSlicer.app' -type d | head -1)
           test -n "$APP" || { echo 'OrcaSlicer.app not found'; find app -maxdepth 3; exit 1; }
           echo "APP=$PWD/$APP" >> "$GITHUB_ENV"
           xattr -cr "$APP"
           ls "$APP/Contents/MacOS"
+          /usr/libexec/PlistBuddy -c "Print :CFBundleShortVersionString" -c "Print :CFBundleVersion" "$APP/Contents/Info.plist" || true
 
       # Skips the setup wizard with stock P1S presets; no account, no network features.
       - name: Isolated data directory
