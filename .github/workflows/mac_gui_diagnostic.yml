@@ -40,14 +40,14 @@ jobs:
           done
 
       # No AppleEvents to TextEdit: opening a file needs no automation consent, so a hang here
-      # cannot be a consent prompt. Each event source gets its own short timeout.
+      # cannot be a consent prompt. Each event source gets a 30 s alarm (macOS has no timeout(1)).
       - name: Keystrokes into a focused text field
         run: |
           printf '' > "$PWD/probe.txt"
           open -a TextEdit "$PWD/probe.txt"
           sleep 6
           screencapture -x 1-textedit-open.png
-          if timeout 30 osascript -e 'tell application "System Events" to keystroke "typed by System Events"'; then
+          if perl -e 'alarm shift; exec @ARGV' 30 osascript -e 'tell application "System Events" to keystroke "typed by System Events"'; then
             echo "SYSTEM_EVENTS_KEYSTROKE_SENT"
           else
             echo "SYSTEM_EVENTS_KEYSTROKE_FAILED rc=$?"
@@ -55,7 +55,7 @@ jobs:
           sleep 1
           screencapture -x 2-after-system-events.png
           brew install cliclick >/dev/null 2>&1 || echo "CLICLICK_INSTALL_FAILED"
-          if timeout 30 cliclick t:" typed by cliclick"; then
+          if perl -e 'alarm shift; exec @ARGV' 30 cliclick t:" typed by cliclick"; then
             echo "CLICLICK_KEYSTROKE_SENT"
           else
             echo "CLICLICK_KEYSTROKE_FAILED rc=$?"
