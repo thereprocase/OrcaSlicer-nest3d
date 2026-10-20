@@ -38,7 +38,8 @@ jobs:
         run: |
           mkdir -p app
           tar -xzf bundle/*.tar.gz -C app
-          APP=$(find app -maxdepth 3 -name '*.app' -type d | head -1)
+          APP=$(find app -maxdepth 3 -name 'OrcaSlicer.app' -type d | head -1)
+          test -n "$APP" || { echo 'OrcaSlicer.app not found'; find app -maxdepth 3; exit 1; }
           echo "APP=$PWD/$APP" >> "$GITHUB_ENV"
           xattr -cr "$APP"
           ls "$APP/Contents/MacOS"
@@ -82,7 +83,9 @@ jobs:
 
       - name: Launch
         run: |
-          "$APP/Contents/MacOS/OrcaSlicer" --datadir "$HOME/orca-test" > orca-stdout.log 2>&1 &
+          BIN=$(/usr/libexec/PlistBuddy -c "Print :CFBundleExecutable" "$APP/Contents/Info.plist")
+          echo "Launching $APP/Contents/MacOS/$BIN"
+          "$APP/Contents/MacOS/$BIN" --datadir "$HOME/orca-test" > orca-stdout.log 2>&1 &
           echo $! > orca.pid
           sleep 60
           screencapture -x 01-launched.png
