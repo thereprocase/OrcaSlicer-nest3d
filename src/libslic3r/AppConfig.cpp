@@ -384,7 +384,7 @@ void AppConfig::set_defaults()
         set_bool("enable_multi_machine", false);
 
     if (get("enable_filament_search").empty())
-        set_bool("enable_filament_search", false);
+        set_bool("enable_filament_search", true);
 
     if (get("drc_bits").empty())
         set("drc_bits", DRC_BITS_DEFAULT_STR);
