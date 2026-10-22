@@ -35,8 +35,9 @@ them filled; the model only ever over-estimates the space a part takes.
   skipped, which keeps the 12 mm growth of tree supports near the cost of the outline.
 - **Support.** By default a part that prints with support (`enable_support`) has every column
   filled down to the bed. With "Generate supports before arranging", the adapter instead combines
-  native sliced model geometry with support extrusion envelopes, including their widths and layer
-  heights. Model brims, support base, interface, tree brim and raft paths occupy space; unused
+  native sliced model geometry with support extrusion envelopes, including their widths and actual
+  extrusion heights. Thick bridges and combined infill can extend below the nominal layer bottom.
+  Model brims, support base, interface, tree brim and raft paths occupy space; unused
   columns remain available. Automatic spacing retains 1 mm per part after replacing the estimated
   support allowance with actual geometry; an explicit gap applies outside that geometry.
 - **Fixed items.** Unselected instances are rasterized from their meshes in their current pose.
@@ -195,4 +196,5 @@ check outcomes on the arranged model's exact printed geometry, leaving the engin
 
 The `[Nest3DSupport]` pipeline tests in `tests/fff_print/test_nest3d_support.cpp` check generated
 support and raft footprints, bead clearance for rotated copies, object overrides and painted
-enforcers, fixed supported overhangs, and cancellation without source edits.
+enforcers, fixed supported overhangs, thick bridge clearance, material compensation, model brims,
+and cancellation without source edits.

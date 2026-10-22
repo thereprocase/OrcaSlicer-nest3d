@@ -8,6 +8,7 @@
 #include "libslic3r/ClipperUtils.hpp"
 #include "libslic3r/Config.hpp"
 #include "libslic3r/Exception.hpp"
+#include "libslic3r/ExtrusionEntity.hpp"
 #include "libslic3r/ExtrusionEntityCollection.hpp"
 #include "libslic3r/Layer.hpp"
 #include "libslic3r/Model.hpp"
@@ -27,6 +28,7 @@
 
 #include <atomic>
 #include <cstddef>
+#include <limits>
 #include <string>
 #include <utility>
 #include <vector>
@@ -354,6 +356,56 @@ TEST_CASE("Generated support blocks a fixed overhang that otherwise admits a sho
     // It can only fit below the cap, where generated support leaves insufficient room.
     nest3d::arrange_polygons(items, fixed, bed(22, 14), arrange_params(), settings, config, 1);
     CHECK(items.front().is_arranged() == !supports);
+}
+
+TEST_CASE("Support-aware stacking reserves the full height of thick bridge beads", "[Nest3DSupport]")
+{
+    constexpr double part_height = 5;
+    constexpr double clearance = 2;
+    DynamicPrintConfig config = support_config();
+    config.set_deserialize_strict({{"enable_support", "0"}, {"thick_bridges", "1"}, {"bridge_flow", "1"}});
+    Model fixed_model = Test::model("thick bridge cap", supported_cap());
+    Print reference;
+    reference.set_status_silent();
+    reference.apply(fixed_model, config);
+    reference.process();
+    bool thick_bridge = false;
+    double bead_bottom = std::numeric_limits<double>::infinity();
+    double nominal_bottom = bead_bottom;
+    for (const PrintObject *object : reference.objects())
+        for (const Layer *layer : object->layers())
+            for (const LayerRegion *region : layer->regions()) {
+                const auto inspect = [&](const ExtrusionPath &path) {
+                    if (is_bridge(path.role()) && path.height > layer->height + EPSILON) {
+                        thick_bridge = true;
+                        const double bottom = layer->print_z - path.height;
+                        if (bottom < bead_bottom) {
+                            bead_bottom = bottom;
+                            nominal_bottom = layer->print_z - layer->height;
+                        }
+                    }
+                };
+                for_each_extrusion_path(region->perimeters, inspect);
+                for_each_extrusion_path(region->fills, inspect);
+            }
+    REQUIRE(thick_bridge);
+    // The nominal layer bottom admits this part, but the real bridge bead hangs lower.
+    REQUIRE(nominal_bottom >= part_height + clearance - EPSILON);
+    REQUIRE(bead_bottom < part_height + clearance - EPSILON);
+
+    auto fixed = items_of(fixed_model, config);
+    Model selected_model = Test::model("part below bridge", make_cube(4, 4, part_height));
+    auto items = items_of(selected_model, config);
+    auto settings = support_settings();
+    settings.allow_stacking = true;
+    settings.vertical_gap_mm = float(clearance);
+    auto nominal_items = items;
+    auto nominal_settings = settings;
+    nominal_settings.generate_supports = false;
+    nest3d::arrange_polygons(nominal_items, fixed, bed(22, 14), arrange_params(), nominal_settings, config, 1);
+    REQUIRE(nominal_items.front().is_arranged());
+    nest3d::arrange_polygons(items, fixed, bed(22, 14), arrange_params(), settings, config, 1);
+    CHECK_FALSE(items.front().is_arranged());
 }
 
 TEST_CASE("Cancelling support preparation leaves placements and source objects untouched", "[Nest3DSupport]")

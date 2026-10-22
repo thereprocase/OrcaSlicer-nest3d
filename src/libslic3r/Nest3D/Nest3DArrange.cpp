@@ -7,6 +7,7 @@
 #include "libslic3r/ClipperUtils.hpp"
 #include "libslic3r/Exception.hpp"
 #include "libslic3r/ExPolygon.hpp"
+#include "libslic3r/ExtrusionEntity.hpp"
 #include "libslic3r/ExtrusionEntityCollection.hpp"
 #include "libslic3r/Geometry.hpp"
 #include "libslic3r/Geometry/ConvexHull.hpp"
@@ -216,6 +217,15 @@ void append_layer_geometry(std::vector<Triangle> &tris, const ExPolygons &area, 
         }
 }
 
+double extrusion_height(const ExtrusionEntityCollection &extrusions, double layer_height)
+{
+    double height = layer_height;
+    for_each_extrusion_path(extrusions, [&height](const ExtrusionPath &path) {
+        height = std::max(height, double(path.height));
+    });
+    return height;
+}
+
 // Generate in the candidate's final Z orientation: rotating one support result would also rotate
 // world-aligned support patterns. The clone retains modifiers, blockers/enforcers, painted facets,
 // variable layers and their configuration without invalidating the live project's slicing state.
@@ -273,16 +283,24 @@ HeightMap supported_height_map(const ArrangePolygon &ap, const std::vector<Trian
             // Use native sliced geometry rather than the unscaled model mesh. This includes
             // filament shrinkage, XY compensation, modifiers, raft lift and variable layer heights.
             Polygons area = to_polygons(layer->lslices);
-            for (const LayerRegion *region : layer->regions())
+            double height = layer->height;
+            for (const LayerRegion *region : layer->regions()) {
                 region->perimeters.polygons_covered_by_width(area, float(SCALED_EPSILON));
-            append_layer_geometry(tris, union_ex(area), center, layer->print_z - layer->height, layer->print_z);
+                region->fills.polygons_covered_by_width(area, float(SCALED_EPSILON));
+                height = extrusion_height(region->perimeters, height);
+                height = extrusion_height(region->fills, height);
+            }
+            // Thick bridge beads and combined infill can extend farther below the nozzle than the
+            // nominal layer thickness. Reserve their full height when checking vertical clearance.
+            append_layer_geometry(tris, union_ex(area), center, layer->print_z - height, layer->print_z);
         }
         for (const SupportLayer *layer : po->support_layers()) {
             check_canceled(params);
             // Include the physical width of every support extrusion (base, interface, tree brim and
             // raft), not its centerline or a polygon enclosing unused space between sparse lines.
             const ExPolygons area = union_ex(layer->support_fills.polygons_covered_by_width(float(SCALED_EPSILON)));
-            append_layer_geometry(tris, area, center, layer->print_z - layer->height, layer->print_z);
+            const double height = extrusion_height(layer->support_fills, layer->height);
+            append_layer_geometry(tris, area, center, layer->print_z - height, layer->print_z);
         }
     }
     for (const auto &group : print.skirt_brim_groups())
