@@ -43,7 +43,7 @@ Key key(const StaggeredWall &wall)
             auto b = std::make_pair(points[i].x(), points[i].y());
             if (b < a) std::swap(a, b);
             if (a != b)
-                out.edges.push_back({a.first, a.second, b.first, b.second, scale_(path.width)});
+                out.edges.push_back({a.first, a.second, b.first, b.second, static_cast<coord_t>(scale_(path.width))});
         }
     }
     std::sort(out.edges.begin(), out.edges.end());
