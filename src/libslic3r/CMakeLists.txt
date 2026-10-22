@@ -27,6 +27,8 @@ if (SLIC3R_CAD)
 endif ()
 
 set(lisbslic3r_sources
+    StaggeredPerimeters.cpp
+    StaggeredPerimeters.hpp
     AABBMesh.cpp
     AABBMesh.hpp
     AABBTreeIndirect.hpp

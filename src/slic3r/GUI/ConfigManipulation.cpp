@@ -486,7 +486,7 @@ void ConfigManipulation::update_print_fff_config(DynamicPrintConfig* config, con
            ! config->opt_bool("detect_thin_wall") &&
            ! config->opt_bool("overhang_reverse") &&
             config->opt_enum<TimelapseType>("timelapse_type") == TimelapseType::tlTraditional &&
-            !config->opt_bool("enable_wrapping_detection")))
+            !config->opt_bool("enable_wrapping_detection") && !config->opt_bool("staggered_perimeters")))
     {
         DynamicPrintConfig new_conf = *config;
         auto answer = show_spiral_mode_settings_dialog(is_object_config);
@@ -501,6 +501,7 @@ void ConfigManipulation::update_print_fff_config(DynamicPrintConfig* config, con
             new_conf.set_key_value("overhang_reverse", new ConfigOptionBool(false));
             new_conf.set_key_value("timelapse_type", new ConfigOptionEnum<TimelapseType>(tlTraditional));
             new_conf.set_key_value("enable_wrapping_detection", new ConfigOptionBool(false));
+            new_conf.set_key_value("staggered_perimeters", new ConfigOptionBool(false));
             sparse_infill_density = 0;
             timelapse_type = TimelapseType::tlTraditional;
             support = false;

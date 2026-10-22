@@ -3439,6 +3439,21 @@ void GCode::_do_export(Print& print, GCodeOutputStream &file, ThumbnailsGenerato
     this->apply_print_config(print.config());
     m_config.apply(print.default_object_config());
     m_config.apply(print.default_region_config());
+    m_has_staggered_perimeters = false;
+    m_staggered_clearance = 0.;
+    for (const PrintObject *object : print.objects()) {
+        for (const PrintRegion &region : object->all_regions()) {
+            if (!region.config().staggered_perimeters.value) continue;
+            // Scarf is an export-only setting and can change after perimeters
+            // were cached. Reject it here too, before constructing sloped loops.
+            if (region.config().seam_slope_type != SeamScarfType::None || region.config().zaa_enabled)
+                throw Slic3r::InvalidArgument("Staggered perimeters cannot be exported with scarf seams or Z contouring.");
+            m_has_staggered_perimeters = true;
+        }
+        for (const Layer *layer : object->layers())
+            m_staggered_clearance = std::max(m_staggered_clearance, 0.5 * layer->height);
+    }
+
 
     //m_volumetric_speed = DoExport::autospeed_volumetric_limit(print);
     print.throw_if_canceled();
@@ -9044,7 +9059,8 @@ std::string GCode::_extrude(const ExtrusionPath &path, const std::string &path_d
 
     const auto get_sloped_z = [&sloped, this](double z_ratio) {
         const auto height = sloped->height;
-        return lerp(m_nominal_z - height, m_nominal_z, z_ratio);
+        const auto z_offset = sloped->staggered_z_offset;
+        return lerp(m_nominal_z + z_offset - height, m_nominal_z + z_offset, z_ratio);
     };
 
     bool slope_need_z_travel = false;
@@ -9060,7 +9076,7 @@ std::string GCode::_extrude(const ExtrusionPath &path, const std::string &path_d
         slope_need_z_travel) {
         const bool _last_pos_undefined = !m_last_pos_defined;
 
-        double z = DBL_MAX;
+        double z = m_has_staggered_perimeters ? m_nominal_z + path.staggered_z_offset : DBL_MAX;
         if (sloped != nullptr) {
             z =  get_sloped_z(sloped->slope_begin.z_ratio);
         } else if (path.z_contoured && !path.polyline.lines().empty()) {
@@ -9073,7 +9089,7 @@ std::string GCode::_extrude(const ExtrusionPath &path, const std::string &path_d
         if (!slope_need_z_travel && (_last_pos_undefined || m_need_change_layer_lift_z)) {
             const std::string z_sync_comment = _last_pos_undefined ?
                 "ensure Z matches planned layer height" : ""; // no comment for normal layer-Z lift
-            gcode += this->writer().travel_to_z(m_nominal_z, z_sync_comment, true);
+            gcode += this->writer().travel_to_z(m_nominal_z + path.staggered_z_offset, z_sync_comment, true);
         }
         m_need_change_layer_lift_z = false;
     }
@@ -9087,8 +9103,8 @@ std::string GCode::_extrude(const ExtrusionPath &path, const std::string &path_d
     }
     if (!path.z_contoured && sloped == nullptr) {
         double current_z = m_writer.get_position().z();
-        if (GCodeFormatter::quantize_xyzf(current_z) != GCodeFormatter::quantize_xyzf(m_nominal_z)) {
-            gcode += this->writer().travel_to_z(m_nominal_z, "reset Z after contouring", true);
+        if (GCodeFormatter::quantize_xyzf(current_z) != GCodeFormatter::quantize_xyzf(m_nominal_z + path.staggered_z_offset)) {
+            gcode += this->writer().travel_to_z(m_nominal_z + path.staggered_z_offset, "reset Z after contouring", true);
         }
     }
 
@@ -10284,7 +10300,20 @@ std::string GCode::travel_to(const Point& point, ExtrusionRole role, std::string
     // use G1 because we rely on paths being straight (G0 may make round paths)
     if (travel.size() >= 2) {
         // Orca: use `travel_to_xyz` to ensure we start at the correct z, in case we moved z in custom/filament change gcode
-        if (false/*m_spiral_vase*/) {
+        if (m_has_staggered_perimeters && m_layer != nullptr) {
+            // Lift vertically before crossing any raised track, even for short
+            // unretracted moves and regions where staggering is disabled.
+            const double destination_z = z == DBL_MAX ? m_nominal_z : z;
+            const double clearance_z = std::max({m_writer.get_position().z(), destination_z,
+                                                m_nominal_z + m_staggered_clearance}) + 0.2;
+            if (clearance_z > m_config.printable_height.value + EPSILON)
+                throw Slic3r::InvalidArgument("Staggered-wall travel exceeds the printer height. Leave space above the model for the clearance lift.");
+            gcode += m_writer.travel_to_z(clearance_z, "clear staggered walls", true);
+            for (size_t i = 1; i < travel.size(); ++i)
+                gcode += m_writer.travel_to_xy(this->point_to_gcode(travel.points[i]), comment);
+            gcode += m_writer.travel_to_z(destination_z, "descend at wall start", true);
+            m_need_change_layer_lift_z = false;
+        } else if (false/*m_spiral_vase*/) {
             // No lazy z lift for spiral vase mode
             for (size_t i = 1; i < travel.size(); ++i) {
                 gcode += m_writer.travel_to_xy(this->point_to_gcode(travel.points[i]), comment);

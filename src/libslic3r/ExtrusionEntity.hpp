@@ -180,9 +180,12 @@ public:
     double smooth_speed = 0;
     bool z_contoured = false;
 
-    ExtrusionPath() : mm3_per_mm(-1), width(-1), height(-1), m_role(erNone), m_no_extrusion(false) {}
+    // Absolute offset above nominal layer Z; height and mm3_per_mm describe the actual bead.
+    float staggered_z_offset = 0.f;
+
+    ExtrusionPath() : mm3_per_mm(-1), width(-1), height(-1), m_role(erNone), m_no_extrusion(false){}
     ExtrusionPath(ExtrusionRole role) : mm3_per_mm(-1), width(-1), height(-1), m_role(role), m_no_extrusion(false) {}
-    ExtrusionPath(ExtrusionRole role, double mm3_per_mm, float width, float height, bool no_extrusion = false) : mm3_per_mm(mm3_per_mm), width(width), height(height), m_role(role), m_no_extrusion(no_extrusion) {}
+    ExtrusionPath(ExtrusionRole role, double mm3_per_mm, float width, float height, bool no_extrusion = false) : mm3_per_mm(mm3_per_mm), width(width), height(height), m_role(role), m_no_extrusion(no_extrusion)  {}
 
     ExtrusionPath(const ExtrusionPath &rhs)
         : polyline(rhs.polyline)
@@ -193,6 +196,7 @@ public:
         , height(rhs.height)
         , smooth_speed(rhs.smooth_speed)
         , z_contoured(rhs.z_contoured)
+        , staggered_z_offset(rhs.staggered_z_offset)
         , m_can_reverse(rhs.m_can_reverse)
         , m_role(rhs.m_role)
         , m_no_extrusion(rhs.m_no_extrusion)
@@ -206,6 +210,7 @@ public:
         , height(rhs.height)
         , smooth_speed(rhs.smooth_speed)
         , z_contoured(rhs.z_contoured)
+        , staggered_z_offset(rhs.staggered_z_offset)
         , m_can_reverse(rhs.m_can_reverse)
         , m_role(rhs.m_role)
         , m_no_extrusion(rhs.m_no_extrusion)
@@ -219,6 +224,7 @@ public:
         , height(rhs.height)
         , smooth_speed(rhs.smooth_speed)
         , z_contoured(rhs.z_contoured)
+        , staggered_z_offset(rhs.staggered_z_offset)
         , m_can_reverse(rhs.m_can_reverse)
         , m_role(rhs.m_role)
         , m_no_extrusion(rhs.m_no_extrusion)
@@ -232,6 +238,7 @@ public:
         , height(rhs.height)
         , smooth_speed(rhs.smooth_speed)
         , z_contoured(rhs.z_contoured)
+        , staggered_z_offset(rhs.staggered_z_offset)
         , m_can_reverse(rhs.m_can_reverse)
         , m_role(rhs.m_role)
         , m_no_extrusion(rhs.m_no_extrusion)
@@ -249,6 +256,7 @@ public:
         this->overhang_degree = rhs.overhang_degree;
         this->curve_degree = rhs.curve_degree;
         this->polyline = rhs.polyline;
+        this->staggered_z_offset = rhs.staggered_z_offset;
         return *this;
     }
     ExtrusionPath& operator=(ExtrusionPath&& rhs) {
@@ -263,6 +271,7 @@ public:
         this->overhang_degree = rhs.overhang_degree;
         this->curve_degree = rhs.curve_degree;
         this->polyline = std::move(rhs.polyline);
+        this->staggered_z_offset = rhs.staggered_z_offset;
         return *this;
     }
 

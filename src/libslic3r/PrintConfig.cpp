@@ -8048,6 +8048,13 @@ void PrintConfigDef::init_fff_params()
     def->mode = comAdvanced;
     def->set_default_value(new ConfigOptionBool(false));
 
+    def          = this->add("staggered_perimeters", coBool);
+    def->label   = L("Stagger perimeters");
+    def->category = L("Strength");
+    def->tooltip = L("Experimental: stagger repeated closed Arachne walls by half a layer. Local starts and ends return to normal height. Open, sloping or changing wall tracks remain unstaggered. Requires constant layer height without scarf seams or Z contouring.");
+    def->mode    = comAdvanced;
+    def->set_default_value(new ConfigOptionBool(false));
+
     def = this->add("change_filament_gcode", coString);
     def->label = L("Change filament G-code");
     def->tooltip = L("This G-code is inserted when filament is changed, including T commands to trigger tool change.");

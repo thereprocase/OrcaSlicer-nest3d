@@ -1,3 +1,4 @@
+#include "StaggeredPerimeters.hpp"
 #include "ExPolygon.hpp"
 #include "Config.hpp"
 #include "Exception.hpp"
@@ -602,6 +603,70 @@ void PrintObject::make_perimeters()
     m_print->throw_if_canceled();
     BOOST_LOG_TRIVIAL(debug) << "Generating perimeters in parallel - end";
 
+    bool has_staggering = false;
+    for (const PrintRegion &region : all_regions())
+        has_staggering |= region.config().staggered_perimeters.value;
+    if (has_staggering) {
+        for (const PrintRegion &region : all_regions()) {
+            if (!region.config().staggered_perimeters.value) continue;
+            if (m_config.wall_generator != PerimeterGeneratorType::Arachne || m_config.raft_layers > 0 ||
+                m_print->config().spiral_mode || m_print->config().belt_printer ||
+                m_print->config().enable_mixed_color_sublayer ||
+                region.config().seam_slope_type != SeamScarfType::None || region.config().zaa_enabled ||
+                !model_object()->layer_height_profile.empty())
+                throw Slic3r::InvalidArgument("Staggered perimeters require constant-height Arachne walls without scarf seams, rafts, Z contouring, vase, belt or mixed-color sublayers.");
+        }
+        const auto &nozzles = m_print->config().nozzle_diameter.values;
+        const double maximum_bead_height = 0.8 * *std::min_element(nozzles.begin(), nozzles.end());
+        std::vector<std::vector<StaggeredWall>> staggered_layers(m_layers.size());
+        std::function<void(ExtrusionEntity *, size_t, const Layer &, size_t)> collect_walls;
+        collect_walls = [&](ExtrusionEntity *entity, size_t region, const Layer &layer, size_t index) {
+            if (auto *collection = dynamic_cast<ExtrusionEntityCollection *>(entity)) {
+                for (ExtrusionEntity *child : collection->entities)
+                    collect_walls(child, region, layer, index);
+            } else if (auto *loop = dynamic_cast<ExtrusionLoop *>(entity)) {
+                staggered_layers[index].push_back({&loop->paths, region, loop->inset_idx, layer.print_z, layer.height, maximum_bead_height});
+            }
+            // Open/disconnected paths have no stable closed footprint and stay nominal.
+        };
+        for (size_t i = 0; i < m_layers.size(); ++i)
+            for (size_t r = 0; r < m_layers[i]->regions().size(); ++r) {
+                LayerRegion *region = m_layers[i]->get_region(r);
+                if (region->region().config().staggered_perimeters.value)
+                    collect_walls(&region->perimeters, r, *m_layers[i], i);
+            }
+        const size_t staggered_count = stagger_perimeters(staggered_layers, [this] { m_print->throw_if_canceled(); });
+        if (staggered_count == 0)
+            this->active_step_add_warning(PrintStateBase::WarningLevel::NON_CRITICAL,
+                L("Staggered perimeters found no repeated closed wall tracks long enough to stagger. This object uses ordinary walls."),
+                PrintStateBase::SlicingStaggeredPerimetersFallback);
+
+        // Retain island grouping and print nominal walls before raised walls.
+        // Perimeter export preserves this order; no_sort is an infill grouping
+        // mechanism and would pass a collection to the leaf-only perimeter exporter.
+        std::function<double(ExtrusionEntity *)> order_walls = [&](ExtrusionEntity *entity) -> double {
+            if (auto *collection = dynamic_cast<ExtrusionEntityCollection *>(entity)) {
+                std::map<const ExtrusionEntity *, double> offsets;
+                double maximum = 0.;
+                for (ExtrusionEntity *child : collection->entities)
+                    maximum = std::max(maximum, offsets[child] = order_walls(child));
+                if (maximum > 0.) {
+                    std::stable_sort(collection->entities.begin(), collection->entities.end(),
+                        [&](const auto *a, const auto *b) { return offsets.at(a) < offsets.at(b); });
+                }
+                return maximum;
+            }
+            double maximum = 0.;
+            if (auto *loop = dynamic_cast<ExtrusionLoop *>(entity))
+                for (const auto &path : loop->paths)
+                    maximum = std::max(maximum, double(path.staggered_z_offset));
+            return maximum;
+        };
+        for (Layer *layer : m_layers)
+            for (LayerRegion *region : layer->regions())
+                order_walls(&region->perimeters);
+
+    }
     this->set_done(posPerimeters);
 }
 
@@ -1502,6 +1567,7 @@ bool PrintObject::invalidate_state_by_config_options(
         } else if (
                opt_key == "wall_loops"
             || opt_key == "alternate_extra_wall"
+            || opt_key == "staggered_perimeters"
             || opt_key == "top_one_wall_type"
             || opt_key == "min_width_top_surface"
             || opt_key == "only_one_wall_first_layer"

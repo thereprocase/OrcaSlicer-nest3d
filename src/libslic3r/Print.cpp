@@ -1885,6 +1885,24 @@ StringObjectException Print::validate(std::vector<StringObjectException> *warnin
     if (extruders.empty())
         return { L("No extrusions under current settings.") };
 
+    for (const PrintObject *object : m_objects) {
+        for (const PrintRegion &region : object->all_regions()) {
+            if (!region.config().staggered_perimeters.value) continue;
+            const auto &oc = object->config();
+            const auto &rc = region.config();
+            if (oc.wall_generator != PerimeterGeneratorType::Arachne || oc.raft_layers > 0 ||
+                m_config.spiral_mode || m_config.belt_printer || m_config.enable_mixed_color_sublayer ||
+                rc.seam_slope_type != SeamScarfType::None || rc.zaa_enabled ||
+                !object->model_object()->layer_height_profile.empty())
+                return {L("Staggered perimeters require Arachne and constant layer height. Disable rafts, scarf seams, Z contouring, spiral vase, belt printing and mixed-color sublayers."),
+                        object, "staggered_perimeters"};
+            const double nozzle = *std::min_element(m_config.nozzle_diameter.values.begin(), m_config.nozzle_diameter.values.end());
+            if (1.5 * oc.layer_height.value > 0.8 * nozzle + EPSILON)
+                return {L("Staggered perimeters need room for a 1.5-layer starting bead. Reduce layer height so that bead is no taller than 80% of the nozzle diameter."),
+                        object, "staggered_perimeters"};
+        }
+    }
+
     // IDEX/IQEX: block multi-color in non-primary parallel modes when the active
     // configuration can't physically support it (no within-gantry toolchange path
     // or MMU lane sharing). See imex_multicolor_block_reason() for the full rule.
