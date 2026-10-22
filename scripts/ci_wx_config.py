@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
-"""Prepare wx-config for a dependency cache restored at a new prefix."""
+"""Prepare dependency metadata for a cache restored at a new prefix."""
 
 import argparse
 from pathlib import Path
 import subprocess
 
 
-def prepare_config(prefix: Path, output: Path) -> None:
+def prepare_config(prefix: Path, output: Path, pkgconfig: Path) -> None:
     prefix = prefix.resolve()
     configs = prefix / "lib/wx/config"
     default = prefix / "bin/wx-config"
@@ -29,10 +29,20 @@ def prepare_config(prefix: Path, output: Path) -> None:
     output.write_text(selected.read_text().replace(original, str(prefix)))
     output.chmod(0o755)
 
+    # FFmpeg and transitive GTK dependencies also embed the install prefix.
+    # Prefer these copies through PKG_CONFIG_PATH during CMake configuration.
+    pkgconfig.mkdir(parents=True, exist_ok=True)
+    for directory in ("lib/pkgconfig", "lib64/pkgconfig", "share/pkgconfig"):
+        for source in (prefix / directory).glob("*.pc"):
+            metadata = source.read_text().replace(original, str(prefix))
+            metadata = metadata.replace("${pcfiledir}", str(source.parent))
+            (pkgconfig / source.name).write_text(metadata)
+
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("prefix", type=Path)
     parser.add_argument("output", type=Path)
+    parser.add_argument("pkgconfig", type=Path)
     args = parser.parse_args()
-    prepare_config(args.prefix, args.output)
+    prepare_config(args.prefix, args.output, args.pkgconfig)
