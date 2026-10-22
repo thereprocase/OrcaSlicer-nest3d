@@ -143,25 +143,32 @@ TEST_CASE("A printer without an auxiliary fan emits no auxiliary commands", "[Co
 
 TEST_CASE("Material changes restore each filament's auxiliary cooling schedule", "[Cooling][AuxiliaryFan][Regression]")
 {
+    const auto nozzle_volume_type = GENERATE(nvtStandard, nvtHighFlow);
     auto config = auxiliary_cooling_config(2);
     config.set_deserialize_strict({
+        // Timing stays per filament even when the target speeds occupy three variant slots.
+        {"extruder_variant_list", "Direct Drive Standard,Direct Drive High Flow"},
+        {"filament_extruder_variant", "Direct Drive Standard;Direct Drive High Flow;Direct Drive Standard"},
+        {"filament_self_index", "1,1,2"},
         {"close_fan_the_first_x_layers", "0,0"},
         {"close_additional_fan_first_x_layers", "3,1"},
         {"first_x_layer_fan_speed", "0,20"},
         {"additional_fan_full_speed_layer", "0,5"},
-        {"additional_cooling_fan_speed", "60,80"},
+        {"additional_cooling_fan_speed", "60,90,80"},
     });
+    config.option<ConfigOptionEnumsGeneric>("nozzle_volume_type", true)->values = {nozzle_volume_type};
     const auto gcode = slice_with_object_overrides({make_cube(10., 10., 1.2), make_cube(10., 10., 1.2)}, config,
         {{}, {{"outer_wall_filament_id", 2}, {"inner_wall_filament_id", 2}, {"sparse_infill_filament_id", 2},
               {"internal_solid_filament_id", 2}, {"top_surface_filament_id", 2}, {"bottom_surface_filament_id", 2}}});
     const auto samples = deposition_fans(gcode, config);
-    const std::vector<std::vector<int>> expected{{0, 0, 0, 60, 60, 60}, {20, 35, 50, 65, 80, 80}};
+    const int first_target = nozzle_volume_type == nvtStandard ? 60 : 90;
+    const std::vector<std::vector<int>> expected{{0, 0, 0, first_target, first_target, first_target}, {20, 35, 50, 65, 80, 80}};
     std::vector<std::vector<bool>> seen(2, std::vector<bool>(6, false));
     REQUIRE_FALSE(samples.empty());
     for (const auto &sample : samples) {
         REQUIRE(sample.tool < 2);
         REQUIRE(sample.layer < 6);
-        INFO("tool " << sample.tool << ", layer " << sample.layer);
+        INFO("nozzle volume " << int(nozzle_volume_type) << ", tool " << sample.tool << ", layer " << sample.layer);
         seen[sample.tool][sample.layer] = true;
         CHECK(sample.auxiliary == int(255.0 * expected[sample.tool][sample.layer] / 100.0));
         CHECK(sample.part == 51);
