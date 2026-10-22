@@ -217,13 +217,20 @@ void append_layer_geometry(std::vector<Triangle> &tris, const ExPolygons &area, 
         }
 }
 
-double extrusion_height(const ExtrusionEntityCollection &extrusions, double layer_height)
+void extend_extrusion_z(const ExtrusionEntityCollection &extrusions, double print_z, double &bottom, double &top)
 {
-    double height = layer_height;
-    for_each_extrusion_path(extrusions, [&height](const ExtrusionPath &path) {
-        height = std::max(height, double(path.height));
+    for_each_extrusion_path(extrusions, [&](const ExtrusionPath &path) {
+        bottom = std::min(bottom, print_z - path.height);
+        if (path.z_contoured)
+            for (const Point3 &point : path.polyline.points) {
+                // ContourZ stores scaled offsets from the nominal layer Z in these points;
+                // GCode emits nominal_z + unscale(point.z()). Keep both extrema, including the
+                // full nominal bead height below a lowered path as a conservative bound.
+                const double z = print_z + unscale<double>(point.z());
+                bottom = std::min(bottom, z - path.height);
+                top = std::max(top, z);
+            }
     });
-    return height;
 }
 
 // Generate in the candidate's final Z orientation: rotating one support result would also rotate
@@ -283,24 +290,25 @@ HeightMap supported_height_map(const ArrangePolygon &ap, const std::vector<Trian
             // Use native sliced geometry rather than the unscaled model mesh. This includes
             // filament shrinkage, XY compensation, modifiers, raft lift and variable layer heights.
             Polygons area = to_polygons(layer->lslices);
-            double height = layer->height;
+            double bottom = layer->print_z - layer->height, top = layer->print_z;
             for (const LayerRegion *region : layer->regions()) {
                 region->perimeters.polygons_covered_by_width(area, float(SCALED_EPSILON));
                 region->fills.polygons_covered_by_width(area, float(SCALED_EPSILON));
-                height = extrusion_height(region->perimeters, height);
-                height = extrusion_height(region->fills, height);
+                extend_extrusion_z(region->perimeters, layer->print_z, bottom, top);
+                extend_extrusion_z(region->fills, layer->print_z, bottom, top);
             }
             // Thick bridge beads and combined infill can extend farther below the nozzle than the
             // nominal layer thickness. Reserve their full height when checking vertical clearance.
-            append_layer_geometry(tris, union_ex(area), center, layer->print_z - height, layer->print_z);
+            append_layer_geometry(tris, union_ex(area), center, bottom, top);
         }
         for (const SupportLayer *layer : po->support_layers()) {
             check_canceled(params);
             // Include the physical width of every support extrusion (base, interface, tree brim and
             // raft), not its centerline or a polygon enclosing unused space between sparse lines.
             const ExPolygons area = union_ex(layer->support_fills.polygons_covered_by_width(float(SCALED_EPSILON)));
-            const double height = extrusion_height(layer->support_fills, layer->height);
-            append_layer_geometry(tris, area, center, layer->print_z - height, layer->print_z);
+            double bottom = layer->print_z - layer->height, top = layer->print_z;
+            extend_extrusion_z(layer->support_fills, layer->print_z, bottom, top);
+            append_layer_geometry(tris, area, center, bottom, top);
         }
     }
     for (const auto &group : print.skirt_brim_groups())

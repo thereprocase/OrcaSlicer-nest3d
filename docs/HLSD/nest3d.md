@@ -37,10 +37,12 @@ them filled; the model only ever over-estimates the space a part takes.
   filled down to the bed. With "Generate supports before arranging", the adapter instead combines
   native sliced model geometry with support extrusion envelopes, including their widths and actual
   extrusion heights. Thick bridges and combined infill can extend below the nominal layer bottom.
+  Z contouring also extends the envelope by the generated paths' upward and downward offsets.
   Model brims, support base, interface, tree brim and raft paths occupy space; unused
   columns remain available. Automatic spacing retains 1 mm per part after replacing the estimated
   support allowance with actual geometry; an explicit gap applies outside that geometry.
-- **Fixed items.** Unselected instances are rasterized from their meshes in their current pose.
+- **Fixed items.** Unselected instances use their current pose, with native model/support envelopes
+  when support generation is enabled and mesh geometry otherwise.
   The wipe tower and exclusion areas are full-height columns over their polygons. On a bed that is
   not a rectangle, the cells whose centre lies outside its outline are a full-height obstacle on
   every plate.

@@ -26,6 +26,7 @@
 
 #include <Eigen/Geometry>
 
+#include <algorithm>
 #include <atomic>
 #include <cstddef>
 #include <limits>
@@ -431,4 +432,106 @@ TEST_CASE("Cancelling support preparation leaves placements and source objects u
     CHECK(model.objects.front()->instances.front()->get_matrix().isApprox(transformation));
     CHECK(model.objects.front()->instances.size() == 2);
     CHECK(model.objects.front()->volumes.size() == 1);
+}
+
+TEST_CASE("Support-aware nesting reserves upward Z contouring above nominal layer height", "[Nest3DSupport]")
+{
+    constexpr double layer_height = 0.2;
+    constexpr double surface_height = 2.03;
+    DynamicPrintConfig config = support_config();
+    config.set_deserialize_strict({
+        {"enable_support", "0"}, {"precise_z_height", "0"},
+        {"zaa_enabled", "1"}, {"zaa_min_z", "0.05"},
+        {"zaa_minimize_perimeter_height", "0"}
+    });
+    Model model = Test::model("contoured top", make_cube(12, 12, surface_height));
+    Print reference;
+    reference.set_status_silent();
+    reference.apply(model, config);
+    reference.process();
+    double nominal_top = 0, contoured_top = 0;
+    for (const PrintObject *object : reference.objects())
+        for (const Layer *layer : object->layers()) {
+            nominal_top = std::max(nominal_top, layer->print_z);
+            for (const LayerRegion *region : layer->regions()) {
+                const auto inspect = [&](const ExtrusionPath &path) {
+                    if (path.z_contoured)
+                        for (const Point3 &point : path.polyline.points)
+                            contoured_top = std::max(contoured_top, layer->print_z + unscale<double>(point.z()));
+                };
+                for_each_extrusion_path(region->perimeters, inspect);
+                for_each_extrusion_path(region->fills, inspect);
+            }
+        }
+    REQUIRE_THAT(nominal_top, Catch::Matchers::WithinAbs(10 * layer_height, EPSILON));
+    REQUIRE_THAT(contoured_top, Catch::Matchers::WithinAbs(surface_height, EPSILON));
+    REQUIRE(contoured_top > nominal_top);
+
+    auto params = arrange_params();
+    params.printable_height = float((nominal_top + contoured_top) / 2);
+    auto items = items_of(model, config);
+    auto nominal_items = items;
+    DynamicPrintConfig nominal_config = config;
+    nominal_config.set_key_value("zaa_enabled", new ConfigOptionBool(false));
+    nest3d::arrange_polygons(nominal_items, {}, bed(14, 14), params, support_settings(), nominal_config, 1);
+    REQUIRE(nominal_items.front().is_arranged());
+    nest3d::arrange_polygons(items, {}, bed(14, 14), params, support_settings(), config, 1);
+    CHECK_FALSE(items.front().is_arranged());
+}
+
+TEST_CASE("Support-aware stacking reserves downward Z contouring below nominal layer bottom", "[Nest3DSupport]")
+{
+    constexpr double cap_bottom = 7;
+    constexpr double cap_height = 0.17;
+    constexpr double part_height = 5;
+    constexpr double clearance = 2;
+    DynamicPrintConfig config = support_config();
+    config.set_deserialize_strict({
+        {"enable_support", "0"}, {"precise_z_height", "0"}, {"thick_bridges", "0"}, {"bridge_flow", "1"},
+        {"zaa_enabled", "1"}, {"zaa_min_z", "0.05"}, {"zaa_minimize_perimeter_height", "0"}
+    });
+    TriangleMesh stem = make_cube(6, 6, cap_bottom + cap_height);
+    stem.translate(7, 3, 0);
+    TriangleMesh cap = make_cube(20, 12, cap_height);
+    cap.translate(0, 0, cap_bottom);
+    stem.merge(cap);
+    Model fixed_model = Test::model("lowered contour cap", std::move(stem));
+    Print reference;
+    reference.set_status_silent();
+    reference.apply(fixed_model, config);
+    reference.process();
+    double nominal_bottom = std::numeric_limits<double>::infinity();
+    double contoured_bottom = nominal_bottom;
+    for (const PrintObject *object : reference.objects())
+        for (const Layer *layer : object->layers())
+            for (const LayerRegion *region : layer->regions()) {
+                const auto inspect = [&](const ExtrusionPath &path) {
+                    if (path.z_contoured)
+                        for (const Point3 &point : path.polyline.points) {
+                            const double offset = unscale<double>(point.z());
+                            if (offset < -EPSILON) {
+                                nominal_bottom = std::min(nominal_bottom, layer->print_z - path.height);
+                                contoured_bottom = std::min(contoured_bottom, layer->print_z + offset - path.height);
+                            }
+                        }
+                };
+                for_each_extrusion_path(region->perimeters, inspect);
+                for_each_extrusion_path(region->fills, inspect);
+            }
+    REQUIRE_THAT(nominal_bottom, Catch::Matchers::WithinAbs(cap_bottom, EPSILON));
+    REQUIRE(contoured_bottom < part_height + clearance - EPSILON);
+
+    const auto fixed = items_of(fixed_model, config);
+    Model selected_model = Test::model("part below contour", make_cube(4, 4, part_height));
+    auto items = items_of(selected_model, config);
+    auto settings = support_settings();
+    settings.allow_stacking = true;
+    settings.vertical_gap_mm = float(clearance);
+    auto nominal_items = items;
+    DynamicPrintConfig nominal_config = config;
+    nominal_config.set_key_value("zaa_enabled", new ConfigOptionBool(false));
+    nest3d::arrange_polygons(nominal_items, fixed, bed(22, 14), arrange_params(), settings, nominal_config, 1);
+    REQUIRE(nominal_items.front().is_arranged());
+    nest3d::arrange_polygons(items, fixed, bed(22, 14), arrange_params(), settings, config, 1);
+    CHECK_FALSE(items.front().is_arranged());
 }
