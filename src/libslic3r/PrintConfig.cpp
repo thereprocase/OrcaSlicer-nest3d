@@ -13244,6 +13244,12 @@ CLIMiscConfigDef::CLIMiscConfigDef()
     def->tooltip = L("Let Nest3D place short parts under the overhangs of taller ones. Implies --arrange-engine nest3d.");
     def->set_default_value(new ConfigOptionBool(false));
 
+    def = this->add("nest3d_supports", coBool);
+    def->label = L("Generate supports before arranging");
+    def->tooltip = L("Slice each part to generate its supports, then arrange the parts and supports together. "
+                     "This takes longer. Implies --arrange-engine nest3d.");
+    def->set_default_value(new ConfigOptionBool(false));
+
     def = this->add("arrange_gap", coFloat);
     def->label = L("Arrange gap");
     def->tooltip = L("Minimum distance in mm between arranged parts, and between parts and the bed's excluded areas, "

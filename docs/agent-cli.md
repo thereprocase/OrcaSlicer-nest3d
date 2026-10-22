@@ -28,6 +28,26 @@ Nest3D: `1` for Nest3D, `stack` for Nest3D with stacking.
 Lets Nest3D place short parts under the overhangs of taller ones, with 2 mm clearance below the
 overhang. Implies `--arrange-engine nest3d` and is an error with `--arrange-engine stock`.
 
+### `--nest3d-supports`
+
+Generates supports before arranging and includes their extrusion widths in each part's occupied
+space. Support settings, painted enforcers and blockers, modifiers, and rafts come from the project.
+Each offered rotation is sliced separately because support patterns depend on orientation; this
+takes longer than ordinary arrangement. The option is off by default, implies
+`--arrange-engine nest3d`, and is an error with `--arrange-engine stock`.
+
+The generated geometry includes model brims and material shrink compensation. Used filaments must
+have matching XY and Z shrink compensation so isolated parts and the final plate use the same scale.
+
+It can be combined with `--nest3d-stack` and a small explicit gap:
+
+```bash
+orca-slicer ... --arrange 1 --allow-rotations --nest3d-supports --nest3d-stack --arrange-gap 0.8
+```
+
+Always slice the arranged plate. Neighboring parts can affect final support generation, so the
+preliminary envelopes do not replace final toolpath clearance checks or establish support removability.
+
 ### `--arrange-gap MM`
 
 The minimum distance between two arranged parts and between a part and the bed's excluded area, for
@@ -43,10 +63,12 @@ orca-slicer ... --arrange 1 --arrange-engine nest3d --arrange-gap 3 nut.stl nut.
 
 Written after arranging (and with `--arrange 0`, for the parts as loaded). Distances are measured on the
 parts' footprints, the outlines of their meshes seen from above, in plate coordinates (mm).
+`generated_supports` records whether support preparation was requested. Footprint distances in this
+report remain model-only; they do not measure final support clearance.
 
 ```json
 {
-  "engine": "nest3d", "stacking": false, "gap_mm": 3.0, "arranged": true,
+  "engine": "nest3d", "stacking": false, "generated_supports": false, "gap_mm": 3.0, "arranged": true,
   "plate_count": 1, "plates_used": 1,
   "objects": [
     {
