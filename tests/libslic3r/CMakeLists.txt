@@ -14,6 +14,7 @@ add_executable(${_TEST_NAME}_tests
     test_precise_seam.cpp
     test_aabbindirect.cpp
     test_appconfig.cpp
+    test_staggered_perimeters.cpp
     test_arachne_walls.cpp
     test_arrange.cpp
     test_assemble_list.cpp

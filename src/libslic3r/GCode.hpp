@@ -895,6 +895,8 @@ protected:
     Print* m_curr_print = nullptr;
     unsigned int m_toolchange_count;
     coordf_t m_nominal_z;
+    bool m_has_staggered_perimeters = false;
+    double m_staggered_clearance = 0.;
     // Mixed-color sublayer state. Non-zero only while emitting a mixed slot's sub-layer:
     // scales extrusion flow to the sub-layer's share of the nominal layer height, and
     // reports that sub-height as the effective extrusion height. Reset to 0 afterwards.

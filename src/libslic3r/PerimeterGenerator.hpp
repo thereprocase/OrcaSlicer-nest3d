@@ -91,7 +91,6 @@ public:
     const ExPolygons            *lower_slices;
     double                       layer_height;
     int                          layer_id;
-    size_t                       number_of_layers;
     coordf_t                     slice_z;
     Flow                         perimeter_flow;
     Flow                         ext_perimeter_flow;
@@ -140,10 +139,9 @@ public:
         // Infills without the gap fills
         SurfaceCollection*          fill_surfaces,
         //BBS
-        ExPolygons*                 fill_no_overlap,
-        size_t number_of_layers)
+        ExPolygons*                 fill_no_overlap)
         : slices(slices), compatible_regions(compatible_regions), upper_slices(nullptr), lower_slices(nullptr), layer_height(layer_height),
-            slice_z(slice_z), layer_id(-1), number_of_layers(number_of_layers), perimeter_flow(flow), ext_perimeter_flow(flow),
+            slice_z(slice_z), layer_id(-1), perimeter_flow(flow), ext_perimeter_flow(flow),
             overhang_flow(flow), solid_infill_flow(flow),
             config(config), object_config(object_config), print_config(print_config),
             m_spiral_vase(spiral_mode),

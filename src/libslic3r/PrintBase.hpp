@@ -73,7 +73,8 @@ public:
         SlicingPreciseSeamWarning,
         // Orca: islands where the morphing spiral fell back to Spiral Inset. A dedicated id keeps one
         // updatable warning per object and lets the CLI record it (it skips default notifications).
-        SlicingMorphingSpiralFallback
+        SlicingMorphingSpiralFallback,
+        SlicingStaggeredPerimetersFallback
     };
 
     typedef size_t TimeStamp;

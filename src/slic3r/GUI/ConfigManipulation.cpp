@@ -513,29 +513,6 @@ void ConfigManipulation::update_print_fff_config(DynamicPrintConfig* config, con
         is_msg_dlg_already_exist = false;
     }
 
-    const bool stagger_uses_arachne = config->opt_enum<PerimeterGeneratorType>("wall_generator") == PerimeterGeneratorType::Arachne;
-	if (!is_plate_config &&
-        config->opt_bool("staggered_perimeters") &&
-        (abs(config->opt_float("initial_layer_print_height") - config->opt_float("layer_height")) > EPSILON  ||
-        !(*config->option<ConfigOptionFloatOrPercent>("top_surface_line_width") == *config->option<ConfigOptionFloatOrPercent>("outer_wall_line_width")) ||
-            !stagger_uses_arachne ||
-            config->opt_bool("spiral_mode")))
-    {
-        DynamicPrintConfig new_conf = *config;
-        auto answer = show_staggered_perimeter_settings_dialog();
-        if (answer == wxID_YES) {
-            new_conf.set_key_value("initial_layer_print_height", config->option<ConfigOptionFloat>("layer_height")->clone());
-            new_conf.set_key_value("top_surface_line_width", config->option<ConfigOptionFloatOrPercent>("outer_wall_line_width")->clone() );
-            new_conf.set_key_value("wall_generator", new ConfigOptionEnum<PerimeterGeneratorType>(PerimeterGeneratorType::Arachne));
-            new_conf.set_key_value("spiral_mode", new ConfigOptionBool(false));
-        }
-        else {
-            new_conf.set_key_value("staggered_perimeters", new ConfigOptionBool(false));
-        }
-        apply(config, &new_conf);
-        is_msg_dlg_already_exist = false;
-    }
-
     if (config->opt_bool("alternate_extra_wall") &&
         (config->opt_enum<EnsureVerticalShellThickness>("ensure_vertical_shell_thickness") == evstAll)) {
         wxString msg_text = _(L("Alternate extra wall doesn't work well when ensure vertical shell thickness is set to All."));
@@ -1443,22 +1420,6 @@ int ConfigManipulation::show_spiral_mode_settings_dialog(bool is_object_config)
     is_msg_dlg_already_exist = false;
     if (is_object_config)
         answer = wxID_YES;
-    return answer;
-}
-
-int ConfigManipulation::show_staggered_perimeter_settings_dialog()
-{
-    wxString msg_text = _(L("Staggered perimeters is an experimental feature and only works when the First layer height is the same as Layer height, Top surface line width is the same as Outer wall line width and only for Arachne"));
-			msg_text += "\n\n" + _(L("Change these settings automatically? \n"
-				"Yes - Change these settings and enable staggered perimeters\n"
-				"No  - Give up using staggered perimeters this time"));
-
-    MessageDialog dialog(m_msg_dlg_parent, msg_text, "",
-        wxICON_WARNING |  wxYES | wxNO );
-
-    is_msg_dlg_already_exist = true;
-    auto answer = dialog.ShowModal();
-    is_msg_dlg_already_exist = false;
     return answer;
 }
 

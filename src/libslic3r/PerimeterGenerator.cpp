@@ -557,21 +557,6 @@ static ExtrusionEntityCollection traverse_extrusions(const PerimeterGenerator& p
             extrusion_paths_append(paths, *extrusion, role, is_external ? perimeter_generator.ext_perimeter_flow : perimeter_generator.perimeter_flow);
         }
 
-        auto check_and_stagger_path = [&perimeter_generator](ExtrusionPath &path) {
-            const int layer = perimeter_generator.layer_id;
-            const int count = static_cast<int>(perimeter_generator.number_of_layers);
-            // Keep the first and final layers at their nominal height. The first
-            // raised bead fills 1.5 layers; the return to nominal fills half a layer.
-            if (count < 4 || layer <= 0 || layer >= count - 1)
-                return;
-            if (layer == 1)
-                path.extrusion_multiplier = 1.5f;
-            else if (layer == count - 2)
-                path.extrusion_multiplier = 0.5f;
-            if (layer < count - 2)
-                path.z_offset = 0.5f;
-        };
-
         // Append paths to collection.
         if (!paths.empty()) {
             if (extrusion->is_closed) {
@@ -589,15 +574,6 @@ static ExtrusionEntityCollection traverse_extrusions(const PerimeterGenerator& p
                     assert(std::prev(it)->polyline.last_point() == it->polyline.first_point());
                 }
                 assert(extrusion_loop.paths.front().first_point() == extrusion_loop.paths.back().last_point());
-
-				//This is for staggered layers.
-				//All odd perimeters are staggerd up by half the layer height
-                if (extrusion->inset_idx % 2 == 1 && perimeter_generator.config->staggered_perimeters) {
-                    for (size_t path_idx = 0; path_idx < extrusion_loop.paths.size(); path_idx++) {
-                        ExtrusionPath& cur_path = extrusion_loop.paths[path_idx];
-                        check_and_stagger_path(cur_path);
-                    }
-                }
                 extrusion_coll.append(std::move(extrusion_loop));
                 // Orca: Reverse the order of paths for thin wall holes. We define thin wall hole as a hole with only one perimeter.
                 const bool thin_wall_hole = !pg_extrusion.is_contour && pg_extrusions.size() == 2;
@@ -622,15 +598,6 @@ static ExtrusionEntityCollection traverse_extrusions(const PerimeterGenerator& p
                         multi_path = ExtrusionMultiPath();
                     }
                     multi_path.paths.emplace_back(std::move(*it_path));
-                }
-
-				//This is for staggered layers.
-				//All odd perimeters are staggerd up by half the layer height
-                if (extrusion->inset_idx % 2 == 1 && perimeter_generator.config->staggered_perimeters) {
-                    for (size_t path_idx = 0; path_idx < multi_path.paths.size(); path_idx++) {
-                        ExtrusionPath& cur_path = multi_path.paths[path_idx];
-                        check_and_stagger_path(cur_path);
-                    }
                 }
 
                 extrusion_coll.append(ExtrusionMultiPath(std::move(multi_path)));
@@ -2908,15 +2875,8 @@ void PerimeterGenerator::process_arachne()
             }
         }
 
-        if (this->config->staggered_perimeters) { // If staggered layers are on, all odd perimeters will be staggered and should be printed after the non staggered perimeters
-            std::stable_sort(ordered_extrusions.begin(), ordered_extrusions.end(),
-                [](const PerimeterGeneratorArachneExtrusion &extrusion_1, const PerimeterGeneratorArachneExtrusion &extrusion_2) -> bool {
-                return extrusion_1.extrusion->inset_idx % 2 < extrusion_2.extrusion->inset_idx % 2;
-                });
-        }
-
        // printf("New Layer: Layer ID %d\n",layer_id); //debug - new layer
-        if (this->config->wall_sequence == WallSequence::InnerOuterInner && layer_id > 0 && !this->config->staggered_perimeters ) { // only enable inner outer inner algorithm after first layer
+        if (this->config->wall_sequence == WallSequence::InnerOuterInner && layer_id > 0) { // only enable inner outer inner algorithm after first layer
             if (ordered_extrusions.size() > 2) { // 3 walls minimum needed to do inner outer inner ordering
                 int position = 0; // index to run the re-ordering for multiple external perimeters in a single island.
                 int arr_i, arr_j = 0;    // indexes to run through the walls in the for loops
