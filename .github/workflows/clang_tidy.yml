@@ -132,6 +132,13 @@ jobs:
           python3 -m venv "$RUNNER_TEMP/clang-tidy"
           "$RUNNER_TEMP/clang-tidy/bin/pip" install --quiet -r scripts/clang_tidy_requirements.txt
 
+      - name: Prepare restored wxWidgets configuration
+        if: steps.changes.outputs.cpp == 'true'
+        run: >
+          python3 scripts/ci_wx_config.py
+          "${{ github.workspace }}/deps/build/OrcaSlicer_dep/usr/local"
+          "$RUNNER_TEMP/orca-wx-config"
+
       # DEP_BUILD_DIR is named outright: CMake would otherwise derive it from the build
       # directory's name and look for the dependencies in deps/build-tidy.
       - name: Configure without the precompiled header
@@ -143,6 +150,7 @@ jobs:
           -DCMAKE_EXPORT_COMPILE_COMMANDS=ON
           -DSLIC3R_PCH=OFF -DORCA_TOOLS=ON -DBUILD_TESTS=ON
           -DDEP_BUILD_DIR=${{ github.workspace }}/deps/build
+          -DwxWidgets_CONFIG_EXECUTABLE=${{ runner.temp }}/orca-wx-config
 
       # The one header the build generates rather than the configure.
       - name: Generate git_commit_hash.h
