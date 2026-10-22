@@ -802,8 +802,7 @@ std::string CoolingBuffer::apply_layer_cooldown(
             supp_interface_fan_control  = false;
             ironing_fan_speed           = initial_layer_fan_speed;
             ironing_fan_control         = false;
-            // additional_fan_speed_new is left at its configured value (auxiliary fan is independent of the
-            // part-cooling override).
+            // The auxiliary fan's independent initial-layer schedule is resolved below.
         } else if (int(layer_id) >= close_fan_the_first_x_layers) {
             float   fan_max_speed             = m_config.fan_max_speed.get_at(config_index);
             float slow_down_layer_time = float(EXTRUDER_CONFIG(slow_down_layer_time));
@@ -865,7 +864,6 @@ std::string CoolingBuffer::apply_layer_cooldown(
             overhang_fan_control = false;
             overhang_fan_speed   = 0;
             fan_speed_new      = 0;
-            additional_fan_speed_new = 0;
             supp_interface_fan_control = false; 
             supp_interface_fan_speed   = 0;
             internal_bridge_fan_control = false; // ORCA: Add support for separate internal bridge fan speed control
@@ -873,6 +871,20 @@ std::string CoolingBuffer::apply_layer_cooldown(
             ironing_fan_control = false; // ORCA: Add support for ironing fan speed control
             ironing_fan_speed = 0; // ORCA: Add support for ironing fan speed control
         }
+        // Auxiliary cooling has its own initial-layer speed and ramp, independent of the part fan.
+        // Resolve it on tool changes too, before immediate emission or deferred fan restoration.
+        const int additional_initial_layers = m_config.close_additional_fan_first_x_layers.get_at(m_current_extruder);
+        const int additional_full_speed_layer = m_config.additional_fan_full_speed_layer.get_at(m_current_extruder);
+        const double additional_initial_speed = m_config.first_x_layer_fan_speed.get_at(m_current_extruder);
+        if (int(layer_id) < additional_initial_layers) {
+            additional_fan_speed_new = int(std::lround(additional_initial_speed));
+        } else if (int(layer_id) + 1 < additional_full_speed_layer && additional_full_speed_layer > additional_initial_layers) {
+            const double factor = double(int(layer_id) + 1 - additional_initial_layers) /
+                                  double(additional_full_speed_layer - additional_initial_layers);
+            additional_fan_speed_new = int(std::lround(additional_initial_speed +
+                                                       factor * (additional_fan_speed_new - additional_initial_speed)));
+        }
+        additional_fan_speed_new = std::clamp(additional_fan_speed_new, 0, 100);
         // A tool change may keep the same configured base fan speed while the physical fan is
         // still running at the previous filament's overhang speed. Restore the base speed before
         // emitting G-code for the new tool in that case.

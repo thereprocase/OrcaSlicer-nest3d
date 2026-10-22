@@ -4751,6 +4751,9 @@ void TabFilament::build()
 
         optgroup = page->new_optgroup(L("Auxiliary part cooling fan"), L"param_cooling_aux_fan");
         optgroup->append_single_option_line("additional_cooling_fan_speed", "material_cooling#auxiliary-part-cooling-fan", 0);
+        optgroup->append_single_option_line("close_additional_fan_first_x_layers", "material_cooling#auxiliary-part-cooling-fan");
+        optgroup->append_single_option_line("first_x_layer_fan_speed", "material_cooling#auxiliary-part-cooling-fan");
+        optgroup->append_single_option_line("additional_fan_full_speed_layer", "material_cooling#auxiliary-part-cooling-fan");
 
         optgroup = page->new_optgroup(L("Exhaust fan"),L"param_cooling_exhaust");
 
@@ -4978,6 +4981,8 @@ void TabFilament::toggle_options()
         }
 
         toggle_line("additional_cooling_fan_speed", printer_cfg.opt_bool("auxiliary_fan"), 256 + variant_index);
+        for (auto el : {"close_additional_fan_first_x_layers", "first_x_layer_fan_speed", "additional_fan_full_speed_layer"})
+            toggle_line(el, printer_cfg.opt_bool("auxiliary_fan"));
 
         bool support_air_filtration = printer_cfg.opt_bool("support_air_filtration");
         for (auto el : {"activate_air_filtration", "during_print_exhaust_fan_speed", "complete_print_exhaust_fan_speed"})

@@ -1,10 +1,13 @@
 #include <catch2/catch_all.hpp>
 
 #include <catch2/catch_test_macros.hpp>
+#include <catch2/catch_message.hpp>
+#include <catch2/generators/catch_generators.hpp>
 #include "test_helpers.hpp"
 
 #include <algorithm>
 #include <cstddef>
+#include "libslic3r/GCodeReader.hpp"
 #include "libslic3r/PrintConfig.hpp"
 #include "libslic3r/Config.hpp"
 #include "libslic3r/TriangleMesh.hpp"
@@ -16,6 +19,156 @@
 
 using namespace Slic3r;
 using namespace Slic3r::Test;
+
+namespace {
+struct FanSample {
+    int layer;
+    int tool;
+    int part;
+    int auxiliary;
+};
+
+// Observe fan state during deposition, after both layer hooks and cooling-buffer restoration.
+std::vector<FanSample> deposition_fans(const std::string &gcode, const DynamicPrintConfig &config)
+{
+    std::vector<FanSample> samples;
+    GCodeReader reader;
+    reader.apply_config(config);
+    FanSample state{-1, 0, -1, -1};
+    reader.parse_buffer(gcode, [&](GCodeReader &self, const GCodeReader::GCodeLine &line) {
+        if (line.raw().rfind(";AUX_TEST_LAYER=", 0) == 0)
+            state.layer = std::stoi(line.raw().substr(16));
+        else if (line.cmd_is("M106")) {
+            float channel = 1.f;
+            float speed = 0.f;
+            line.has_value('P', channel);
+            if (line.has_value('S', speed)) {
+                if (channel == 2.f)
+                    state.auxiliary = int(speed);
+                else if (channel == 1.f)
+                    state.part = int(speed);
+            }
+        } else if (line.cmd_is("M107")) {
+            state.part = 0;
+        } else if (!line.cmd().empty() && line.cmd().front() == 'T') {
+            state.tool = std::stoi(std::string(line.cmd().substr(1)));
+        } else if (state.layer >= 0 && line.extruding(self) && (line.has_x() || line.has_y())) {
+            samples.push_back(state);
+        }
+    });
+    return samples;
+}
+
+DynamicPrintConfig auxiliary_cooling_config(unsigned int filaments = 1)
+{
+    return multifilament_config(filaments, {
+        {"auxiliary_fan", true},
+        {"layer_height", 0.2},
+        {"initial_layer_print_height", 0.2},
+        {"layer_change_gcode", ";AUX_TEST_LAYER={layer_num}"},
+        {"machine_start_gcode", ""},
+        {"machine_end_gcode", ""},
+        {"use_relative_e_distances", false},
+        {"close_fan_the_first_x_layers", 1},
+        {"full_fan_speed_layer", 0},
+        {"initial_layer_fan_speed", -1},
+        {"fan_min_speed", "20"},
+        {"fan_max_speed", "20"},
+        {"reduce_fan_stop_start_freq", true},
+        {"slow_down_for_layer_cooling", false},
+        {"enable_overhang_bridge_fan", false},
+        {"close_additional_fan_first_x_layers", 3},
+        {"first_x_layer_fan_speed", "0"},
+        {"additional_fan_full_speed_layer", 0},
+        {"additional_cooling_fan_speed", 60},
+        {"skirt_loops", 0},
+        {"brim_type", "no_brim"},
+        {"enable_prime_tower", false},
+    });
+}
+} // namespace
+
+TEST_CASE("Auxiliary cooling follows its own initial layers and ramp", "[Cooling][AuxiliaryFan][Regression]")
+{
+    auto [part_delay, first_speed, aux_delay, full_layer, target, expected] =
+        GENERATE(table<int, int, int, int, int, std::vector<int>>({
+            {1, 0, 3, 0, 60, {0, 0, 0, 60, 60, 60}},
+            {3, 10, 1, 0, 60, {10, 60, 60, 60, 60, 60}},
+            {1, 20, 2, 5, 80, {20, 20, 40, 60, 80, 80}},
+            {1, 0, 0, 4, 80, {20, 40, 60, 80, 80, 80}},
+            {1, 80, 1, 4, 20, {80, 60, 40, 20, 20, 20}},
+            {1, 10, 3, 1, 60, {10, 10, 10, 60, 60, 60}},
+        }));
+    auto config = auxiliary_cooling_config();
+    config.set_deserialize_strict({
+        {"close_fan_the_first_x_layers", part_delay},
+        {"first_x_layer_fan_speed", first_speed},
+        {"close_additional_fan_first_x_layers", aux_delay},
+        {"additional_fan_full_speed_layer", full_layer},
+        {"additional_cooling_fan_speed", target},
+    });
+    // Six 0.2 mm layers exercise the delayed start and the end of each ramp.
+    const auto samples = deposition_fans(slice({make_cube(10., 10., 1.2)}, config), config);
+    REQUIRE_FALSE(samples.empty());
+    std::vector<bool> seen(expected.size(), false);
+    for (const auto &sample : samples) {
+        REQUIRE(sample.layer < int(expected.size()));
+        seen[sample.layer] = true;
+        INFO("layer " << sample.layer << ", initial auxiliary " << first_speed << ", delay " << aux_delay << ", full layer " << full_layer);
+        CHECK(sample.auxiliary == int(255.0 * expected[sample.layer] / 100.0));
+        CHECK(sample.part == (sample.layer < part_delay ? 0 : 51));
+    }
+    CHECK(std::all_of(seen.begin(), seen.end(), [](bool value) { return value; }));
+}
+
+TEST_CASE("First layer part cooling does not override auxiliary cooling", "[Cooling][AuxiliaryFan]")
+{
+    auto config = auxiliary_cooling_config();
+    config.set_deserialize_strict({{"close_fan_the_first_x_layers", 0}, {"initial_layer_fan_speed", 40}});
+    const auto samples = deposition_fans(slice({make_cube(10., 10., 1.2)}, config), config);
+    REQUIRE_FALSE(samples.empty());
+    for (const auto &sample : samples) {
+        CHECK(sample.auxiliary == (sample.layer < 3 ? 0 : 153));
+        CHECK(sample.part == (sample.layer == 0 ? 102 : 51));
+    }
+}
+
+TEST_CASE("A printer without an auxiliary fan emits no auxiliary commands", "[Cooling][AuxiliaryFan]")
+{
+    auto config = auxiliary_cooling_config();
+    config.set_deserialize_strict({{"auxiliary_fan", false}, {"first_x_layer_fan_speed", "25"}});
+    const auto gcode = slice({make_cube(10., 10., 1.2)}, config);
+    CHECK(gcode.find("M106 P2") == std::string::npos);
+}
+
+TEST_CASE("Material changes restore each filament's auxiliary cooling schedule", "[Cooling][AuxiliaryFan][Regression]")
+{
+    auto config = auxiliary_cooling_config(2);
+    config.set_deserialize_strict({
+        {"close_fan_the_first_x_layers", "0,0"},
+        {"close_additional_fan_first_x_layers", "3,1"},
+        {"first_x_layer_fan_speed", "0,20"},
+        {"additional_fan_full_speed_layer", "0,5"},
+        {"additional_cooling_fan_speed", "60,80"},
+    });
+    const auto gcode = slice_with_object_overrides({make_cube(10., 10., 1.2), make_cube(10., 10., 1.2)}, config,
+        {{}, {{"outer_wall_filament_id", 2}, {"inner_wall_filament_id", 2}, {"sparse_infill_filament_id", 2},
+              {"internal_solid_filament_id", 2}, {"top_surface_filament_id", 2}, {"bottom_surface_filament_id", 2}}});
+    const auto samples = deposition_fans(gcode, config);
+    const std::vector<std::vector<int>> expected{{0, 0, 0, 60, 60, 60}, {20, 35, 50, 65, 80, 80}};
+    std::vector<std::vector<bool>> seen(2, std::vector<bool>(6, false));
+    REQUIRE_FALSE(samples.empty());
+    for (const auto &sample : samples) {
+        REQUIRE(sample.tool < 2);
+        REQUIRE(sample.layer < 6);
+        INFO("tool " << sample.tool << ", layer " << sample.layer);
+        seen[sample.tool][sample.layer] = true;
+        CHECK(sample.auxiliary == int(255.0 * expected[sample.tool][sample.layer] / 100.0));
+        CHECK(sample.part == 51);
+    }
+    for (const auto &layers : seen)
+        CHECK(std::all_of(layers.begin(), layers.end(), [](bool value) { return value; }));
+}
 
 // The fan is held off for the first close_fan_the_first_x_layers layers, so an explicit
 // fan-off command is emitted.

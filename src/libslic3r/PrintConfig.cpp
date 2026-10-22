@@ -2344,7 +2344,7 @@ void PrintConfigDef::init_fff_params()
 
     def = this->add("close_fan_the_first_x_layers", coInts);
     def->label = L("No cooling for the first");
-    def->tooltip = L("Turn off all cooling fans for the first few layers. "
+    def->tooltip = L("Turn off the part cooling fan for the first few layers. "
                      "This can be used to improve build plate adhesion.");
     def->sidetext = L("layers");
     def->min = 0;
@@ -5616,8 +5616,8 @@ void PrintConfigDef::init_fff_params()
 
     def = this->add("additional_cooling_fan_speed", coInts);
     def->label = L("Fan speed");
-    def->tooltip = L("Speed of auxiliary part cooling fan. Auxiliary fan will run at this speed during printing except the first several layers "
-                     "which is defined by no cooling layers.\nPlease enable auxiliary_fan in printer settings to use this feature. G-code command: M106 P2 S(0-255)");
+    def->tooltip = L("Speed of auxiliary part cooling fan. The auxiliary fan uses its own initial-layer speed and ramp settings.\n"
+                     "Please enable auxiliary_fan in printer settings to use this feature. G-code command: M106 P2 S(0-255)");
     def->sidetext = "%";
     def->min = 0;
     def->max = 100;
