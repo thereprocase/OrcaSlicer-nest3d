@@ -289,6 +289,8 @@ set(lisbslic3r_sources
     GCode/PreciseSeamInternal.hpp
     GCode/SmallAreaInfillFlowCompensator.cpp
     GCode/SmallAreaInfillFlowCompensator.hpp
+    GCode/StartGCodeExtrusion.cpp
+    GCode/StartGCodeExtrusion.hpp
     GCode/SpiralVase.cpp
     GCode/SpiralVase.hpp
     GCode/WipePathHelpers.cpp
