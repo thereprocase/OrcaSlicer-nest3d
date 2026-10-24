@@ -1069,8 +1069,8 @@ std::vector<Issue> explain_result(const Explain &e)
         issue.kind = Issue::Kind::Unplaced;
         // The first limit the part fails against, adding them one at a time to an empty plate.
         const std::vector<Obstacle> &list = e.obstacles.list;
-        const size_t                 regions_begin = list.size() - 1 - e.obstacles.regions;
-        std::vector<Obstacle>        scene(list.begin() + std::ptrdiff_t(regions_begin), list.end()); // regions, then the outline
+        const size_t                 regions_begin = e.obstacles.mask - e.obstacles.regions;
+        std::vector<Obstacle>        scene(list.begin() + std::ptrdiff_t(regions_begin), list.begin() + std::ptrdiff_t(e.obstacles.mask) + 1); // regions, then the outline
         const double                 cell = e.engine.cell_mm;
         const coord_t                inflation = extras.inflation;
         ExPolygons                   blocked;
@@ -1091,7 +1091,7 @@ std::vector<Issue> explain_result(const Explain &e)
             issue.sentences.push_back(size_hint(brim_mm, e.skirt.enabled, rotates));
         };
         // The scene without the reserved areas first: only the bed and the caller's regions.
-        std::vector<Obstacle> only_bed{list.back()};
+        std::vector<Obstacle> only_bed{list[e.obstacles.mask]};
         if (!fits_alone(e, size_t(part.shape), part.group, only_bed))
             // TRN %1% and %2% are the width and depth of the largest free area, in mm.
             add_room(Issue::Limit::Bed, L("The room left on the bed is %1% × %2% mm."), {});

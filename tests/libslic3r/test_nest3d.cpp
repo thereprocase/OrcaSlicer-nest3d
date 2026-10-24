@@ -1246,7 +1246,8 @@ TEST_CASE("A part that fits no plate is named, measured with its brim, and told 
     const std::string start = "G28\nG90\nM83\nG1 X22 Y0 Z0.3 F12000\n"
                               "{local fa = 0.7853981633974483 * filament_diameter[0] * filament_diameter[0]}\n"
                               "G1 X240 Y0 E{21.9 / fa}\nG1 E-0.5\nG1 Z1\n";
-    const auto translate = [](const char *msgid) { return std::string("<") + msgid + ">"; };
+    std::vector<std::string> asked; // the msgids a catalog would be asked for
+    const auto translate = [&asked](const char *msgid) { asked.push_back(msgid); return std::string(msgid); };
 
     SECTION("larger than the bed")
     {
@@ -1272,8 +1273,8 @@ TEST_CASE("A part that fits no plate is named, measured with its brim, and told 
         CHECK_THAT(text, Catch::Matchers::ContainsSubstring("The room left on the bed is"));
         CHECK_THAT(text, Catch::Matchers::ContainsSubstring("make the part smaller"));
         // Each sentence is its own msgid with placeholders, so a translator sees whole sentences.
-        const std::string translated = nest3d::issue_text(issue, translate);
-        CHECK_THAT(translated, Catch::Matchers::ContainsSubstring("<%1% measures %2% × %3% mm with its %4% mm brim.>"));
+        nest3d::issue_text(issue, translate);
+        CHECK(std::find(asked.begin(), asked.end(), "%1% measures %2% × %3% mm with its %4% mm brim.") != asked.end());
     }
     SECTION("beside the excluded area")
     {
