@@ -35,6 +35,7 @@
 #include <condition_variable>
 #include <cstddef>
 #include <functional>
+#include <limits>
 #include <map>
 #include <mutex>
 #include <set>
@@ -555,6 +556,35 @@ ExPolygons reserved_area(const ArrangePolygons &selected, const ArrangePolygons 
     return union_ex(intersection_ex(area, near_bed), start_gcode);
 }
 
+// The bed the engine packs on. Callers hand over the printable area pulled in by a bed shrink, and every
+// part is grown by half the spacing besides, which keeps parts apart but would count a second time at the
+// bed's edge. Here the printable area is the bed and a part's geometry may reach its boundary; only what
+// prints beyond the geometry stays inside, a brim and the skirt distance. The bed moves by the least
+// (inflation - that extent) over the selected parts, so the part with the widest such extent keeps it
+// whole inside and the others lie at least as far in as they must. Falls back to the caller's bed when the
+// printable area does not match it, as for a bed the caller reshaped.
+Points engine_bed(const Points &bed, const ArrangePolygons &selected, const ArrangeParams &params,
+                  const DynamicPrintConfig &config)
+{
+    const Points printable = get_bed_shape(config);
+    if (printable.size() < 3 || bed.size() < 3 || selected.empty())
+        return bed;
+    // The caller's bed is the printable area shrunk by bed_shrink on each axis.
+    const BoundingBox printable_bb(printable), bed_bb(bed);
+    const coord_t     tolerance = scaled<coord_t>(0.01);
+    if (std::abs(printable_bb.size().x() - bed_bb.size().x() - 2 * scaled<coord_t>(params.bed_shrink_x)) > tolerance ||
+        std::abs(printable_bb.size().y() - bed_bb.size().y() - 2 * scaled<coord_t>(params.bed_shrink_y)) > tolerance)
+        return bed;
+    coord_t grow = std::numeric_limits<coord_t>::max();
+    for (const ArrangePolygon &ap : selected)
+        if (!ap.is_virt_object)
+            grow = std::min(grow, ap.inflation - scaled<coord_t>(ap.brim_width + params.brim_skirt_distance));
+    if (grow == std::numeric_limits<coord_t>::max())
+        return bed;
+    const Polygons moved = offset(Polygon(printable), float(grow));
+    return moved.size() == 1 ? moved.front().points : bed;
+}
+
 // The spacing a part keeps from the bed's excluded area: what the caller gave its excluded regions
 // (1 mm, or half of an explicit gap, which the part's own inflation completes).
 coord_t exclusion_inflation(const ArrangeParams &params)
@@ -644,12 +674,13 @@ std::vector<double> candidate_angles(double current, const std::vector<double> &
 
 void arrange_polygons(ArrangePolygons          &selected,
                       const ArrangePolygons    &fixed,
-                      const Points             &bed,
+                      const Points             &caller_bed,
                       const ArrangeParams      &params,
                       const ArrangeSettings    &settings,
                       const DynamicPrintConfig &config,
                       int                       max_plates)
 {
+    const Points      bed = engine_bed(caller_bed, selected, params, config);
     const BoundingBox bed_bb(bed);
     const Params      p     = engine_params(bed_bb, params, settings, max_plates, selected.size());
     if (settings.generate_supports)

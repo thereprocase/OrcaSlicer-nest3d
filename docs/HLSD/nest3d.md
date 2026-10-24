@@ -46,6 +46,13 @@ them filled; the model only ever over-estimates the space a part takes.
   The wipe tower and exclusion areas are full-height columns over their polygons. On a bed that is
   not a rectangle, the cells whose centre lies outside its outline are a full-height obstacle on
   every plate.
+- **Bed edge.** The printable area is the bed: callers hand over that area pulled in by a bed
+  shrink, and the adapter takes the shrink back, since the half spacing every part is grown by already
+  keeps parts apart and would count a second time against the edge. A part's geometry may reach the
+  boundary. What prints beyond the geometry, a brim and the skirt distance, stays inside: the bed
+  moves by the least of (inflation - that extent) over the selected parts, so the part with the
+  widest extent keeps it whole inside and the rest lie at least as far in as they must. A bed that does not match the printable area less the shrink, as one the
+  caller reshaped, is used as it comes.
 - **Reserved plate area.** Two more full-height obstacles on every plate keep the spacing of the
   excluded regions (1 mm, or half an explicit gap). The first is `bed_exclude_area` read as the one
   polygon the plate draws: the plate hands the arrangers the bounding box of every four points, which

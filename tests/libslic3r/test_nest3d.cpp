@@ -175,7 +175,7 @@ const DynamicPrintConfig &print_config()
 }
 
 // Every instance of `model` as the arrange job hands it over, spaced `Spacing` apart.
-ArrangePolygons items_of(Model &model)
+ArrangePolygons items_of(Model &model, double brim_width = 0.)
 {
     ArrangePolygons items;
     for (ModelObject *o : model.objects)
@@ -183,6 +183,7 @@ ArrangePolygons items_of(Model &model)
             items.push_back(get_instance_arrange_poly(mi, print_config()));
             items.back().inflation = scaled(0.5 * Spacing);
             items.back().itemid    = int(items.size()) - 1;
+            items.back().brim_width = brim_width;
         }
     return items;
 }
@@ -190,9 +191,9 @@ ArrangePolygons items_of(Model &model)
 // Arranges every instance of `model` with Nest3D and applies the result to the model.
 ArrangePolygons nest(Model &model, const Points &bed, const ArrangeParams &params, const ArrangeSettings &settings,
                      const ArrangePolygons &fixed = {}, int max_plates = PlatesCap,
-                     const DynamicPrintConfig &config = print_config())
+                     const DynamicPrintConfig &config = print_config(), double brim_width = 0.)
 {
-    ArrangePolygons items = items_of(model);
+    ArrangePolygons items = items_of(model, brim_width);
     nest3d::arrange_polygons(items, fixed, bed, params, settings, config, max_plates);
     for (ArrangePolygon &ap : items)
         ap.apply();
@@ -597,6 +598,66 @@ TEST_CASE("Parts stay off the purge line the start G-code lays", "[Nest3D]")
     CHECK(near_region(items, rect(0, 0, 18, 28)) == 0);
     // The bead, as wide as the 0.4 mm nozzle, with square ends.
     CHECK(near_region(items, rect(21.8, 1.8, 240.2, 2.2)) == 0);
+}
+
+// Shortest distance from `box`, a plan-view bounding box, to the edges of the rectangle [0, w] x [0, h].
+double edge_distance(const BoundingBoxf &box, double w, double h)
+{
+    return std::min({box.min.x(), box.min.y(), w - box.max.x(), h - box.max.y()});
+}
+
+TEST_CASE("A big disc and a small one share a plate that the old edge margin split", "[Nest3D]")
+{
+    // The discs (radii 99 and 49 mm) fit a 256 mm bed only pushed into opposite corners, clear of the
+    // cutter zone and the purge strip along the front. Their centres have to be 149 mm apart: the
+    // diagonal leaves about 150 mm when the geometry may reach the bed's edge, and under 148 mm when the
+    // parts also keep a margin from it.
+    const std::vector<Vec2d> cutter{{0, 0}, {18, 0}, {18, 28}, {0, 28}};
+    const std::string        start = "G28\nG90\nM83\nG1 X22 Y0 Z0.3 F12000\n"
+                                     "{local fa = 0.7853981633974483 * filament_diameter[0] * filament_diameter[0]}\n"
+                                     "G1 X240 Y0 E{21.9 / fa}\nG1 E-0.5\nG1 Z1\n";
+    Printer p = printer(cutter, start);
+    // The bed as the printable area, as a caller hands it over without a shrink.
+    p.params.bed_shrink_x = p.params.bed_shrink_y = 0.f;
+    const Points bed = rect_bed(256, 256);
+    Model        model;
+    add_object(model, prism(circle(99.f, 96), 0.f, 5.f), 1, "big");
+    add_object(model, prism(circle(49.f, 96), 0.f, 5.f), 1, "small");
+    const ArrangePolygons items = nest(model, bed, p.params, nest_settings(), {}, PlatesCap, p.config);
+    std::string boxes;
+    for (const Printed &part : printed(items))
+        boxes += "plate " + std::to_string(part.plate) + " box " + std::to_string(part.box.min.x()) + "," + std::to_string(part.box.min.y()) + " - " + std::to_string(part.box.max.x()) + "," + std::to_string(part.box.max.y()) + "; ";
+    INFO(boxes);
+    CHECK(unplaced(items) == 0);
+    CHECK(plates_used(items) == 1);
+    CHECK(off_bed(items, bed) == 0);
+    CHECK(collisions(items) == 0);
+    CHECK(near_region(items, rect(0, 0, 18, 28)) == 0);
+    CHECK(near_region(items, rect(21.8, 1.8, 240.2, 2.2)) == 0);
+}
+
+TEST_CASE("A brim stays on the plate at the bed's corner", "[Nest3D]")
+{
+    // The printable area is the bed, so the geometry may reach its edge, and a brim, which prints
+    // beyond the geometry, may not. Nine 39 mm cubes fill a 120 mm bed 3 x 3 with 1 mm between them,
+    // which leaves no margin to the edge: they fit one plate only without a brim.
+    const double brim = GENERATE(0., 5.);
+    Model        model;
+    add_object(model, cube(39, 39, 10), 9);
+    ArrangeParams params = quiet_params();
+    params.bed_shrink_x = params.bed_shrink_y = 0.f;
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    config.set_key_value("printable_area", new ConfigOptionPoints({Vec2d(0, 0), Vec2d(120, 0), Vec2d(120, 120), Vec2d(0, 120)}));
+    const Points          bed   = rect_bed(120, 120);
+    const ArrangePolygons items = nest(model, bed, params, nest_settings(), {}, PlatesCap, config, brim);
+    INFO("brim " << brim);
+    CHECK(unplaced(items) == 0);
+    CHECK(collisions(items) == 0);
+    CHECK((plates_used(items) == 1) == (brim == 0.));
+    for (const Printed &part : printed(items)) {
+        const double edge = edge_distance(BoundingBoxf(Vec2d(part.box.min.x(), part.box.min.y()), Vec2d(part.box.max.x(), part.box.max.y())), 120, 120);
+        CHECK(edge >= brim - Tolerance);
+    }
 }
 
 TEST_CASE("A start G-code without extrusion leaves the arrangement unchanged", "[Nest3D]")
