@@ -6,13 +6,17 @@
 // Nothing here depends on the engine's internal types, which strategy won, or exact coordinates
 // beyond a tolerance, so the engine can be rewritten without touching these tests.
 
+#include <catch2/catch_approx.hpp>
 #include <catch2/catch_message.hpp>
 #include <catch2/catch_test_macros.hpp>
 #include <catch2/generators/catch_generators.hpp>
 #include <catch2/matchers/catch_matchers.hpp>
 #include <catch2/matchers/catch_matchers_floating_point.hpp>
+#include <catch2/matchers/catch_matchers_string.hpp>
 
+#include "libslic3r/Nest3D/Footprint.hpp"
 #include "libslic3r/Nest3D/Nest3DArrange.hpp"
+#include "libslic3r/Nest3D/Report.hpp"
 
 #include "libslic3r/Arrange.hpp"
 #include "libslic3r/BoundingBox.hpp"
@@ -168,9 +172,18 @@ ArrangeSettings nest_settings(bool stacking = false, float vertical_gap = 2.f)
     return s;
 }
 
+// The slicer's defaults without a brim: the tests that judge spacing alone should not print one. The ones
+// that do set brim_type themselves.
+DynamicPrintConfig base_config()
+{
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    config.set_key_value("brim_type", new ConfigOptionEnum<BrimType>(btNoBrim));
+    return config;
+}
+
 const DynamicPrintConfig &print_config()
 {
-    static const DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    static const DynamicPrintConfig config = base_config();
     return config;
 }
 
@@ -522,7 +535,7 @@ TEST_CASE("Parts avoid exclusion regions and fixed parts, wherever the pile is c
 // excluded regions the plate hands the arranger for it, the bounding box of every four points.
 struct Printer
 {
-    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    DynamicPrintConfig config = base_config();
     ArrangeParams      params = quiet_params();
 };
 
@@ -646,17 +659,21 @@ TEST_CASE("A brim stays on the plate at the bed's corner", "[Nest3D]")
     add_object(model, cube(39, 39, 10), 9);
     ArrangeParams params = quiet_params();
     params.bed_shrink_x = params.bed_shrink_y = 0.f;
-    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    DynamicPrintConfig config = base_config();
     config.set_key_value("printable_area", new ConfigOptionPoints({Vec2d(0, 0), Vec2d(120, 0), Vec2d(120, 120), Vec2d(0, 120)}));
+    config.set_key_value("brim_type", new ConfigOptionEnum<BrimType>(brim > 0. ? btOuterOnly : btNoBrim));
+    config.set_key_value("brim_width", new ConfigOptionFloat(brim));
     const Points          bed   = rect_bed(120, 120);
     const ArrangePolygons items = nest(model, bed, params, nest_settings(), {}, PlatesCap, config, brim);
-    INFO("brim " << brim);
+    // The brim Orca makes is a whole number of beads wide, a little under the setting.
+    const double reach = brim > 0. ? nest3d::object_brim(*model.objects.front()->instances.front(), Transform3d::Identity(), config, {}).reach : 0.;
+    INFO("brim " << brim << " reaches " << reach);
     CHECK(unplaced(items) == 0);
     CHECK(collisions(items) == 0);
     CHECK((plates_used(items) == 1) == (brim == 0.));
     for (const Printed &part : printed(items)) {
         const double edge = edge_distance(BoundingBoxf(Vec2d(part.box.min.x(), part.box.min.y()), Vec2d(part.box.max.x(), part.box.max.y())), 120, 120);
-        CHECK(edge >= brim - Tolerance);
+        CHECK(edge >= reach - Tolerance);
     }
 }
 
@@ -665,7 +682,7 @@ TEST_CASE("A skirt stays on the plate at the bed's corner", "[Nest3D]")
     // The skirt prints its distance and all of its loops out from the geometry. The bed comes as the
     // arrange job builds it: the printable area less a shrink that update_arrange_params() has grown by
     // that full skirt width.
-    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    DynamicPrintConfig config = base_config();
     config.set_key_value("printable_area", new ConfigOptionPoints({Vec2d(0, 0), Vec2d(120, 0), Vec2d(120, 120), Vec2d(0, 120)}));
     config.set_key_value("skirt_loops", new ConfigOptionInt(2));
     config.set_key_value("skirt_height", new ConfigOptionInt(1));
@@ -1027,4 +1044,302 @@ TEST_CASE("Cancelling stops the arrange and leaves no invalid placement", "[Nest
     CHECK(unplaced(items) > 0);
     CHECK(off_bed(items, bed) == 0);
     CHECK(collisions(items) == 0);
+}
+
+// ---------------------------------------------------------------------------
+// Brim and skirt in the footprint, and the messages for a part that does not fit
+// ---------------------------------------------------------------------------
+
+namespace {
+
+// `base_config()` on a square bed of `side` mm with a brim of the given type and width, and the skirt
+// off unless `skirt_loops` says otherwise.
+DynamicPrintConfig brim_config(double side, BrimType type, double width, int skirt_loops = 0)
+{
+    DynamicPrintConfig config = base_config();
+    config.set_key_value("printable_area", new ConfigOptionPoints({Vec2d(0, 0), Vec2d(side, 0), Vec2d(side, side), Vec2d(0, side)}));
+    config.set_key_value("brim_type", new ConfigOptionEnum<BrimType>(type));
+    config.set_key_value("brim_width", new ConfigOptionFloat(width));
+    config.set_key_value("skirt_loops", new ConfigOptionInt(skirt_loops));
+    return config;
+}
+
+// Orca's brim for the first instance of the model's first object, as the footprint uses it.
+nest3d::ObjectBrim brim_of(Model &model, const DynamicPrintConfig &config)
+{
+    return nest3d::object_brim(*model.objects.front()->instances.front(), Transform3d::Identity(), config, {});
+}
+
+BoundingBoxf box_of(const Printed &part)
+{
+    return BoundingBoxf(Vec2d(part.box.min.x(), part.box.min.y()), Vec2d(part.box.max.x(), part.box.max.y()));
+}
+
+// Plan-view gap between two parts' bounding boxes (they are axis-parallel cubes).
+double gap_between(const Printed &a, const Printed &b)
+{
+    const BoundingBoxf p = box_of(a), q = box_of(b);
+    const double       dx = std::max({q.min.x() - p.max.x(), p.min.x() - q.max.x(), 0.});
+    const double       dy = std::max({q.min.y() - p.max.y(), p.min.y() - q.max.y(), 0.});
+    return std::hypot(dx, dy);
+}
+
+} // namespace
+
+TEST_CASE("The brim shape is Orca's own for each brim type and per-object override", "[Nest3D][Brim]")
+{
+    Model model;
+    add_object(model, cube(30, 30, 10));
+    const BoundingBoxf3 mesh = bounding_box(printed_mesh(*model.objects.front()->instances.front()));
+
+    SECTION("outer brim reaches its width, rounded down to whole beads, on every side")
+    {
+        const nest3d::ObjectBrim brim = brim_of(model, brim_config(200, btOuterOnly, 5.));
+        REQUIRE_FALSE(brim.areas.empty());
+        CHECK(brim.reach > 4.5);
+        CHECK(brim.reach <= 5. + Tolerance);
+        // The brim is in the frame of the printed mesh: it surrounds it evenly.
+        const BoundingBox box = get_extents(brim.areas);
+        CHECK(unscaled(box.min.x()) == Catch::Approx(mesh.min.x() - brim.reach).margin(0.05));
+        CHECK(unscaled(box.max.y()) == Catch::Approx(mesh.max.y() + brim.reach).margin(0.05));
+    }
+    SECTION("no brim leaves no shape")
+    {
+        CHECK(brim_of(model, brim_config(200, btNoBrim, 5.)).areas.empty());
+    }
+    SECTION("ears cover less than the full ring")
+    {
+        const nest3d::ObjectBrim outer = brim_of(model, brim_config(200, btOuterOnly, 5.));
+        const nest3d::ObjectBrim ears  = brim_of(model, brim_config(200, btEar, 5.));
+        REQUIRE_FALSE(ears.areas.empty());
+        CHECK(area(ears.areas) < 0.5 * area(outer.areas));
+        CHECK(ears.reach > 0.);
+    }
+    SECTION("the auto brim picks a width of its own")
+    {
+        // A tall thin part has little to hold it down; a low cube needs no brim at all.
+        Model tall;
+        add_object(tall, cube(10, 10, 90));
+        const nest3d::ObjectBrim brim = brim_of(tall, brim_config(200, btAutoBrim, 0.));
+        REQUIRE_FALSE(brim.areas.empty());
+        CHECK(brim.reach > 0.);
+    }
+    SECTION("an object's own brim width overrides the print's")
+    {
+        model.objects.front()->config.set_key_value("brim_width", new ConfigOptionFloat(2.));
+        const nest3d::ObjectBrim brim = brim_of(model, brim_config(200, btOuterOnly, 8.));
+        CHECK(brim.reach > 1.5);
+        CHECK(brim.reach <= 2. + Tolerance);
+    }
+}
+
+TEST_CASE("Neighbouring brims stay apart and keep to the plate, each part with its own brim", "[Nest3D][Brim]")
+{
+    // Two 30 mm cubes with a 5 mm brim: side by side they need the brims clear of the edge and of each other.
+    // The cube with the wider brim of its own (10 mm) keeps that much from the edge; the plain one gets close.
+    Model model;
+    add_object(model, cube(30, 30, 10), 1, "wide");
+    add_object(model, cube(30, 30, 10), 1, "plain");
+    model.objects.front()->config.set_key_value("brim_width", new ConfigOptionFloat(10.));
+    const DynamicPrintConfig config = brim_config(110, btOuterOnly, 3.);
+    ArrangeParams            params = quiet_params();
+    params.bed_shrink_x = params.bed_shrink_y = 0.f;
+    params.allow_rotations = false;
+    const Points          bed   = rect_bed(110, 110);
+    const ArrangePolygons items = nest(model, bed, params, nest_settings(), {}, PlatesCap, config);
+    const double wide_reach  = brim_of(model, config).reach;
+    const double plain_reach = nest3d::object_brim(*model.objects.back()->instances.front(), Transform3d::Identity(), config, {}).reach;
+    CHECK(unplaced(items) == 0);
+    CHECK(plates_used(items) == 1);
+    CHECK(collisions(items) == 0);
+    const std::vector<Printed> parts = printed(items);
+    REQUIRE(parts.size() == 2);
+    CHECK(edge_distance(box_of(parts[0]), 110, 110) >= wide_reach - Tolerance);
+    CHECK(edge_distance(box_of(parts[1]), 110, 110) >= plain_reach - Tolerance);
+    // Brim to brim is at least the two spacing allowances apart, so the geometry is both brims plus those.
+    CHECK(gap_between(parts[0], parts[1]) >= wide_reach + plain_reach + Spacing - Tolerance);
+}
+
+TEST_CASE("A brim takes room: parts that fit side by side without it need a second plate with it", "[Nest3D][Brim]")
+{
+    Model model;
+    add_object(model, cube(40, 40, 10), 4);
+    ArrangeParams params = quiet_params();
+    params.bed_shrink_x = params.bed_shrink_y = 0.f;
+    params.allow_rotations = false;
+    const Points bed = rect_bed(100, 100);
+    const ArrangePolygons plain = nest(model, bed, params, nest_settings(), {}, PlatesCap, brim_config(100, btNoBrim, 0.));
+    CHECK(plates_used(plain) == 1); // 2 x 2 cubes of 40 mm with 1 mm between them
+    const ArrangePolygons brimmed = nest(model, bed, params, nest_settings(), {}, PlatesCap, brim_config(100, btOuterOnly, 6.));
+    CHECK(unplaced(brimmed) == 0);
+    CHECK(plates_used(brimmed) > 1); // 40 + 2 x 6 mm of brim each does not fit twice across 100 mm
+    CHECK(collisions(brimmed) == 0);
+}
+
+TEST_CASE("A skirt per object is reserved around each object, a combined skirt only around the plate", "[Nest3D][Skirt]")
+{
+    const double side = 200.;
+    DynamicPrintConfig config = brim_config(side, btNoBrim, 0., 2);
+    config.set_key_value("skirt_distance", new ConfigOptionFloat(4.));
+    config.set_key_value("skirt_height", new ConfigOptionInt(1));
+    const double extent = get_real_skirt_dist(config);
+    REQUIRE(extent > 4.);
+    Model model;
+    add_object(model, cube(30, 30, 10), 2);
+    ArrangeParams params = quiet_params();
+    params.bed_shrink_x = params.bed_shrink_y = 0.f;
+    params.allow_rotations = false;
+    arrangement::update_arrange_params(params, &config, {});
+    const Points bed = get_shrink_bedpts(&config, params);
+
+    SECTION("combined")
+    {
+        config.set_key_value("skirt_type", new ConfigOptionEnum<SkirtType>(stCombined));
+        const ArrangePolygons items = nest(model, bed, params, nest_settings(), {}, PlatesCap, config);
+        const std::vector<Printed> parts = printed(items);
+        CHECK(unplaced(items) == 0);
+        CHECK(gap_between(parts[0], parts[1]) < 2.);                          // one skirt around both: parts stay close
+        for (const Printed &part : parts)
+            CHECK(edge_distance(box_of(part), side, side) >= extent - Tolerance); // and it stays on the plate
+    }
+    SECTION("per object")
+    {
+        config.set_key_value("skirt_type", new ConfigOptionEnum<SkirtType>(stPerObject));
+        const ArrangePolygons items = nest(model, bed, params, nest_settings(), {}, PlatesCap, config);
+        const std::vector<Printed> parts = printed(items);
+        CHECK(unplaced(items) == 0);
+        // Each object's skirt ring, from its distance out to its last loop, clears the other object's.
+        CHECK(gap_between(parts[0], parts[1]) >= 2. * extent - Tolerance);
+        for (const Printed &part : parts)
+            CHECK(edge_distance(box_of(part), side, side) >= extent - Tolerance);
+    }
+}
+
+TEST_CASE("A combined skirt that would cross the excluded area moves the pile inward", "[Nest3D][Skirt]")
+{
+    // A strip 18 mm wide along the left edge of a 60 mm bed. The cube of 30 mm fits beside it with 1 mm
+    // to spare, but the skirt (distance 3 mm and a loop) printed around it would run over the strip.
+    DynamicPrintConfig config = brim_config(60, btNoBrim, 0., 1);
+    config.set_key_value("skirt_distance", new ConfigOptionFloat(3.));
+    config.set_key_value("skirt_height", new ConfigOptionInt(1));
+    config.set_key_value("bed_exclude_area", new ConfigOptionPoints({Vec2d(0, 0), Vec2d(18, 0), Vec2d(18, 60), Vec2d(0, 60)}));
+    const double extent = get_real_skirt_dist(config);
+    ArrangeParams params = quiet_params();
+    params.bed_shrink_x = params.bed_shrink_y = 0.f;
+    params.allow_rotations = false;
+    arrangement::update_arrange_params(params, &config, {});
+    ArrangePolygon region;
+    region.poly.contour = rect(0, 0, 18, 60);
+    region.inflation    = scaled(0.5 * Spacing);
+    params.excluded_regions.push_back(region);
+    Model model;
+    add_object(model, cube(30, 30, 10));
+    const ArrangePolygons items = nest(model, get_shrink_bedpts(&config, params), params, nest_settings(), {}, PlatesCap, config);
+    REQUIRE(unplaced(items) == 0);
+    const Printed part = printed(items).front();
+    CHECK(box_of(part).min.x() >= 18. + extent - Tolerance);
+    CHECK(box_of(part).max.x() <= 60. - extent + Tolerance);
+}
+
+TEST_CASE("A part that fits no plate is named, measured with its brim, and told which limit stops it", "[Nest3D][Messages]")
+{
+    const std::string start = "G28\nG90\nM83\nG1 X22 Y0 Z0.3 F12000\n"
+                              "{local fa = 0.7853981633974483 * filament_diameter[0] * filament_diameter[0]}\n"
+                              "G1 X240 Y0 E{21.9 / fa}\nG1 E-0.5\nG1 Z1\n";
+    const auto translate = [](const char *msgid) { return std::string("<") + msgid + ">"; };
+
+    SECTION("larger than the bed")
+    {
+        Model model;
+        add_object(model, cube(98, 98, 10), 1, "Gear");
+        const DynamicPrintConfig config = brim_config(100, btOuterOnly, 5.);
+        ArrangeParams            params = quiet_params();
+        params.bed_shrink_x = params.bed_shrink_y = 0.f;
+        std::vector<nest3d::Issue> issues;
+        ArrangePolygons            items = items_of(model, 5.);
+        nest3d::arrange_polygons(items, {}, rect_bed(100, 100), params, nest_settings(), config, PlatesCap, &issues);
+        REQUIRE(unplaced(items) == 1);
+        REQUIRE(issues.size() == 1);
+        const nest3d::Issue &issue = issues.front();
+        CHECK(issue.kind == nest3d::Issue::Kind::Unplaced);
+        CHECK(issue.limit == nest3d::Issue::Limit::Bed);
+        CHECK(issue.part == "Gear");
+        const double reach = brim_of(model, config).reach;
+        const std::string text = nest3d::issue_text(issue);
+        INFO(text);
+        CHECK_THAT(text, Catch::Matchers::StartsWith("Gear measures " + nest3d::length_text(98 + 2 * reach) + " × " +
+                                                     nest3d::length_text(98 + 2 * reach) + " mm with its " + nest3d::length_text(reach) + " mm brim."));
+        CHECK_THAT(text, Catch::Matchers::ContainsSubstring("The room left on the bed is"));
+        CHECK_THAT(text, Catch::Matchers::ContainsSubstring("make the part smaller"));
+        // Each sentence is its own msgid with placeholders, so a translator sees whole sentences.
+        const std::string translated = nest3d::issue_text(issue, translate);
+        CHECK_THAT(translated, Catch::Matchers::ContainsSubstring("<%1% measures %2% × %3% mm with its %4% mm brim.>"));
+    }
+    SECTION("beside the excluded area")
+    {
+        Model model;
+        add_object(model, cube(80, 20, 10), 1, "Rail");
+        DynamicPrintConfig config = brim_config(100, btNoBrim, 0.);
+        config.set_key_value("bed_exclude_area", new ConfigOptionPoints({Vec2d(0, 0), Vec2d(30, 0), Vec2d(30, 100), Vec2d(0, 100)}));
+        ArrangeParams params = quiet_params();
+        params.bed_shrink_x = params.bed_shrink_y = 0.f;
+        params.allow_rotations = false;
+        ArrangePolygon region;
+        region.poly.contour = rect(0, 0, 30, 100);
+        region.inflation    = scaled(0.5 * Spacing);
+        params.excluded_regions.push_back(region);
+        std::vector<nest3d::Issue> issues;
+        ArrangePolygons            items = items_of(model);
+        nest3d::arrange_polygons(items, {}, rect_bed(100, 100), params, nest_settings(), config, PlatesCap, &issues);
+        REQUIRE(unplaced(items) == 1);
+        REQUIRE(issues.size() == 1);
+        CHECK(issues.front().limit == nest3d::Issue::Limit::ExcludedArea);
+        const std::string text = nest3d::issue_text(issues.front());
+        INFO(text);
+        CHECK_THAT(text, Catch::Matchers::StartsWith("Rail measures 80 × 20 mm."));
+        CHECK_THAT(text, Catch::Matchers::ContainsSubstring("The room left beside the excluded area is"));
+    }
+    SECTION("beside the purge strip")
+    {
+        Model model;
+        add_object(model, cube(100, 254, 5), 1, "Rail");
+        const Printer p = printer({{0, 0}, {18, 0}, {18, 28}, {0, 28}}, start);
+        std::vector<nest3d::Issue> issues;
+        ArrangeParams              params = p.params;
+        params.bed_shrink_x = params.bed_shrink_y = 0.f;
+        params.allow_rotations = false;
+        ArrangePolygons items = items_of(model);
+        nest3d::arrange_polygons(items, {}, rect_bed(256, 256), params, nest_settings(), p.config, PlatesCap, &issues);
+        REQUIRE(unplaced(items) == 1);
+        REQUIRE(issues.size() == 1);
+        CHECK(issues.front().limit == nest3d::Issue::Limit::PurgeStrip);
+        CHECK_THAT(nest3d::issue_text(issues.front()), Catch::Matchers::ContainsSubstring("start G-code purge line"));
+    }
+}
+
+TEST_CASE("A part that moves to a later plate says the others left it no room", "[Nest3D][Messages]")
+{
+    Model model;
+    add_object(model, cube(60, 60, 10), 2, "Block");
+    ArrangeParams params = quiet_params();
+    params.bed_shrink_x = params.bed_shrink_y = 0.f;
+    std::vector<nest3d::Issue> issues;
+    ArrangePolygons            items = items_of(model);
+    nest3d::arrange_polygons(items, {}, rect_bed(70, 70), params, nest_settings(), base_config(), PlatesCap, &issues);
+    REQUIRE(plates_used(items) == 2);
+    REQUIRE(issues.size() == 1);
+    CHECK(issues.front().kind == nest3d::Issue::Kind::Spilled);
+    CHECK(issues.front().part == "Block");
+    CHECK_THAT(nest3d::issue_text(issues.front()), Catch::Matchers::ContainsSubstring("next plate"));
+}
+
+TEST_CASE("Parts that all fit report nothing", "[Nest3D][Messages]")
+{
+    Model model;
+    add_object(model, cube(20, 20, 10), 3);
+    std::vector<nest3d::Issue> issues;
+    ArrangePolygons            items = items_of(model);
+    nest3d::arrange_polygons(items, {}, rect_bed(200, 200), quiet_params(), nest_settings(), base_config(), PlatesCap, &issues);
+    CHECK(unplaced(items) == 0);
+    CHECK(issues.empty());
 }

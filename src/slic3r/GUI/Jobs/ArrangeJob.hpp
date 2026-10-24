@@ -51,6 +51,8 @@ class ArrangeJob : public Job
 
     arrangement::ArrangeParams params;
     nest3d::ArrangeSettings    m_nest3d;
+    // What kept a part off the plate or moved it to a later one, filled by the worker and shown on finalize.
+    std::vector<nest3d::Issue> m_issues;
     int current_plate_index = 0;
     Polygon bed_poly;
     Plater *m_plater;
