@@ -11,6 +11,8 @@
 #include <cmath>
 #include <cstdio>
 #include <cstddef>
+#include <string>
+#include <utility>
 
 namespace Slic3r { namespace nest3d {
 

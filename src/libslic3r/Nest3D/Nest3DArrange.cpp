@@ -38,6 +38,7 @@
 #include <deque>
 #include <cstdio>
 #include <cstddef>
+#include <exception>
 #include <functional>
 #include <iterator>
 #include <limits>
