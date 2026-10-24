@@ -559,10 +559,10 @@ ExPolygons reserved_area(const ArrangePolygons &selected, const ArrangePolygons 
 // The bed the engine packs on. Callers hand over the printable area pulled in by a bed shrink, and every
 // part is grown by half the spacing besides, which keeps parts apart but would count a second time at the
 // bed's edge. Here the printable area is the bed and a part's geometry may reach its boundary; only what
-// prints beyond the geometry stays inside, a brim and the skirt distance. The bed moves by the least
-// (inflation - that extent) over the selected parts, so the part with the widest such extent keeps it
-// whole inside and the others lie at least as far in as they must. Falls back to the caller's bed when the
-// printable area does not match it, as for a bed the caller reshaped.
+// prints beyond the geometry stays inside, a brim and the skirt (its distance and the width of its
+// loops). The bed moves by the least (inflation - that extent) over the selected parts, so the part with
+// the widest such extent keeps it whole inside and the others lie at least as far in as they must. Falls
+// back to the caller's bed when the printable area does not match it, as for a bed the caller reshaped.
 Points engine_bed(const Points &bed, const ArrangePolygons &selected, const ArrangeParams &params,
                   const DynamicPrintConfig &config)
 {

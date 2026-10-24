@@ -660,6 +660,32 @@ TEST_CASE("A brim stays on the plate at the bed's corner", "[Nest3D]")
     }
 }
 
+TEST_CASE("A skirt stays on the plate at the bed's corner", "[Nest3D]")
+{
+    // The skirt prints its distance and all of its loops out from the geometry. The bed comes as the
+    // arrange job builds it: the printable area less a shrink that update_arrange_params() has grown by
+    // that full skirt width.
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    config.set_key_value("printable_area", new ConfigOptionPoints({Vec2d(0, 0), Vec2d(120, 0), Vec2d(120, 120), Vec2d(0, 120)}));
+    config.set_key_value("skirt_loops", new ConfigOptionInt(2));
+    config.set_key_value("skirt_height", new ConfigOptionInt(1));
+    config.set_key_value("skirt_distance", new ConfigOptionFloat(3.));
+    ArrangeParams params = quiet_params();
+    params.bed_shrink_x = params.bed_shrink_y = 0.f;
+    arrangement::update_arrange_params(params, &config, {});
+    const double skirt = get_real_skirt_dist(config);
+    REQUIRE(skirt > 3.); // the distance and the loops' width
+    Model model;
+    add_object(model, cube(39, 39, 10), 9);
+    const ArrangePolygons items = nest(model, get_shrink_bedpts(&config, params), params, nest_settings(), {}, PlatesCap, config);
+    CHECK(unplaced(items) == 0);
+    CHECK(collisions(items) == 0);
+    CHECK(plates_used(items) > 1); // 3 x 3 cubes leave no room for a skirt
+    for (const Printed &part : printed(items))
+        CHECK(edge_distance(BoundingBoxf(Vec2d(part.box.min.x(), part.box.min.y()), Vec2d(part.box.max.x(), part.box.max.y())), 120, 120) >=
+              skirt - Tolerance);
+}
+
 TEST_CASE("A start G-code without extrusion leaves the arrangement unchanged", "[Nest3D]")
 {
     const std::string start = "G28 ; home\nG1 Z5 F5000\nG92 E0\nG1 X100 Y-2 F3000\nG1 E-1 F300\n";
