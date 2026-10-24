@@ -46,6 +46,20 @@ them filled; the model only ever over-estimates the space a part takes.
   The wipe tower and exclusion areas are full-height columns over their polygons. On a bed that is
   not a rectangle, the cells whose centre lies outside its outline are a full-height obstacle on
   every plate.
+- **Reserved plate area.** Two more full-height obstacles on every plate keep the spacing of the
+  excluded regions (1 mm, or half an explicit gap). The first is `bed_exclude_area` read as the one
+  polygon the plate draws: the plate hands the arrangers the bounding box of every four points, which
+  drops the rest of an L-shaped or other many-cornered area. The second is the material the machine
+  start G-code lays on the plate, such as a purge line (`GCode/StartGCodeExtrusion`). The template is
+  processed with the placeholder parser and the variables the G-code export sets before it; those
+  that depend on the finished layout (`first_layer_print_min`, bed mesh bounds) read as the whole
+  printable area, so a purge placed relative to the print is not predicted. The processed moves are
+  then followed through G90/G91, M82/M83, G92, homing and arcs. Every extruding move from a known
+  position is a bead as wide as its volume over the nozzle height gives, never narrower than the
+  nozzle; retraction and unretraction deposit nothing, and a flush standing still counts only over the
+  printable area. G-code coordinates plus the extruder offset are plate coordinates, as in the G-code
+  viewer. A start G-code that extrudes nowhere, or that cannot be evaluated before slicing, reserves
+  nothing and leaves the arrangement as it was.
 
 Two parts may share a cell only when their intervals are at least the vertical clearance apart.
 With "Nest under overhangs" off, any occupied cell blocks its whole column, which still lets parts

@@ -9,6 +9,7 @@
 #include "libslic3r/ExPolygon.hpp"
 #include "libslic3r/ExtrusionEntity.hpp"
 #include "libslic3r/ExtrusionEntityCollection.hpp"
+#include "libslic3r/GCode/StartGCodeExtrusion.hpp"
 #include "libslic3r/Geometry.hpp"
 #include "libslic3r/Geometry/ConvexHull.hpp"
 #include "libslic3r/I18N.hpp"
@@ -24,9 +25,11 @@
 #include "libslic3r/libslic3r.h"
 
 #include <Eigen/Geometry>
+#include <boost/log/trivial.hpp>
 #include <tbb/parallel_for.h>
 
 #include <algorithm>
+#include <climits>
 #include <cmath>
 #include <chrono>
 #include <condition_variable>
@@ -516,6 +519,62 @@ std::vector<Obstacle> build_obstacles(const ArrangePolygons &fixed, const Points
     return obstacles;
 }
 
+// The plate area no part may take besides the bed outline and the regions the caller passes: the bed's
+// excluded area as one polygon, as the plate draws it and the arrange report measures it (callers pass it
+// as the bounding boxes of every four points, which loses the rest of a polygon with more corners), and
+// the material the machine start G-code lays on the plate before the first layer, a purge line.
+ExPolygons reserved_area(const ArrangePolygons &selected, const ArrangePolygons &fixed, const Points &bed,
+                         const DynamicPrintConfig &config, coord_t inflation)
+{
+    ExPolygons area;
+    if (const auto *excluded = config.option<ConfigOptionPoints>("bed_exclude_area"); excluded && excluded->values.size() >= 3) {
+        Polygon polygon;
+        for (const Vec2d &pt : excluded->values)
+            polygon.points.push_back(scaled(pt));
+        area = union_ex(Polygons{polygon});
+    }
+    // The start G-code primes the filament the plate starts with; its moves rarely depend on which.
+    int first = INT_MAX;
+    for (const ArrangePolygons *items : {&selected, &fixed})
+        for (const ArrangePolygon &ap : *items)
+            if (ap.instance)
+                for (int id : ap.extrude_ids)
+                    first = std::min(first, id);
+    // Parts lie inside the bed, so only what comes within both spacings of it matters.
+    coord_t reach = inflation + scaled(1.);
+    for (const ArrangePolygon &ap : selected)
+        reach = std::max(reach, inflation + ap.inflation + scaled(1.));
+    const Polygons   near_bed    = offset(Polygon(bed), float(reach));
+    const ExPolygons start_gcode = intersection_ex(
+        start_gcode_extrusion_area(config, first == INT_MAX || first < 1 ? 0u : unsigned(first - 1)), near_bed);
+    if (!start_gcode.empty()) {
+        const BoundingBox bb = get_extents(start_gcode);
+        BOOST_LOG_TRIVIAL(info) << "Nest3D: keeping clear of the start G-code extrusions within ["
+                                << unscaled(bb.min).transpose() << "] - [" << unscaled(bb.max).transpose() << "]";
+    }
+    return union_ex(intersection_ex(area, near_bed), start_gcode);
+}
+
+// The spacing a part keeps from the bed's excluded area: what the caller gave its excluded regions
+// (1 mm, or half of an explicit gap, which the part's own inflation completes).
+coord_t exclusion_inflation(const ArrangeParams &params)
+{
+    coord_t inflation = 0;
+    for (const ArrangePolygon &ap : params.excluded_regions)
+        inflation = std::max(inflation, ap.inflation);
+    return params.excluded_regions.empty() ? std::max<coord_t>(scaled(1.), params.min_obj_distance / 2) : inflation;
+}
+
+Obstacle reserved_obstacle(const ExPolygons &area, coord_t inflation, const Points &bed, const ArrangeParams &params,
+                           const DynamicPrintConfig &config, double cell_mm)
+{
+    std::vector<Triangle> tris;
+    append_layer_geometry(tris, area, Vec2d::Zero(), 0., params.printable_height);
+    ArrangePolygon region;
+    region.inflation = inflation;
+    return {-1, height_map(std::move(tris), 0., -unscaled(BoundingBox(bed).min), cell_mm, region, config, true), -1};
+}
+
 void apply_placements(const std::vector<Placement> &placements, const std::vector<double> &yaw, const Vec2d &bed_min,
                       ArrangePolygons &selected)
 {
@@ -544,7 +603,8 @@ std::pair<int, int> unplaced_and_plates(const ArrangePolygons &items)
 // result already there is kept without running it. A cancelled arrange keeps what it placed: run under
 // the same stop condition, the outline arranger returns every part "arranged" on top of the others.
 void outline_arranger_guard(ArrangePolygons &selected, const ArrangePolygons &input, const ArrangePolygons &fixed,
-                            const Points &bed, const ArrangeParams &params)
+                            const Points &bed, const ArrangeParams &params, const ExPolygons &reserved,
+                            coord_t reserved_inflation)
 {
     const bool stopped = params.stopcondition && params.stopcondition();
     if (stopped)
@@ -555,8 +615,16 @@ void outline_arranger_guard(ArrangePolygons &selected, const ArrangePolygons &in
     const int plates_needed = std::max(1, int(std::ceil(hulls / BoundingBox(bed).area() - 1e-9)));
     if (unplaced_and_plates(selected) <= std::make_pair(0, plates_needed))
         return;
+    // The outline arranger only knows the regions its caller passed, so it gets the reserved area too.
+    ArrangeParams outline_params = params;
+    for (const ExPolygon &region : reserved) {
+        ArrangePolygon ap;
+        ap.poly      = region;
+        ap.inflation = reserved_inflation;
+        outline_params.excluded_regions.push_back(std::move(ap));
+    }
     ArrangePolygons outline_result = input;
-    arrangement::arrange(outline_result, fixed, bed, params);
+    arrangement::arrange(outline_result, fixed, bed, outline_params);
     if (unplaced_and_plates(outline_result) < unplaced_and_plates(selected))
         selected = std::move(outline_result);
 }
@@ -588,7 +656,11 @@ void arrange_polygons(ArrangePolygons          &selected,
         validate_support_shrinkage(selected, fixed, config, params);
     CompatGroups      group = compat_groups(selected, fixed, params);
     const Shapes      shapes    = build_shapes(selected, params, config, settings, group, p.cell_mm);
-    const auto        obstacles = build_obstacles(fixed, bed, params, config, settings, group, max_plates, p.cell_mm);
+    auto              obstacles = build_obstacles(fixed, bed, params, config, settings, group, max_plates, p.cell_mm);
+    const coord_t     reserved_inflation = exclusion_inflation(params);
+    const ExPolygons  reserved  = reserved_area(selected, fixed, bed, config, reserved_inflation);
+    if (!reserved.empty())
+        obstacles.push_back(reserved_obstacle(reserved, reserved_inflation, bed, params, config, p.cell_mm));
 
     const ArrangePolygons input = selected; // for the outline arranger below
     const std::vector<Placement> placements = arrange(shapes.candidates, shapes.parts, obstacles, p);
@@ -596,7 +668,7 @@ void arrange_polygons(ArrangePolygons          &selected,
         check_canceled(params);
     apply_placements(placements, shapes.yaw, unscaled(bed_bb.min), selected);
     if (!settings.generate_supports)
-        outline_arranger_guard(selected, input, fixed, bed, params);
+        outline_arranger_guard(selected, input, fixed, bed, params, reserved, reserved_inflation);
 }
 
 }} // namespace Slic3r::nest3d

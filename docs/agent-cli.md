@@ -51,7 +51,9 @@ preliminary envelopes do not replace final toolpath clearance checks or establis
 ### `--arrange-gap MM`
 
 The minimum distance between two arranged parts and between a part and the bed's excluded area, for
-both arrangers. Without it the spacing comes from the parts' brim and support settings (1 mm per part
+both arrangers. Nest3D also keeps this distance from the whole `bed_exclude_area` polygon and from the
+purge line or other material the machine start G-code extrudes on the plate (see
+[HLSD/nest3d.md](HLSD/nest3d.md)). Without it the spacing comes from the parts' brim and support settings (1 mm per part
 without support). Parts keep 2 mm from the bed edge, as with the stock spacing, or half the gap when
 that is more.
 
