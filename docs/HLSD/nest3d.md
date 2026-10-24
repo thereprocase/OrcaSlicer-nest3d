@@ -33,12 +33,33 @@ them filled; the model only ever over-estimates the space a part takes.
   exact for edges in those directions, so the clearance is not rounded up to whole cells. A cell
   whose eight neighbours are filled and hold its interval claims nothing they do not, and is
   skipped, which keeps the 12 mm growth of tree supports near the cost of the outline.
-- **Support.** A part that prints with support (`enable_support`) has every column filled down to
-  the bed, because the support below it occupies that space.
-- **Fixed items.** Unselected instances are rasterized from their meshes in their current pose.
+- **Support.** By default a part that prints with support (`enable_support`) has every column
+  filled down to the bed. With "Generate supports before arranging", the adapter instead combines
+  native sliced model geometry with support extrusion envelopes, including their widths and actual
+  extrusion heights. Thick bridges and combined infill can extend below the nominal layer bottom.
+  Z contouring also extends the envelope by the generated paths' upward and downward offsets.
+  Model brims, support base, interface, tree brim and raft paths occupy space; unused
+  columns remain available. Automatic spacing retains 1 mm per part after replacing the estimated
+  support allowance with actual geometry; an explicit gap applies outside that geometry.
+- **Fixed items.** Unselected instances use their current pose, with native model/support envelopes
+  when support generation is enabled and mesh geometry otherwise.
   The wipe tower and exclusion areas are full-height columns over their polygons. On a bed that is
   not a rectangle, the cells whose centre lies outside its outline are a full-height obstacle on
   every plate.
+- **Reserved plate area.** Two more full-height obstacles on every plate keep the spacing of the
+  excluded regions (1 mm, or half an explicit gap). The first is `bed_exclude_area` read as the one
+  polygon the plate draws: the plate hands the arrangers the bounding box of every four points, which
+  drops the rest of an L-shaped or other many-cornered area. The second is the material the machine
+  start G-code lays on the plate, such as a purge line (`GCode/StartGCodeExtrusion`). The template is
+  processed with the placeholder parser and the variables the G-code export sets before it; those
+  that depend on the finished layout (`first_layer_print_min`, bed mesh bounds) read as the whole
+  printable area, so a purge placed relative to the print is not predicted. The processed moves are
+  then followed through G90/G91, M82/M83, G92, homing and arcs. Every extruding move from a known
+  position is a bead as wide as its volume over the nozzle height gives, never narrower than the
+  nozzle; retraction and unretraction deposit nothing, and a flush standing still counts only over the
+  printable area. G-code coordinates plus the extruder offset are plate coordinates, as in the G-code
+  viewer. A start G-code that extrudes nowhere, or that cannot be evaluated before slicing, reserves
+  nothing and leaves the arrangement as it was.
 
 Two parts may share a cell only when their intervals are at least the vertical clearance apart.
 With "Nest under overhangs" off, any occupied cell blocks its whole column, which still lets parts
@@ -47,8 +68,9 @@ interlock in plan view (one part in another's hole or notch) but never stack. On
 
 ## Physical rules for stacking
 
-A part may only be placed in empty space under another part, which by the model means under an
-overhang printed without support: supported parts fill their columns to the bed. The parts under
+A part may only be placed in empty space under another part. Without support generation,
+supported parts fill their columns to the bed; with it, the generated supports block their actual
+columns. The parts under
 it are shorter than the overhang by at least the vertical clearance (2 mm), so the nozzle and the
 fan duct pass over them while printing the overhang's first layers.
 
@@ -61,6 +83,21 @@ and pack as copies. The pose is the one `ModelInstance::get_arrange_polygon` use
 transform without its offset and Z angle, so a placement's rotation and translation mean what they
 mean for the polygon arranger. Instances of one object posed alike, with the same angles and
 spacing, share one shape: they are rasterized once and are copies to the engine.
+
+Support preparation clones the object with its volumes, modifiers, painted support data, object
+settings and variable layer heights. Each candidate orientation runs the native perimeter, infill
+and support pipeline because world-aligned support patterns cannot simply be rotated afterward.
+A temporary expanded bed avoids clipping desired branches to an arbitrary initial position; the
+nesting engine tests the resulting envelope against the actual bed and exclusions. Candidates run
+sequentially while each slice uses its own internal parallelism, bounding temporary slicing memory.
+Cancellation reaches the native slicing loops and leaves the original placements untouched.
+Sliced model geometry includes material shrinkage and XY contour compensation. The option requires
+matching XY and Z shrinkage compensation among used filaments, because otherwise the slicer can
+change scale when parts are combined. Unused filament slots do not impose this restriction.
+
+The preliminary slice is per part. Final plate slicing can change supports in response to neighbors
+or placement, so final toolpath checks remain necessary, especially at small gaps. Clearance between
+parts also does not establish that supports will detach cleanly from their own supported surfaces.
 
 ## Algorithm
 
@@ -125,12 +162,14 @@ low-temperature filaments are kept apart when the plate's filaments are not comp
 "Allow multiple materials on same plate" off, every distinct filament set is a group of its own. A
 plate holding fixed parts takes their group.
 
-The result never uses more plates or leaves more parts unplaced than the polygon arranger: when it
+Without support generation, the result never uses more plates or leaves more parts unplaced than the polygon arranger: when it
 does not fit one plate, the adapter runs the polygon arranger on the same input and keeps the
 better of the two. The polygon arranger packs every item's convex hull without overlap, so it
 needs at least as many plates as the hulls' total area fills beds; a result already there is kept
 without running it. A cancelled arrange keeps the parts it placed and runs no fallback: under the
 same stop condition the polygon arranger would return every part on top of the others.
+With generated supports the polygon fallback is disabled because its model-only hulls do not reserve
+the generated support space.
 
 ## Complexity
 
@@ -151,10 +190,11 @@ Cancelling is polled between parts.
 `ArrangeJob::process` uses Nest3D only when it is enabled and the arrange is not by-object, not on
 a belt printer, and no IDEX/IQEX zone is active. By-object printing finishes every object before
 the next starts, so the toolhead would sweep through finished parts nested around it; belt
-printers and IDEX/IQEX zones place parts by rules of their own. The arrange menu offers the two
-options, "Nest by 3D shape" and "Nest under overhangs", only for layer-by-layer FFF printing on a
-flat bed, and stores them in the `arrange` section of the app config as `nest3d_enabled_fff` and
-`nest3d_stacking_fff`.
+printers and IDEX/IQEX zones place parts by rules of their own. The arrange menu offers
+"Nest by 3D shape", "Generate supports before arranging", and "Nest under overhangs" for layer-by-layer FFF printing on a
+flat bed, and stores them in the `arrange` section of the app config as `nest3d_enabled_fff`,
+`nest3d_supports_fff`, and `nest3d_stacking_fff`. Support generation is off by default and does not
+change print profiles or the project format.
 
 ## Testing
 
@@ -169,3 +209,8 @@ check outcomes on the arranged model's exact printed geometry, leaving the engin
 - small parts fill the hole of a ring, and copies pack at least as densely as a grid of their boxes;
 - the result is centred on the anchor, does not depend on input order or threading, and a cancelled
   arrange leaves only valid placements.
+
+The `[Nest3DSupport]` pipeline tests in `tests/fff_print/test_nest3d_support.cpp` check generated
+support and raft footprints, bead clearance for rotated copies, object overrides and painted
+enforcers, fixed supported overhangs, thick bridge clearance, material compensation, model brims,
+and cancellation without source edits.

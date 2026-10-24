@@ -695,6 +695,11 @@ void ArrangeJob::process(Ctl &ctl)
     params.stopcondition = [&ctl]() { return ctl.was_canceled(); };
 
     params.progressind = [this, &ctl](unsigned num_finished, std::string str = "") {
+        if (m_nest3d.generate_supports && num_finished == 0 && !str.empty()) {
+            // TRN Progress status. %1% is the name of the object whose supports are being generated.
+            ctl.update_status(0, GUI::format(_u8L("Generating supports for %1%"), str));
+            return;
+        }
         // TRN Progress status. %1% is the name of the object being arranged.
         ctl.update_status(num_finished * 100 / status_range(), GUI::format(_u8L("Arranging %1%"), str));
     };
@@ -714,9 +719,11 @@ void ArrangeJob::process(Ctl &ctl)
 
     const ArrangePolygons before = imex.active() ? m_selected : ArrangePolygons();
     // Shape-true nesting holds only for layer-by-layer printing on a flat bed without IDEX/IQEX zones.
-    if (m_nest3d.enabled && !params.is_seq_print && !params.is_belt && !imex.active())
+    if (m_nest3d.enabled && !params.is_seq_print && !params.is_belt && !imex.active()) {
+        if (m_nest3d.generate_supports)
+            ctl.update_status(0, _u8L("Generating supports before arranging"));
         nest3d::arrange_polygons(m_selected, m_unselected, bedpts, params, m_nest3d, global_config, MAX_NUM_PLATES);
-    else
+    } else
         arrangement::arrange(m_selected, m_unselected, bedpts, params);
     if (!ctl.was_canceled())
         imex.finish(m_selected, before, m_unselected, params);

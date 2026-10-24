@@ -1146,13 +1146,14 @@ static void load_downward_settings_list_from_config(std::string config_file, std
     }
 }
 
-// How the CLI arranges, read once from --arrange-engine, --nest3d-stack and --arrange-gap so every arrange
+// How the CLI arranges, read once from the arrange options so every arrange
 // site agrees. ORCA_NEST3D=1 (or =stack, which also allows stacking) still selects Nest3D when
 // --arrange-engine is not given.
 struct CliArrangeOptions
 {
-    bool                  nest3d         = false;
-    bool                  allow_stacking = false;
+    bool                  nest3d            = false;
+    bool                  allow_stacking    = false;
+    bool                  generate_supports = false;
     std::optional<double> gap_mm;
 };
 
@@ -1162,9 +1163,11 @@ static void cli_arrange(arrangement::ArrangePolygons &selected, const arrangemen
 {
     if (options.nest3d && !params.is_seq_print) {
         nest3d::ArrangeSettings settings;
-        settings.enabled        = true;
-        settings.allow_stacking = options.allow_stacking;
-        BOOST_LOG_TRIVIAL(info) << "arrange: Nest3D (stacking " << settings.allow_stacking << ")";
+        settings.enabled           = true;
+        settings.allow_stacking    = options.allow_stacking;
+        settings.generate_supports = options.generate_supports;
+        BOOST_LOG_TRIVIAL(info) << "arrange: Nest3D (stacking " << settings.allow_stacking
+                               << ", generated supports " << settings.generate_supports << ")";
         nest3d::arrange_polygons(selected, unselected, beds, params, settings, config, MAX_NUM_PLATES);
     } else {
         arrangement::arrange(selected, unselected, beds, params);
@@ -1631,21 +1634,23 @@ int CLI::run(int argc, char **argv)
         const bool        engine_given = m_given_option_keys.count("arrange_engine") > 0;
         const std::string engine       = m_config.opt_string("arrange_engine");
         const bool        stack        = m_config.opt_bool("nest3d_stack");
+        const bool        supports     = m_config.opt_bool("nest3d_supports");
         if (engine_given && engine != "stock" && engine != "nest3d") {
             boost::nowide::cerr << "--arrange-engine must be stock or nest3d, not " << engine << std::endl;
             record_exit_reson(outfile_dir, CLI_INVALID_PARAMS, 0, cli_errors[CLI_INVALID_PARAMS], sliced_info);
             flush_and_exit(CLI_INVALID_PARAMS);
         }
-        if (engine_given && engine == "stock" && stack) {
-            boost::nowide::cerr << "--nest3d-stack needs --arrange-engine nest3d" << std::endl;
+        if (engine_given && engine == "stock" && (stack || supports)) {
+            boost::nowide::cerr << "--nest3d-stack and --nest3d-supports need --arrange-engine nest3d" << std::endl;
             record_exit_reson(outfile_dir, CLI_INVALID_PARAMS, 0, cli_errors[CLI_INVALID_PARAMS], sliced_info);
             flush_and_exit(CLI_INVALID_PARAMS);
         }
         if (engine_given)
-            arrange_options.nest3d = engine == "nest3d" || stack;
+            arrange_options.nest3d = engine == "nest3d" || stack || supports;
         else
-            arrange_options.nest3d = stack || (!env.empty() && env != "0");
+            arrange_options.nest3d = stack || supports || (!env.empty() && env != "0");
         arrange_options.allow_stacking = arrange_options.nest3d && (stack || (!engine_given && env == "stack"));
+        arrange_options.generate_supports = supports;
         if (m_given_option_keys.count("arrange_gap") > 0) {
             const double gap = m_config.opt_float("arrange_gap");
             // Past 100 mm a gap leaves room for little more than one part per plate: read it as a typo.
@@ -1656,8 +1661,9 @@ int CLI::run(int argc, char **argv)
             }
             arrange_options.gap_mm = gap;
         }
-        BOOST_LOG_TRIVIAL(info) << boost::format("arrange engine %1%, stacking %2%, gap %3%") % (arrange_options.nest3d ? "nest3d" : "stock")
-                                       % arrange_options.allow_stacking % (arrange_options.gap_mm ? std::to_string(*arrange_options.gap_mm) : "auto");
+        BOOST_LOG_TRIVIAL(info) << boost::format("arrange engine %1%, stacking %2%, generated supports %3%, gap %4%")
+                                       % (arrange_options.nest3d ? "nest3d" : "stock") % arrange_options.allow_stacking
+                                       % arrange_options.generate_supports % (arrange_options.gap_mm ? std::to_string(*arrange_options.gap_mm) : "auto");
     }
 
     // Outputs for printer bridges, read up front so a malformed value fails before any slicing.
@@ -6433,6 +6439,7 @@ int CLI::run(int argc, char **argv)
         report["arranged"]     = oriented_or_arranged;
         report["engine"]       = arrange_options.nest3d ? "nest3d" : "stock";
         report["stacking"]     = arrange_options.allow_stacking;
+        report["generated_supports"] = arrange_options.generate_supports;
         report["gap_mm"]       = arrange_options.gap_mm ? nlohmann::json(*arrange_options.gap_mm) : nlohmann::json(nullptr);
         report["plate_count"]  = partplate_list.get_plate_count();
         boost::nowide::ofstream out(cli_output_path(report_file));

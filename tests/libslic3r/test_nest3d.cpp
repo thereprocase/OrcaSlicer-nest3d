@@ -189,10 +189,11 @@ ArrangePolygons items_of(Model &model)
 
 // Arranges every instance of `model` with Nest3D and applies the result to the model.
 ArrangePolygons nest(Model &model, const Points &bed, const ArrangeParams &params, const ArrangeSettings &settings,
-                     const ArrangePolygons &fixed = {}, int max_plates = PlatesCap)
+                     const ArrangePolygons &fixed = {}, int max_plates = PlatesCap,
+                     const DynamicPrintConfig &config = print_config())
 {
     ArrangePolygons items = items_of(model);
-    nest3d::arrange_polygons(items, fixed, bed, params, settings, print_config(), max_plates);
+    nest3d::arrange_polygons(items, fixed, bed, params, settings, config, max_plates);
     for (ArrangePolygon &ap : items)
         ap.apply();
     return items;
@@ -514,6 +515,108 @@ TEST_CASE("Parts avoid exclusion regions and fixed parts, wherever the pile is c
     for (const Printed &p : printed(items))
         near_fixed += p.plate == 0 && closer_than_spacing(p.plan, footprint(printed_mesh(*fixed_object->instances.front())));
     CHECK(near_fixed == 0);
+}
+
+// A P1S-like printer on a 256 mm bed: `exclude` as bed_exclude_area, `start` as the start G-code, and the
+// excluded regions the plate hands the arranger for it, the bounding box of every four points.
+struct Printer
+{
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    ArrangeParams      params = quiet_params();
+};
+
+Printer printer(const std::vector<Vec2d> &exclude, const std::string &start = "")
+{
+    Printer p;
+    p.config.set_key_value("printable_area", new ConfigOptionPoints({Vec2d(0, 0), Vec2d(256, 0), Vec2d(256, 256), Vec2d(0, 256)}));
+    p.config.set_key_value("bed_exclude_area", new ConfigOptionPoints(exclude));
+    p.config.set_key_value("extruder_offset", new ConfigOptionPoints({Vec2d(0, 2)}));
+    if (!start.empty())
+        p.config.set_key_value("machine_start_gcode", new ConfigOptionString(start));
+    for (size_t i = 0; i + 3 < exclude.size(); i += 4) {
+        BoundingBoxf box;
+        for (size_t k = i; k < i + 4; ++k)
+            box.merge(exclude[k]);
+        ArrangePolygon region;
+        region.poly.contour = Polygon({scaled(box.min), scaled(Vec2d(box.max.x(), box.min.y())), scaled(box.max),
+                                       scaled(Vec2d(box.min.x(), box.max.y()))});
+        region.inflation    = scaled(0.5 * Spacing);
+        p.params.excluded_regions.push_back(region);
+    }
+    return p;
+}
+
+// Parts closer than the spacing to `region`: its excluded-region inflation and the part's own half.
+int near_region(const ArrangePolygons &items, const Polygon &region)
+{
+    const float spacing = float(scaled(Spacing - 0.01));
+    int         n       = 0;
+    for (const Printed &p : printed(items))
+        n += p.plate >= 0 && !intersection(offset(p.plan, spacing), Polygons{region}).empty();
+    return n;
+}
+
+Polygon rect(double x0, double y0, double x1, double y1)
+{
+    return Polygon({Point(scaled(x0), scaled(y0)), Point(scaled(x1), scaled(y0)), Point(scaled(x1), scaled(y1)),
+                    Point(scaled(x0), scaled(y1))});
+}
+
+TEST_CASE("Parts stay off every corner of an excluded area polygon", "[Nest3D]")
+{
+    // An L over the front edge and a cutter in the front-left corner. The plate passes the box of the
+    // first four corners, the front strip; the cutter arm is only in the polygon. More 20 mm squares than
+    // one plate holds, so the first plate fills up to its corners.
+    const std::vector<Vec2d> l{{0, 0}, {256, 0}, {256, 10}, {23, 10}, {23, 33}, {0, 33}};
+    const Printer            p   = printer(l);
+    const Points             bed = rect_bed(256, 256);
+    Model                    model;
+    add_object(model, cube(20, 20, 4), 150);
+    const ArrangePolygons items = nest(model, bed, p.params, nest_settings(), {}, PlatesCap, p.config);
+    CHECK(unplaced(items) == 0);
+    CHECK(off_bed(items, bed) == 0);
+    CHECK(collisions(items) == 0);
+    CHECK(near_region(items, rect(0, 10, 23, 33)) == 0);
+    CHECK(near_region(items, rect(0, 0, 256, 10)) == 0);
+}
+
+TEST_CASE("Parts stay off the purge line the start G-code lays", "[Nest3D]")
+{
+    // A strip along the front edge from X22 to X240, 0.2 mm from Y0 in G-code coordinates, which the 2 mm
+    // extruder offset puts at Y2 on the plate. E is an expression over the filament settings.
+    const std::string start = "G28\nG90\nM83\nG1 X22 Y0 Z0.3 F12000\n"
+                              "{local fa = 0.7853981633974483 * filament_diameter[0] * filament_diameter[0]}\n"
+                              "G1 X240 Y0 E{21.9 / fa}\nG1 E-0.5\nG1 Z1\n";
+    const Printer p   = printer({{0, 0}, {18, 0}, {18, 28}, {0, 28}}, start);
+    const Points  bed = rect_bed(256, 256);
+    Model         model;
+    add_object(model, cube(20, 20, 4), 150);
+    const ArrangePolygons items = nest(model, bed, p.params, nest_settings(), {}, PlatesCap, p.config);
+    CHECK(unplaced(items) == 0);
+    CHECK(collisions(items) == 0);
+    CHECK(near_region(items, rect(0, 0, 18, 28)) == 0);
+    // The bead, as wide as the 0.4 mm nozzle, with square ends.
+    CHECK(near_region(items, rect(21.8, 1.8, 240.2, 2.2)) == 0);
+}
+
+TEST_CASE("A start G-code without extrusion leaves the arrangement unchanged", "[Nest3D]")
+{
+    const std::string start = "G28 ; home\nG1 Z5 F5000\nG92 E0\nG1 X100 Y-2 F3000\nG1 E-1 F300\n";
+    const Printer     with_start = printer({{0, 0}, {18, 0}, {18, 28}, {0, 28}}, start);
+    const Printer     without    = printer({{0, 0}, {18, 0}, {18, 28}, {0, 28}});
+    const Points      bed        = rect_bed(256, 256);
+    Model             a, b;
+    add_random_parts(a, 30, 11u);
+    add_random_parts(b, 30, 11u);
+    const ArrangePolygons first  = nest(a, bed, with_start.params, nest_settings(), {}, PlatesCap, with_start.config);
+    const ArrangePolygons second = nest(b, bed, without.params, nest_settings(), {}, PlatesCap, without.config);
+    REQUIRE(first.size() == second.size());
+    for (size_t i = 0; i < first.size(); ++i) {
+        INFO("item " << i);
+        CHECK(first[i].bed_idx == second[i].bed_idx);
+        CHECK(first[i].translation == second[i].translation);
+        CHECK_THAT(first[i].rotation, Catch::Matchers::WithinAbs(second[i].rotation, 1e-9));
+    }
 }
 
 TEST_CASE("Parts keep clear of a fixed part whose Euler angles hide a half turn about Z", "[Nest3D]")

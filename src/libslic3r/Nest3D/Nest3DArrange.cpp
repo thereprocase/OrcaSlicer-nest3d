@@ -4,23 +4,41 @@
 #include "libslic3r/Arrange.hpp"
 #include "libslic3r/BoundingBox.hpp"
 #include "libslic3r/Config.hpp"
+#include "libslic3r/ClipperUtils.hpp"
+#include "libslic3r/Exception.hpp"
+#include "libslic3r/ExPolygon.hpp"
+#include "libslic3r/ExtrusionEntity.hpp"
+#include "libslic3r/ExtrusionEntityCollection.hpp"
+#include "libslic3r/GCode/StartGCodeExtrusion.hpp"
 #include "libslic3r/Geometry.hpp"
 #include "libslic3r/Geometry/ConvexHull.hpp"
+#include "libslic3r/I18N.hpp"
 #include "libslic3r/Model.hpp"
+#include "libslic3r/Layer.hpp"
 #include "libslic3r/Point.hpp"
 #include "libslic3r/Polygon.hpp"
 #include "libslic3r/Print.hpp"
+#include "libslic3r/PrintBase.hpp"
+#include "libslic3r/PrintConfig.hpp"
+#include "libslic3r/Tesselate.hpp"
 #include "libslic3r/TriangleMesh.hpp"
 #include "libslic3r/libslic3r.h"
 
 #include <Eigen/Geometry>
+#include <boost/log/trivial.hpp>
 #include <tbb/parallel_for.h>
 
 #include <algorithm>
+#include <climits>
 #include <cmath>
+#include <chrono>
+#include <condition_variable>
 #include <cstddef>
 #include <functional>
 #include <map>
+#include <mutex>
+#include <set>
+#include <thread>
 #include <utility>
 #include <vector>
 
@@ -94,7 +112,7 @@ ArrangeMesh arrange_mesh(const ArrangePolygon &ap, double height)
 // `inflation` in XY. Parts that print with support fill their columns down to the bed: the support takes
 // that room.
 HeightMap height_map(std::vector<Triangle> tris, double angle, const Vec2d &shift, double cell,
-                     const ArrangePolygon &ap, const DynamicPrintConfig &config)
+                     const ArrangePolygon &ap, const DynamicPrintConfig &config, bool generated_supports = false)
 {
     const double c = std::cos(angle), s = std::sin(angle);
     for (Triangle &t : tris)
@@ -104,9 +122,214 @@ HeightMap height_map(std::vector<Triangle> tris, double angle, const Vec2d &shif
             v[1]           = float(s * x + c * y + shift.y());
         }
     const ConfigOptionBool *support = nullptr;
-    if (ap.instance)
+    if (ap.instance && !generated_supports)
         support = ap.instance->get_object()->get_config_value<ConfigOptionBool>(config, "enable_support");
     return rasterize(tris, cell, unscaled(ap.inflation), support && support->value);
+}
+
+void check_canceled(const ArrangeParams &params)
+{
+    if (params.stopcondition && params.stopcondition())
+        throw CanceledException();
+}
+
+// The slicer disables compensation when used filaments disagree. Isolated parts could then acquire
+// a different scale than the final plate. Reject that case instead of packing incompatible envelopes;
+// unused filament slots with different shrinkage remain harmless and are handled by Print::apply.
+void validate_support_shrinkage(const ArrangePolygons &selected, const ArrangePolygons &fixed,
+                               const DynamicPrintConfig &config, const ArrangeParams &params)
+{
+    Model model;
+    std::set<const ModelObject *> seen;
+    for (const ArrangePolygons *items : {&selected, &fixed})
+        for (const ArrangePolygon &ap : *items)
+            if (ap.instance && seen.insert(ap.instance->get_object()).second) {
+                check_canceled(params);
+                ModelObject *object = model.add_object(*ap.instance->get_object());
+                object->clear_instances();
+                ModelInstance *instance = object->add_instance(*ap.instance);
+                object->printable = true;
+                instance->printable = true;
+                instance->print_volume_state = ModelInstancePVS_Inside;
+            }
+    if (model.objects.empty())
+        return;
+    DynamicPrintConfig full_config = DynamicPrintConfig::full_print_config();
+    full_config.apply(config);
+    Print print;
+    print.set_status_silent();
+    for (ModelObject *object : model.objects)
+        print.auto_assign_extruders(object);
+    print.apply(model, std::move(full_config));
+    if (!print.has_same_shrinkage_compensations())
+        throw SlicingError(L("Generated-support arrangement requires matching XY and Z shrinkage compensation for all used filaments."));
+}
+
+// Print's inner loops poll its atomic cancellation flag, rather than an external callback. Keep that
+// flag connected during the preliminary slice as well, including long intervals between status events.
+class SupportCancellation
+{
+public:
+    SupportCancellation(Print &print, const ArrangeParams &params)
+    {
+        if (params.stopcondition)
+            m_thread = std::thread([this, &print, &params] {
+                std::unique_lock<std::mutex> lock(m_mutex);
+                while (!m_done) {
+                    if (params.stopcondition()) {
+                        print.cancel();
+                        return;
+                    }
+                    m_condition.wait_for(lock, std::chrono::milliseconds(50), [this] { return m_done; });
+                }
+            });
+    }
+    ~SupportCancellation()
+    {
+        {
+            std::lock_guard<std::mutex> lock(m_mutex);
+            m_done = true;
+        }
+        m_condition.notify_one();
+        if (m_thread.joinable())
+            m_thread.join();
+    }
+
+private:
+    std::mutex              m_mutex;
+    std::condition_variable m_condition;
+    bool                    m_done = false;
+    std::thread             m_thread;
+};
+
+// Caps suffice for the height map: it keeps the full interval between the lowest and highest
+// occupied Z in every XY cell. The polygon union keeps gaps between separate support beads open.
+void append_layer_geometry(std::vector<Triangle> &tris, const ExPolygons &area, const Vec2d &center,
+                           double bottom, double top)
+{
+    const std::vector<Vec2d> vertices = triangulate_expolygons_2d(area);
+    for (double z : {bottom, top})
+        for (size_t i = 0; i + 2 < vertices.size(); i += 3) {
+            Triangle t;
+            for (size_t k = 0; k < 3; ++k) {
+                t.v[k][0] = float(vertices[i + k].x() + center.x());
+                t.v[k][1] = float(vertices[i + k].y() + center.y());
+                t.v[k][2] = float(z);
+            }
+            tris.push_back(t);
+        }
+}
+
+void extend_extrusion_z(const ExtrusionEntityCollection &extrusions, double print_z, double &bottom, double &top)
+{
+    for_each_extrusion_path(extrusions, [&](const ExtrusionPath &path) {
+        bottom = std::min(bottom, print_z - path.height);
+        if (path.z_contoured)
+            for (const Point3 &point : path.polyline.points) {
+                // ContourZ stores scaled offsets from the nominal layer Z in these points;
+                // GCode emits nominal_z + unscale(point.z()). Keep both extrema, including the
+                // full nominal bead height below a lowered path as a conservative bound.
+                const double z = print_z + unscale<double>(point.z());
+                bottom = std::min(bottom, z - path.height);
+                top = std::max(top, z);
+            }
+    });
+}
+
+// Generate in the candidate's final Z orientation: rotating one support result would also rotate
+// world-aligned support patterns. The clone retains modifiers, blockers/enforcers, painted facets,
+// variable layers and their configuration without invalidating the live project's slicing state.
+// A generous temporary bed avoids clipping desired tree branches before their position is known;
+// the real bed and exclusions are checked against the resulting footprint by the nesting engine.
+HeightMap supported_height_map(const ArrangePolygon &ap, const std::vector<Triangle> &mesh, double angle,
+                               const Vec2d &shift, double cell, const DynamicPrintConfig &config,
+                               const ArrangeParams &params)
+{
+    check_canceled(params);
+    if (!ap.instance)
+        return height_map(mesh, angle, shift, cell, ap, config, true);
+
+    Model model;
+    ModelObject *object = model.add_object(*ap.instance->get_object());
+    object->clear_instances();
+    ModelInstance *instance = object->add_instance(*ap.instance);
+    double yaw = 0.;
+    instance->set_transformation(Geometry::Transformation(Eigen::AngleAxisd(angle, Vec3d::UnitZ()) *
+                                                        arrange_pose(*ap.instance, yaw)));
+    object->printable = true;
+    instance->printable = true;
+    instance->print_volume_state = ModelInstancePVS_Inside;
+    // ArrangeMesh also normalizes the lowest vertex to the bed, including objects whose GUI auto-drop
+    // switch is off. Only move this temporary instance, using the same normalization.
+    object->translate_instance(0, Vec3d(0., 0., -object->instance_bounding_box(0).min.z()));
+
+    DynamicPrintConfig slice_config = DynamicPrintConfig::full_print_config();
+    slice_config.apply(config);
+    const BoundingBoxf3 bounds = object->instance_bounding_box(0);
+    const double margin = std::max(1000., bounds.size().norm() * 2.);
+    slice_config.set_key_value("printable_area", new ConfigOptionPoints({
+        Vec2d(bounds.min.x() - margin, bounds.min.y() - margin),
+        Vec2d(bounds.max.x() + margin, bounds.min.y() - margin),
+        Vec2d(bounds.max.x() + margin, bounds.max.y() + margin),
+        Vec2d(bounds.min.x() - margin, bounds.max.y() + margin)}));
+    slice_config.set_key_value("bed_exclude_area", new ConfigOptionPoints());
+
+    Print print;
+    print.set_status_silent();
+    print.set_no_check_flag(true);
+    print.auto_assign_extruders(object);
+    print.apply(model, std::move(slice_config));
+    SupportCancellation cancellation(print, params);
+    // Use the public native pipeline, including its support prerequisites (bridge fills), model
+    // compensation, tree/raft generation, and auto/painted brims. No G-code is exported.
+    print.process();
+    std::vector<Triangle> tris;
+
+    for (PrintObject *po : print.objects()) {
+        check_canceled(params);
+        const Vec2d center = unscaled(po->center_offset());
+        for (const Layer *layer : po->layers()) {
+            check_canceled(params);
+            // Use native sliced geometry rather than the unscaled model mesh. This includes
+            // filament shrinkage, XY compensation, modifiers, raft lift and variable layer heights.
+            Polygons area = to_polygons(layer->lslices);
+            double bottom = layer->print_z - layer->height, top = layer->print_z;
+            for (const LayerRegion *region : layer->regions()) {
+                region->perimeters.polygons_covered_by_width(area, float(SCALED_EPSILON));
+                region->fills.polygons_covered_by_width(area, float(SCALED_EPSILON));
+                extend_extrusion_z(region->perimeters, layer->print_z, bottom, top);
+                extend_extrusion_z(region->fills, layer->print_z, bottom, top);
+            }
+            // Thick bridge beads and combined infill can extend farther below the nozzle than the
+            // nominal layer thickness. Reserve their full height when checking vertical clearance.
+            append_layer_geometry(tris, union_ex(area), center, bottom, top);
+        }
+        for (const SupportLayer *layer : po->support_layers()) {
+            check_canceled(params);
+            // Include the physical width of every support extrusion (base, interface, tree brim and
+            // raft), not its centerline or a polygon enclosing unused space between sparse lines.
+            const ExPolygons area = union_ex(layer->support_fills.polygons_covered_by_width(float(SCALED_EPSILON)));
+            double bottom = layer->print_z - layer->height, top = layer->print_z;
+            extend_extrusion_z(layer->support_fills, layer->print_z, bottom, top);
+            append_layer_geometry(tris, area, center, bottom, top);
+        }
+    }
+    for (const auto &group : print.skirt_brim_groups())
+        for (const auto &brim : group.brims) {
+            check_canceled(params);
+            // The brim generator returns plate coordinates, unlike the centered per-object layers.
+            append_layer_geometry(tris, union_ex(brim.brim.polygons_covered_by_width(float(SCALED_EPSILON))),
+                                  Vec2d::Zero(), 0., print.objects().front()->layers().front()->print_z);
+        }
+    check_canceled(params);
+    ArrangePolygon footprint = ap;
+    // Auto spacing encodes guessed support growth in inflation (up to 12 mm for every item).
+    // Actual support/brim beads already occupy that space. Keep the no-support automatic gap, or
+    // the requested explicit gap, and retain stricter sequential-print head clearances.
+    if (!params.is_seq_print)
+        footprint.inflation = params.min_obj_distance != 0 ? params.min_obj_distance / 2 :
+                              std::min(ap.inflation, scaled(1.));
+    return height_map(std::move(tris), 0., shift, cell, footprint, config, true);
 }
 
 // The item's Z angles from `current`: that one, and with rotation allowed RotationSteps over a full turn or
@@ -187,7 +410,7 @@ struct Shapes
 };
 
 Shapes build_shapes(const ArrangePolygons &selected, const ArrangeParams &params, const DynamicPrintConfig &config,
-                    CompatGroups &group, double cell_mm)
+                    const ArrangeSettings &settings, CompatGroups &group, double cell_mm)
 {
     Shapes                           shapes;
     std::vector<size_t>              source; // per shape, the item it is built from
@@ -219,23 +442,40 @@ Shapes build_shapes(const ArrangePolygons &selected, const ArrangeParams &params
         }
     }
     shapes.candidates.resize(source.size());
-    parallel(source.size(), [&](size_t s) {
+    const auto build_shape = [&](size_t s) {
         const ArrangePolygon       &ap   = selected[source[s]];
+        if (settings.generate_supports && params.progressind)
+            params.progressind(0, ap.name);
         // The mesh's yaw is the item's, already folded into its angles.
         const std::vector<Triangle> mesh = arrange_mesh(ap, ap.height).tris;
         shapes.candidates[s].resize(angles[s].size());
-        parallel(angles[s].size(), [&](size_t k) {
+        const auto build_candidate = [&](size_t k) {
             const double angle      = angles[s][k];
-            shapes.candidates[s][k] = {height_map(mesh, angle, Vec2d::Zero(), cell_mm, ap, config), angle};
-        });
-    });
+            shapes.candidates[s][k] = {
+                settings.generate_supports ? supported_height_map(ap, mesh, angle, Vec2d::Zero(), cell_mm, config, params) :
+                                             height_map(mesh, angle, Vec2d::Zero(), cell_mm, ap, config), angle};
+        };
+        if (settings.generate_supports)
+            for (size_t k = 0; k < angles[s].size(); ++k)
+                build_candidate(k);
+        else
+            parallel(angles[s].size(), build_candidate);
+    };
+    // Each native slice already parallelizes its own work. Keeping candidates sequential bounds the
+    // memory consumed by their temporary Print state, especially for tree supports at eight rotations.
+    if (settings.generate_supports)
+        for (size_t s = 0; s < source.size(); ++s)
+            build_shape(s);
+    else
+        parallel(source.size(), build_shape);
     return shapes;
 }
 
 // Fixed items on their plate, the bed's excluded regions on every plate, and for a bed that is not a
 // rectangle, its outline: the cells whose centre lies outside it.
 std::vector<Obstacle> build_obstacles(const ArrangePolygons &fixed, const Points &bed, const ArrangeParams &params,
-                                      const DynamicPrintConfig &config, CompatGroups &group, int max_plates,
+                                      const DynamicPrintConfig &config, const ArrangeSettings &settings,
+                                      CompatGroups &group, int max_plates,
                                       double cell_mm)
 {
     const BoundingBox                   bed_bb(bed);
@@ -252,13 +492,22 @@ std::vector<Obstacle> build_obstacles(const ArrangePolygons &fixed, const Points
             obstacles.push_back({-1, {}, -1});
             items.push_back(&ap);
         }
-    parallel(items.size(), [&](size_t i) {
+    const auto build_obstacle = [&](size_t i) {
         const ArrangePolygon &ap   = *items[i];
+        if (settings.generate_supports && ap.instance && params.progressind)
+            params.progressind(0, ap.name);
         const ArrangeMesh     mesh = arrange_mesh(ap, params.printable_height);
         // A fixed part sits at its rotation plus the yaw its arrange pose gave up, like an arranged part does.
         const Vec2d shift = unscaled(ap.translation) - bed_min;
-        obstacles[i].map  = height_map(mesh.tris, ap.rotation + mesh.yaw, shift, cell_mm, ap, config);
-    });
+        obstacles[i].map = settings.generate_supports ?
+            supported_height_map(ap, mesh.tris, ap.rotation + mesh.yaw, shift, cell_mm, config, params) :
+            height_map(mesh.tris, ap.rotation + mesh.yaw, shift, cell_mm, ap, config);
+    };
+    if (settings.generate_supports)
+        for (size_t i = 0; i < items.size(); ++i)
+            build_obstacle(i);
+    else
+        parallel(items.size(), build_obstacle);
     const Polygon outline(bed);
     const double  bed_w = unscaled(bed_bb.size().x()), bed_h = unscaled(bed_bb.size().y());
     const int     cells_x = int(std::ceil(bed_w / cell_mm)), cells_y = int(std::ceil(bed_h / cell_mm));
@@ -268,6 +517,62 @@ std::vector<Obstacle> build_obstacles(const ArrangePolygons &fixed, const Points
             if (!outline.contains(bed_bb.min + Point(scaled((x + 0.5) * cell_mm), scaled((y + 0.5) * cell_mm))))
                 mask.map.at(x, y).add(-Inf, Inf);
     return obstacles;
+}
+
+// The plate area no part may take besides the bed outline and the regions the caller passes: the bed's
+// excluded area as one polygon, as the plate draws it and the arrange report measures it (callers pass it
+// as the bounding boxes of every four points, which loses the rest of a polygon with more corners), and
+// the material the machine start G-code lays on the plate before the first layer, a purge line.
+ExPolygons reserved_area(const ArrangePolygons &selected, const ArrangePolygons &fixed, const Points &bed,
+                         const DynamicPrintConfig &config, coord_t inflation)
+{
+    ExPolygons area;
+    if (const auto *excluded = config.option<ConfigOptionPoints>("bed_exclude_area"); excluded && excluded->values.size() >= 3) {
+        Polygon polygon;
+        for (const Vec2d &pt : excluded->values)
+            polygon.points.push_back(scaled(pt));
+        area = union_ex(Polygons{polygon});
+    }
+    // The start G-code primes the filament the plate starts with; its moves rarely depend on which.
+    int first = INT_MAX;
+    for (const ArrangePolygons *items : {&selected, &fixed})
+        for (const ArrangePolygon &ap : *items)
+            if (ap.instance)
+                for (int id : ap.extrude_ids)
+                    first = std::min(first, id);
+    // Parts lie inside the bed, so only what comes within both spacings of it matters.
+    coord_t reach = inflation + scaled(1.);
+    for (const ArrangePolygon &ap : selected)
+        reach = std::max(reach, inflation + ap.inflation + scaled(1.));
+    const Polygons   near_bed    = offset(Polygon(bed), float(reach));
+    const ExPolygons start_gcode = intersection_ex(
+        start_gcode_extrusion_area(config, first == INT_MAX || first < 1 ? 0u : unsigned(first - 1)), near_bed);
+    if (!start_gcode.empty()) {
+        const BoundingBox bb = get_extents(start_gcode);
+        BOOST_LOG_TRIVIAL(info) << "Nest3D: keeping clear of the start G-code extrusions within ["
+                                << unscaled(bb.min).transpose() << "] - [" << unscaled(bb.max).transpose() << "]";
+    }
+    return union_ex(intersection_ex(area, near_bed), start_gcode);
+}
+
+// The spacing a part keeps from the bed's excluded area: what the caller gave its excluded regions
+// (1 mm, or half of an explicit gap, which the part's own inflation completes).
+coord_t exclusion_inflation(const ArrangeParams &params)
+{
+    coord_t inflation = 0;
+    for (const ArrangePolygon &ap : params.excluded_regions)
+        inflation = std::max(inflation, ap.inflation);
+    return params.excluded_regions.empty() ? std::max<coord_t>(scaled(1.), params.min_obj_distance / 2) : inflation;
+}
+
+Obstacle reserved_obstacle(const ExPolygons &area, coord_t inflation, const Points &bed, const ArrangeParams &params,
+                           const DynamicPrintConfig &config, double cell_mm)
+{
+    std::vector<Triangle> tris;
+    append_layer_geometry(tris, area, Vec2d::Zero(), 0., params.printable_height);
+    ArrangePolygon region;
+    region.inflation = inflation;
+    return {-1, height_map(std::move(tris), 0., -unscaled(BoundingBox(bed).min), cell_mm, region, config, true), -1};
 }
 
 void apply_placements(const std::vector<Placement> &placements, const std::vector<double> &yaw, const Vec2d &bed_min,
@@ -298,7 +603,8 @@ std::pair<int, int> unplaced_and_plates(const ArrangePolygons &items)
 // result already there is kept without running it. A cancelled arrange keeps what it placed: run under
 // the same stop condition, the outline arranger returns every part "arranged" on top of the others.
 void outline_arranger_guard(ArrangePolygons &selected, const ArrangePolygons &input, const ArrangePolygons &fixed,
-                            const Points &bed, const ArrangeParams &params)
+                            const Points &bed, const ArrangeParams &params, const ExPolygons &reserved,
+                            coord_t reserved_inflation)
 {
     const bool stopped = params.stopcondition && params.stopcondition();
     if (stopped)
@@ -309,8 +615,16 @@ void outline_arranger_guard(ArrangePolygons &selected, const ArrangePolygons &in
     const int plates_needed = std::max(1, int(std::ceil(hulls / BoundingBox(bed).area() - 1e-9)));
     if (unplaced_and_plates(selected) <= std::make_pair(0, plates_needed))
         return;
+    // The outline arranger only knows the regions its caller passed, so it gets the reserved area too.
+    ArrangeParams outline_params = params;
+    for (const ExPolygon &region : reserved) {
+        ArrangePolygon ap;
+        ap.poly      = region;
+        ap.inflation = reserved_inflation;
+        outline_params.excluded_regions.push_back(std::move(ap));
+    }
     ArrangePolygons outline_result = input;
-    arrangement::arrange(outline_result, fixed, bed, params);
+    arrangement::arrange(outline_result, fixed, bed, outline_params);
     if (unplaced_and_plates(outline_result) < unplaced_and_plates(selected))
         selected = std::move(outline_result);
 }
@@ -338,14 +652,23 @@ void arrange_polygons(ArrangePolygons          &selected,
 {
     const BoundingBox bed_bb(bed);
     const Params      p     = engine_params(bed_bb, params, settings, max_plates, selected.size());
+    if (settings.generate_supports)
+        validate_support_shrinkage(selected, fixed, config, params);
     CompatGroups      group = compat_groups(selected, fixed, params);
-    const Shapes      shapes    = build_shapes(selected, params, config, group, p.cell_mm);
-    const auto        obstacles = build_obstacles(fixed, bed, params, config, group, max_plates, p.cell_mm);
+    const Shapes      shapes    = build_shapes(selected, params, config, settings, group, p.cell_mm);
+    auto              obstacles = build_obstacles(fixed, bed, params, config, settings, group, max_plates, p.cell_mm);
+    const coord_t     reserved_inflation = exclusion_inflation(params);
+    const ExPolygons  reserved  = reserved_area(selected, fixed, bed, config, reserved_inflation);
+    if (!reserved.empty())
+        obstacles.push_back(reserved_obstacle(reserved, reserved_inflation, bed, params, config, p.cell_mm));
 
     const ArrangePolygons input = selected; // for the outline arranger below
     const std::vector<Placement> placements = arrange(shapes.candidates, shapes.parts, obstacles, p);
+    if (settings.generate_supports)
+        check_canceled(params);
     apply_placements(placements, shapes.yaw, unscaled(bed_bb.min), selected);
-    outline_arranger_guard(selected, input, fixed, bed, params);
+    if (!settings.generate_supports)
+        outline_arranger_guard(selected, input, fixed, bed, params, reserved, reserved_inflation);
 }
 
 }} // namespace Slic3r::nest3d
