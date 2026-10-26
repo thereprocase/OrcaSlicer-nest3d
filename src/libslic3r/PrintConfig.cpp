@@ -7628,8 +7628,9 @@ void PrintConfigDef::init_fff_params()
     def = this->add("independent_support_layer_height", coBool);
     def->label = L("Independent support layer height");
     def->category = L("Support");
-    def->tooltip = L("Support layer uses layer height independent with object layer. This is to support customizing Z-gap and save print time. "
-                     "This option will be invalid when the prime tower is enabled.");
+    def->tooltip = L("Support layers use a layer height independent of the object's layers, to allow a custom Z gap and save print time.\n"
+                     "This option is ignored on plates that print a prime tower: their support is printed at the object's layer heights, "
+                     "because the tower has to match them. Turn off the prime tower to use independent support layer heights.");
     def->mode = comAdvanced;
     def->set_default_value(new ConfigOptionBool(true));
 
