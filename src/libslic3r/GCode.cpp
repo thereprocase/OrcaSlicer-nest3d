@@ -8485,9 +8485,12 @@ std::string GCode::emit_batched_interfaces(const Print &print, const LayerTools 
             m_max_layer_z           = std::max(m_max_layer_z, float(support_layer.print_z));
         }
 
+        // The retraction wipes along the last deferred lines, at their Z: keep it inside the object's
+        // label and the batch block, so skipping the object skips it and the preview draws it with
+        // the deferred layer rather than above the host layer.
+        gcode += this->retract();
         m_writer.add_object_end_labels(gcode);
         gcode += ";" + GCodeProcessor::Batched_Interface_End_Tag + "\n";
-        gcode += this->retract();
         gcode += m_writer.travel_to_z(m_interface_batch_top_z + this->batched_interface_clearance(), "clear batched interface", true);
         if (park_defined) {
             const Point park_point = this->gcode_to_point(park);

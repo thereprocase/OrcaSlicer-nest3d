@@ -128,6 +128,9 @@ struct Parsed
     int                interface_outside_batches = 0;
     // Extrusions outside the batch blocks that are not at their layer's Z.
     int                off_layer_extrusions = 0;
+    // Moves with an E word (retract, wipe, unretract) after a batch block's end and before the next
+    // layer change.
+    int                e_moves_after_batch_end = 0;
     // "; batched interface: ..." comments explaining a split or a fallback.
     std::vector<std::string> notes;
     // Object label lines inside the batch blocks.
@@ -141,14 +144,16 @@ Parsed parse(const std::string &gcode)
     bool         printing   = false; // past the first layer change
     bool         interface  = false;
     bool         in_batch   = false;
+    bool         after_end  = false; // between a batch block's end and the next layer change
     int          tool       = -1;
     double       printed_z  = 0.;
     double       layer_z    = 0.;
     reader.parse_buffer(gcode, [&](GCodeReader &r, const GCodeReader::GCodeLine &line) {
         const std::string_view raw = line.raw();
-        if (raw.rfind(";LAYER_CHANGE", 0) == 0 || raw.rfind("; CHANGE_LAYER", 0) == 0)
-            printing = true;
-        else if (raw.rfind(";Z:", 0) == 0)
+        if (raw.rfind(";LAYER_CHANGE", 0) == 0 || raw.rfind("; CHANGE_LAYER", 0) == 0) {
+            printing  = true;
+            after_end = false;
+        } else if (raw.rfind(";Z:", 0) == 0)
             layer_z = std::stod(std::string(raw.substr(3)));
         else if (raw.rfind("; Z_HEIGHT: ", 0) == 0)
             layer_z = std::stod(std::string(raw.substr(12)));
@@ -160,9 +165,10 @@ Parsed parse(const std::string &gcode)
             in_batch = true;
             out.batches.push_back({});
             out.batches.back().printed_before = printed_z;
-        } else if (raw.rfind("; BATCHED_INTERFACE_END", 0) == 0)
-            in_batch = false;
-        else if (raw.rfind("; BATCHED_INTERFACE_LAYER: ", 0) == 0)
+        } else if (raw.rfind("; BATCHED_INTERFACE_END", 0) == 0) {
+            in_batch  = false;
+            after_end = true;
+        } else if (raw.rfind("; BATCHED_INTERFACE_LAYER: ", 0) == 0)
             out.batches.back().layer_z.push_back(std::stod(std::string(raw.substr(27))));
         else if (raw.rfind("; batched interface: ", 0) == 0)
             out.notes.emplace_back(raw);
@@ -180,6 +186,7 @@ Parsed parse(const std::string &gcode)
             const Vec3d from(r.x(), r.y(), r.z());
             const Vec3d to(line.new_X(r), line.new_Y(r), line.new_Z(r));
             const bool  extrudes = line.extruding(r) && line.dist_XY(r) > 0.f;
+            out.e_moves_after_batch_end += after_end && line.has(E);
             if (extrudes || line.travel())
                 out.moves.push_back({ from, to, extrudes, extrudes && interface, in_batch });
             if (extrudes) {
@@ -401,6 +408,16 @@ TEST_CASE("Batched support interface prints the deferred layers in ascending Z i
     // The lowest deferred layer sits below material printed before the block, by at most the lead.
     CHECK(batch.layer_z.front() < batch.printed_before - eps);
     CHECK(batch.printed_before - batch.layer_z.front() <= lead + eps);
+}
+
+TEST_CASE("Batched support interface retracts and wipes before its block ends", "[SupportInterfaceBatch]")
+{
+    // The retraction after a batch wipes along its last deferred lines, at their Z. Inside the block
+    // the preview draws it with the deferred layer and the object's label covers it; after the block
+    // it would show up above the host layer.
+    const Parsed batched = parse(slice(batch_config(true)));
+    REQUIRE(batched.batches.size() == 1);
+    CHECK(batched.e_moves_after_batch_end == 0);
 }
 
 TEST_CASE("Batched support interface keeps every other extrusion at its layer's Z", "[SupportInterfaceBatch]")
