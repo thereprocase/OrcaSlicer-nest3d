@@ -478,16 +478,28 @@ TEST_CASE("Batched support interface never moves the nozzle through printed mate
     check_nozzle_clearance(batched);
 }
 
-TEST_CASE("Batched support interface works on tree hybrid supports and independent support layer heights", "[SupportInterfaceBatch]")
+TEST_CASE("Batched support interface works on tree hybrid supports and on support layers with their own heights", "[SupportInterfaceBatch]")
 {
-    // The owner's setup: tree supports in the hybrid style, support layers on their own heights.
-    const bool tree = GENERATE(false, true);
+    // The owner's setup: tree supports in the hybrid style. They also ask for independent support
+    // layer heights, which Orca turns off whenever the prime tower is on (normalize_fdm_2), as in
+    // their own slice; without the tower the support layers keep their own print_z.
+    const bool tree  = GENERATE(false, true);
+    const bool tower = GENERATE(true, false);
     DynamicPrintConfig config = batch_config(true);
-    config.set_deserialize_strict({ { "independent_support_layer_height", 1 } });
+    config.set_deserialize_strict({ { "independent_support_layer_height", 1 }, { "enable_prime_tower", tower ? 1 : 0 } });
     if (tree)
         config.set_deserialize_strict({ { "support_type", "tree(auto)" }, { "support_style", "tree_hybrid" } });
-    CAPTURE(tree);
-    const Parsed batched = parse(slice(config));
+    CAPTURE(tree, tower);
+    Print        print;
+    const Parsed batched = parse(slice(print, config));
+    const PrintObject &object = *print.objects().front();
+    CHECK(print.config().independent_support_layer_height.value == !tower);
+    // How many support layers sit between object layers: the planner has to work on print_z there.
+    size_t own_height = 0;
+    for (const SupportLayer *support : object.support_layers())
+        own_height += std::none_of(object.layers().begin(), object.layers().end(),
+                                   [support](const Layer *layer) { return std::abs(layer->print_z - support->print_z) < eps; });
+    CHECK((tower || own_height > 0));
     for (const std::string &note : batched.notes)
         UNSCOPED_INFO(note);
     REQUIRE_FALSE(batched.batches.empty());
