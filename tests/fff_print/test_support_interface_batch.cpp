@@ -1,13 +1,16 @@
 #include <catch2/catch_all.hpp>
 
 #include <algorithm>
+#include <functional>
 #include <cmath>
 #include <cstdint>
+#include <limits>
 #include <string>
 #include <unordered_map>
 #include <vector>
 
 #include "libslic3r/Config.hpp"
+#include "libslic3r/GCode/GCodeProcessor.hpp"
 #include "libslic3r/GCode/ToolOrdering.hpp"
 #include "libslic3r/GCode/WipeTower.hpp"
 #include "libslic3r/GCodeReader.hpp"
@@ -70,10 +73,13 @@ DynamicPrintConfig batch_config(bool batch)
 
 // Slices the capped pillar. The second apply keeps the prime tower: a new Print's first apply
 // sees one filament in use and normalize_fdm_2 drops the tower (see test_wipe_tower.cpp).
-std::string slice(Print &print, const DynamicPrintConfig &config)
+// `edit_model` may add custom G-code before that apply.
+std::string slice(Print &print, const DynamicPrintConfig &config, const std::function<void(Model &)> &edit_model = {})
 {
     Model model;
     init_print({ capped_pillar() }, print, model, config);
+    if (edit_model)
+        edit_model(model);
     print.apply(model, config);
     return gcode(print);
 }
@@ -122,6 +128,10 @@ struct Parsed
     int                interface_outside_batches = 0;
     // Extrusions outside the batch blocks that are not at their layer's Z.
     int                off_layer_extrusions = 0;
+    // "; batched interface: ..." comments explaining a split or a fallback.
+    std::vector<std::string> notes;
+    // Object label lines inside the batch blocks.
+    std::vector<std::string> batch_labels;
 };
 
 Parsed parse(const std::string &gcode)
@@ -154,6 +164,10 @@ Parsed parse(const std::string &gcode)
             in_batch = false;
         else if (raw.rfind("; BATCHED_INTERFACE_LAYER: ", 0) == 0)
             out.batches.back().layer_z.push_back(std::stod(std::string(raw.substr(27))));
+        else if (raw.rfind("; batched interface: ", 0) == 0)
+            out.notes.emplace_back(raw);
+        else if (in_batch && (raw.rfind("EXCLUDE_OBJECT_", 0) == 0 || raw.rfind("M624", 0) == 0 || raw.rfind("M625", 0) == 0))
+            out.batch_labels.emplace_back(raw);
         else if (raw.size() >= 2 && raw[0] == 'T' && std::isdigit((unsigned char) raw[1])) {
             const int t = std::stoi(std::string(raw.substr(1)));
             if (printing && t != tool) {
@@ -235,7 +249,7 @@ TEST_CASE("Batched support interface plans one batch for a four layer interface 
     Print print;
     slice(print, batch_config(true));
     const PrintObject &object  = *print.objects().front();
-    const auto         batches = plan_support_interface_batches(object);
+    const auto         batches = plan_support_interface_batches(object).batches;
     REQUIRE(batches.size() == 1);
     const SupportInterfaceBatch &batch = batches.front();
     CHECK(batch.last - batch.first == 3);
@@ -246,20 +260,98 @@ TEST_CASE("Batched support interface plans one batch for a four layer interface 
     CHECK(batch.footprints.size() == 4);
 }
 
-TEST_CASE("Batched support interface splits a run deeper than the lead allows", "[SupportInterfaceBatch]")
+TEST_CASE("Five or six top interface layers at 0.2 mm print as one batch with a 0.4 mm lead", "[SupportInterfaceBatch]")
 {
-    // With a 0.2 mm lead, the lowest deferred layer may sit one 0.2 mm layer below the batch layer:
-    // three of the four interface layers fit in one batch, the fourth prints on its own.
+    // A separate interface filament prints the lowest top interface layer in the base filament,
+    // so these leave four and five layers of filament 2: up to 0.8 mm, 0.4 mm on either side of
+    // the batch layer.
+    const int top_layers = GENERATE(5, 6);
     DynamicPrintConfig config = batch_config(true);
-    config.set_deserialize_strict({ { "support_interface_batch_lead", 0.2 } });
+    config.set_deserialize_strict({ { "support_interface_top_layers", top_layers } });
     Print print;
-    slice(print, config);
-    const PrintObject &object  = *print.objects().front();
-    const auto         batches = plan_support_interface_batches(object);
-    REQUIRE(batches.size() == 1);
-    CHECK(batches.front().last - batches.front().first == 2);
+    const Parsed batched = parse(slice(print, config));
+    const auto   plan    = plan_support_interface_batches(*print.objects().front());
+    REQUIRE(plan.batches.size() == 1);
+    CHECK(plan.batches.front().last - plan.batches.front().first == size_t(top_layers - 2));
+    CHECK(plan.notes.empty());
+    CHECK(batched.loads_of_interface == 1);
+    CHECK(batched.tool_changes == 2);
+}
+
+TEST_CASE("Batched support interface splits a run deeper than the lead allows and names the lead that would not", "[SupportInterfaceBatch]")
+{
+    // Five 0.2 mm interface layers span 0.8 mm: with a 0.2 mm lead no batch layer keeps both
+    // sides within it. A 0.4 mm lead would print them as one batch.
+    DynamicPrintConfig config = batch_config(true);
+    config.set_deserialize_strict({ { "support_interface_top_layers", 6 }, { "support_interface_batch_lead", 0.2 } });
+    Print print;
+    const Parsed batched = parse(slice(print, config));
+    const PrintObject &object = *print.objects().front();
+    const auto         plan   = plan_support_interface_batches(object);
+    REQUIRE(plan.batches.size() >= 1);
     const auto &layers = object.support_layers();
-    CHECK(layers[batches.front().batch]->print_z - layers[batches.front().first]->print_z <= 0.2 + eps);
+    for (const SupportInterfaceBatch &batch : plan.batches)
+        CHECK(layers[batch.batch]->print_z - layers[batch.first]->print_z <= 0.2 + eps);
+    REQUIRE(plan.notes.size() == 1);
+    CHECK_THAT(plan.notes.front().min_lead, Catch::Matchers::WithinAbs(0.4, eps));
+    REQUIRE(batched.notes.size() == 1);
+    CHECK_THAT(batched.notes.front(), Catch::Matchers::ContainsSubstring("deeper than a lead of 0.20 mm"));
+    CHECK_THAT(batched.notes.front(), Catch::Matchers::ContainsSubstring("at least 0.40 mm"));
+}
+
+TEST_CASE("Batched support interface keeps deferred layers away from taller neighbours the nozzle cone would hit", "[SupportInterfaceBatch]")
+{
+    // 0.3 mm between interface and pillar leaves no room for a 0.5 mm tip beside a step, so no
+    // deferred layer may print below material printed before it: batches of two print the upper
+    // layer on top of the lower one, which is printed right before it.
+    DynamicPrintConfig config = batch_config(true);
+    config.set_deserialize_strict({ { "support_object_xy_distance", 0.3 } });
+    const Parsed batched = parse(slice(config));
+    for (const Batch &batch : batched.batches) {
+        REQUIRE_FALSE(batch.layer_z.empty());
+        CHECK(batch.printed_before <= batch.layer_z.front() + eps);
+    }
+    REQUIRE(batched.notes.size() == 1);
+    CHECK_THAT(batched.notes.front(), Catch::Matchers::ContainsSubstring("XY distance"));
+}
+
+TEST_CASE("Batched support interface prints a run as usual around a custom G-code", "[SupportInterfaceBatch]")
+{
+    // A pause between two interface layers must still happen between them.
+    Print        print;
+    const Parsed batched = parse(slice(print, batch_config(true), [](Model &model) {
+        model.plates_custom_gcodes[model.curr_plate_index].gcodes.push_back({ 5.8, CustomGCode::PausePrint, 1, "", "" });
+    }));
+    CHECK(batched.batches.empty());
+    REQUIRE(batched.notes.size() == 1);
+    CHECK_THAT(batched.notes.front(), Catch::Matchers::ContainsSubstring("custom G-code at Z 5.80"));
+}
+
+TEST_CASE("Batched support interface prints inside the owning object's exclude-object label", "[SupportInterfaceBatch]")
+{
+    DynamicPrintConfig config = batch_config(true);
+    config.set_deserialize_strict({ { "exclude_object", 1 }, { "gcode_flavor", "klipper" } });
+    const Parsed batched = parse(slice(config));
+    REQUIRE(batched.batches.size() == 1);
+    REQUIRE(batched.batch_labels.size() >= 2);
+    CHECK_THAT(batched.batch_labels.front(), Catch::Matchers::StartsWith("EXCLUDE_OBJECT_START NAME="));
+    CHECK_THAT(batched.batch_labels.back(), Catch::Matchers::StartsWith("EXCLUDE_OBJECT_END NAME="));
+}
+
+TEST_CASE("Batched support interface reports why batching is skipped for an object", "[SupportInterfaceBatch]")
+{
+    auto skip = [](std::initializer_list<ConfigBase::SetDeserializeItem> items) {
+        DynamicPrintConfig config = batch_config(true);
+        config.set_deserialize_strict(items);
+        Print print;
+        slice(print, config);
+        return support_interface_batch_skip(*print.objects().front());
+    };
+    CHECK(skip({}) == SupportInterfaceBatchSkip::None);
+    CHECK(skip({ { "support_interface_batch", 0 } }) == SupportInterfaceBatchSkip::Off);
+    CHECK(skip({ { "support_interface_not_for_body", 0 } }) == SupportInterfaceBatchSkip::BaseMayUseInterface);
+    CHECK(skip({ { "support_filament", 2 } }) == SupportInterfaceBatchSkip::BaseUsesInterface);
+    CHECK(skip({ { "outer_wall_filament_id", 2 } }) == SupportInterfaceBatchSkip::BodyUsesInterface);
 }
 
 TEST_CASE("Batched support interface loads the interface filament once per run", "[SupportInterfaceBatch]")
@@ -301,10 +393,12 @@ TEST_CASE("Batched support interface keeps every other extrusion at its layer's 
     CHECK(parse(slice(batch_config(false))).off_layer_extrusions == 0);
 }
 
-TEST_CASE("Batched support interface never moves the nozzle through printed material", "[SupportInterfaceBatch]")
+namespace {
+
+// Every extrusion sits beside material at most `lead` taller than the nozzle, and no travel passes
+// through material taller than the nozzle.
+void check_nozzle_clearance(const Parsed &batched)
 {
-    const Parsed batched = parse(slice(batch_config(true)));
-    REQUIRE(batched.batches.size() == 1);
     HeightMap printed;
     int       extrusions_checked = 0, travels_checked = 0, batch_travels = 0;
     double    deepest = -1., lowest_clearance = 1.;
@@ -326,6 +420,35 @@ TEST_CASE("Batched support interface never moves the nozzle through printed mate
     CHECK(batch_travels > 0);
     CHECK(deepest <= lead + eps);
     CHECK(lowest_clearance >= -eps);
+}
+
+} // namespace
+
+TEST_CASE("Batched support interface never moves the nozzle through printed material", "[SupportInterfaceBatch]")
+{
+    const Parsed batched = parse(slice(batch_config(true)));
+    REQUIRE(batched.batches.size() == 1);
+    check_nozzle_clearance(batched);
+}
+
+TEST_CASE("Batched support interface works on tree hybrid supports and independent support layer heights", "[SupportInterfaceBatch]")
+{
+    // The owner's setup: tree supports in the hybrid style, support layers on their own heights.
+    const bool tree = GENERATE(false, true);
+    DynamicPrintConfig config = batch_config(true);
+    config.set_deserialize_strict({ { "independent_support_layer_height", 1 } });
+    if (tree)
+        config.set_deserialize_strict({ { "support_type", "tree(auto)" }, { "support_style", "tree_hybrid" } });
+    CAPTURE(tree);
+    const Parsed batched = parse(slice(config));
+    for (const std::string &note : batched.notes)
+        UNSCOPED_INFO(note);
+    REQUIRE_FALSE(batched.batches.empty());
+    CHECK(batched.off_layer_extrusions == 0);
+    check_nozzle_clearance(batched);
+    // Never more round trips than stock.
+    config.set_deserialize_strict({ { "support_interface_batch", 0 } });
+    CHECK(batched.loads_of_interface < parse(slice(config)).loads_of_interface);
 }
 
 TEST_CASE("Batched support interface plans two wipe tower toolchanges per run", "[SupportInterfaceBatch]")
@@ -366,4 +489,81 @@ TEST_CASE("Support interface batching leaves the G-code unchanged where it does 
     const std::string gcode_on = without_timestamp_and_config(slice(on));
     CHECK(gcode_on.find("BATCHED_INTERFACE") == std::string::npos);
     CHECK(gcode_on == without_timestamp_and_config(slice(off)));
+}
+
+namespace {
+
+// Number of layers whose filament list contains `filament` (0-based), from the per-layer filament
+// sets GCode hands to the processor result, which slice_info.config and the 3MF are written from.
+int layers_using_filament(const GCodeProcessorResult &result, unsigned int filament)
+{
+    int layers = 0;
+    for (const auto &[filaments, ranges] : result.layer_filaments)
+        if (std::find(filaments.begin(), filaments.end(), filament) != filaments.end())
+            for (const auto &[first, last] : ranges)
+                layers += last - first + 1;
+    return layers;
+}
+
+} // namespace
+
+TEST_CASE("A batched interface run reads in print order in the processor and the preview", "[SupportInterfaceBatch][GCodeProcessor]")
+{
+    GCodeProcessorResult stock_result;
+    {
+        Print print;
+        Model model;
+        const DynamicPrintConfig config = batch_config(false);
+        init_print({ capped_pillar() }, print, model, config);
+        print.apply(model, config);
+        gcode(print, &stock_result);
+    }
+    GCodeProcessorResult result;
+    Print print;
+    Model model;
+    const DynamicPrintConfig config = batch_config(true);
+    init_print({ capped_pillar() }, print, model, config);
+    print.apply(model, config);
+    gcode(print, &result);
+
+    // The layer counter never goes back: every move belongs to the same or a later layer than the one before it.
+    size_t batched_extrusions = 0;
+    for (size_t i = 1; i < result.moves.size(); ++i) {
+        CAPTURE(i, result.moves[i].position.z());
+        CHECK(result.moves[i].layer_id >= result.moves[i - 1].layer_id);
+        if (result.moves[i].batched_interface && result.moves[i].type == EMoveType::Extrude)
+            ++batched_extrusions;
+    }
+    CHECK(batched_extrusions > 0);
+
+    // The preview labels each layer with an increasing Z.
+    const std::vector<double> zs = result.batched_interface_layer_zs();
+    REQUIRE_FALSE(zs.empty());
+    for (size_t i = 1; i < zs.size(); ++i) {
+        CAPTURE(i, zs[i - 1], zs[i]);
+        CHECK(zs[i] > zs[i - 1]);
+    }
+
+    // Without the correction, a layer labelled by its last extrusion would take the batch's top Z,
+    // above the next layer's: the case the preview would get wrong.
+    std::vector<double> last_extrusion_z;
+    unsigned int        layer = std::numeric_limits<unsigned int>::max();
+    for (size_t i = 1; i < result.moves.size(); ++i) {
+        const auto &mv = result.moves[i];
+        if (mv.layer_id != layer) {
+            layer = mv.layer_id;
+            last_extrusion_z.emplace_back(0.);
+        }
+        if (mv.type == EMoveType::Extrude && mv.extrusion_role != erCustom)
+            last_extrusion_z.back() = mv.position.z();
+    }
+    CHECK_FALSE(std::is_sorted(last_extrusion_z.begin(), last_extrusion_z.end()));
+
+    // The fixture's run is four interface layers: stock lists filament 2 on all four, batched on the batch layer only.
+    CHECK(layers_using_filament(stock_result, 1) == 4);
+    CHECK(layers_using_filament(result, 1) == 1);
+
+    // One round trip fewer shows up in the time estimate.
+    const auto normal = static_cast<size_t>(PrintEstimatedStatistics::ETimeMode::Normal);
+    CHECK(result.print_statistics.modes[normal].time < stock_result.print_statistics.modes[normal].time);
 }
