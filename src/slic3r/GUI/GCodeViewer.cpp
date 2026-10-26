@@ -1665,19 +1665,23 @@ void GCodeViewer::load_as_gcode(const GCodeProcessorResult& gcode_result, const 
     // increases.  Give it the layers' print Z instead (the slicer's layer Z, which
     // increases along the belt), numbered the way libvgcode::convert() numbers the
     // layers: consecutively over the moves that exist.
-    m_belt_layer_zs.clear();
+    m_layer_zs_override.clear();
     if (is_belt) {
         unsigned int src_layer_id = std::numeric_limits<unsigned int>::max();
         for (size_t i = 1; i < gcode_result.moves.size(); ++ i) {
             const GCodeProcessorResult::MoveVertex &mv = gcode_result.moves[i];
             if (mv.layer_id != src_layer_id) {
                 src_layer_id = mv.layer_id;
-                m_belt_layer_zs.emplace_back(double(mv.print_z));
+                m_layer_zs_override.emplace_back(double(mv.print_z));
             }
         }
-        if (m_belt_layer_zs.size() != m_viewer.get_layers_count())
-            m_belt_layer_zs.clear();
+    } else {
+        // Batched support interface layers are printed below and above the layer that hosts them;
+        // labelling that layer with the batch's last Z would make the slider's Z go backwards.
+        m_layer_zs_override = gcode_result.batched_interface_layer_zs();
     }
+    if (m_layer_zs_override.size() != m_viewer.get_layers_count())
+        m_layer_zs_override.clear();
 
 // #if !VGCODE_ENABLE_COG_AND_TOOL_MARKERS
 //     const size_t vertices_count = m_viewer.get_vertices_count();
@@ -1879,7 +1883,14 @@ void GCodeViewer::load_as_gcode(const GCodeProcessorResult& gcode_result, const 
 
     //BBS
     m_conflict_result = gcode_result.conflict_result;
-    if (m_conflict_result) { m_conflict_result.value().layer = m_viewer.get_layer_id_at(static_cast<float>(m_conflict_result.value()._height)); }
+    if (m_conflict_result) {
+        // Same lookup as libvgcode::Layers::get_layer_id_at, on the layer Zs the slider shows,
+        // which keep increasing on belt printers and around batched support interfaces.
+        const std::vector<double> zs = get_layers_zs();
+        const float z = static_cast<float>(m_conflict_result.value()._height);
+        m_conflict_result.value().layer = int(std::distance(zs.begin(),
+            std::upper_bound(zs.begin(), zs.end(), z, [](float z, double layer_z) { return float(layer_z) > z; })));
+    }
 
     m_gcode_check_result = gcode_result.gcode_check_result;
 
@@ -1955,7 +1966,7 @@ void GCodeViewer::reset()
     //BBS: should also reset the result id
     BOOST_LOG_TRIVIAL(info) << __FUNCTION__ << boost::format(": current result id %1% ")%m_last_result_id;
     m_last_result_id = -1;
-    m_belt_layer_zs.clear();
+    m_layer_zs_override.clear();
     //BBS: add only gcode mode
     m_only_gcode_in_preview = false;
 
@@ -4286,7 +4297,7 @@ void GCodeViewer::render_legend(float &legend_height, int canvas_width, int canv
         // Loop invariant, but built lazily: this lambda runs once per extruder on every frame
         // and most prints reach neither colour change below, so fetching it up front would cost
         // more than the per-item fetch it replaces.
-        std::vector<float> zs;
+        std::vector<double> zs;
         bool zs_built = false;
 
         for (const auto& item : custom_gcode_per_print_z) {
@@ -4297,11 +4308,10 @@ void GCodeViewer::render_legend(float &legend_height, int canvas_width, int canv
                 continue;
 
             if (!zs_built) {
-                zs = m_viewer.get_layers_zs();
+                zs = get_layers_zs();
                 zs_built = true;
             }
-            auto lower_b = std::lower_bound(zs.begin(), zs.end(),
-                static_cast<float>(item.print_z - epsilon()));
+            auto lower_b = std::lower_bound(zs.begin(), zs.end(), item.print_z - epsilon());
             if (lower_b == zs.end())
                 continue;
 
