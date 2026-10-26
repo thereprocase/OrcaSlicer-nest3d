@@ -7431,6 +7431,31 @@ void PrintConfigDef::init_fff_params()
     def->mode = comSimple;
     def->set_default_value(new ConfigOptionInt(0));
 
+    // Orca: batch each run of support interface layers into one filament change round trip.
+    def = this->add("support_interface_batch", coBool);
+    def->label    = L("Batch interface filament changes");
+    def->category = L("Support");
+    def->tooltip  = L("Print all layers of a support interface in one go, with one filament change to the interface filament "
+                      "and one change back, instead of changing filament on almost every interface layer.\n"
+                      "The object and support base are printed up to the lead height below the top of the interface, "
+                      "then the interface layers are printed from the bottom up, then printing continues with the base filament.\n"
+                      "This saves time and purge waste. While the interface is printed, the nozzle moves next to parts of the print "
+                      "that are up to the lead height taller than the layer it prints, so use a support/object XY distance of at least 1 mm.");
+    def->mode     = comAdvanced;
+    def->set_default_value(new ConfigOptionBool(false));
+
+    def = this->add("support_interface_batch_lead", coFloat);
+    def->label    = L("Batch lead height");
+    def->category = L("Support");
+    def->tooltip  = L("How far below the top of a support interface the filament change happens when interface filament changes are batched.\n"
+                      "A larger value lets more interface layers be printed in one batch, but the nozzle then moves next to taller walls "
+                      "and is more likely to scrape them.");
+    def->sidetext = L("mm"); // millimeters, CIS languages need translation
+    def->min      = 0.2;
+    def->max      = 1.0;
+    def->mode     = comAdvanced;
+    def->set_default_value(new ConfigOptionFloat(0.4));
+
     auto support_interface_top_layers = def = this->add("support_interface_top_layers", coInt);
     def->gui_type = ConfigOptionDef::GUIType::i_enum_open;
     def->label = L("Top interface layers");

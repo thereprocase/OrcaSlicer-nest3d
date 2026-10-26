@@ -1926,7 +1926,10 @@ bool PrintObject::invalidate_state_by_config_options(
                opt_key == "flush_into_infill"
             || opt_key == "flush_into_objects"
             || opt_key == "flush_into_support"
-            || opt_key == "belt_purge_tower_object") {
+            || opt_key == "belt_purge_tower_object"
+            // Batching moves interface tool changes between layers; it changes the tool ordering and G-code only.
+            || opt_key == "support_interface_batch"
+            || opt_key == "support_interface_batch_lead") {
             invalidated |= m_print->invalidate_step(psWipeTower);
             invalidated |= m_print->invalidate_step(psGCodeExport);
         } else {

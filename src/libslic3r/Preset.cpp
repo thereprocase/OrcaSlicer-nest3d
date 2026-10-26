@@ -1280,6 +1280,8 @@ static std::vector<std::string> s_Preset_print_options{
     "support_filament",
     "support_interface_filament",
     "support_interface_not_for_body",
+    "support_interface_batch",
+    "support_interface_batch_lead",
     "ooze_prevention",
     "standby_temperature_delta",
     "preheat_time",
