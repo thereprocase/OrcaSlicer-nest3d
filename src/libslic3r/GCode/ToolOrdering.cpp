@@ -781,15 +781,18 @@ void ToolOrdering::initialize_layers(std::vector<coordf_t> &zs)
     }
 }
 
+// Print's validation warns about each case rejected here.
 bool support_interface_batching_applies(const PrintObject &object)
 {
     const PrintObjectConfig &config    = object.config();
     const int                interface = config.support_interface_filament.value; // 1-based, 0 = current filament
-    if (!config.support_interface_batch.value || interface == 0 || !config.support_interface_not_for_body.value ||
-        !object.has_support_material() || object.support_layers().empty())
+    if (!config.support_interface_batch.value || interface == 0 || !object.has_support_material() || object.support_layers().empty())
         return false;
     // A support base printed with the interface filament leaves nothing to batch.
     if (config.support_filament.value == interface)
+        return false;
+    // A base in the default filament may fall back to the interface filament on any layer unless told not to.
+    if (config.support_filament.value == 0 && !config.support_interface_not_for_body.value)
         return false;
     // The body must never need the interface filament, or the deferred layers would still change to it.
     const std::vector<unsigned int> body = object.object_extruders(); // 0-based

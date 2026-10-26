@@ -330,6 +330,16 @@ TEST_CASE("Batched support interface plans two wipe tower toolchanges per run", 
     CHECK(count(false) == std::make_pair(2, 2));
 }
 
+TEST_CASE("Batched support interface applies to a dedicated base filament without Avoid interface filament for base", "[SupportInterfaceBatch]")
+{
+    // A base with its own filament never falls back to the interface filament, so the option has no say.
+    DynamicPrintConfig config = batch_config(true);
+    config.set_deserialize_strict({ { "support_filament", 1 }, { "support_interface_not_for_body", 0 } });
+    const Parsed batched = parse(slice(config));
+    CHECK(batched.batches.size() == 1);
+    CHECK(batched.loads_of_interface == 1);
+}
+
 TEST_CASE("Support interface batching leaves the G-code unchanged where it does not apply", "[SupportInterfaceBatch]")
 {
     // With the base allowed to use the interface filament there is nothing to batch.
