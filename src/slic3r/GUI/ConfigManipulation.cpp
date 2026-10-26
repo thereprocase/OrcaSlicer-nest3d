@@ -1211,6 +1211,11 @@ void ConfigManipulation::toggle_print_fff_options(DynamicPrintConfig *config, in
 
     toggle_line("support_interface_not_for_body",config->opt_int("support_interface_filament")&&!config->opt_int("support_filament"));
 
+    // Batching only has something to batch when the interface is printed with its own filament.
+    bool can_batch_interface = have_support_material && have_support_interface && config->opt_int("support_interface_filament") != 0;
+    toggle_field("support_interface_batch", can_batch_interface);
+    toggle_field("support_interface_batch_lead", can_batch_interface && config->opt_bool("support_interface_batch"));
+
     // Get the current fuzzy skin state
     bool has_fuzzy_skin = config->opt_enum<FuzzySkinType>("fuzzy_skin") != FuzzySkinType::Disabled_fuzzy;
     
