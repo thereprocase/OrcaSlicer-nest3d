@@ -426,3 +426,20 @@ TEST_CASE("prime_tower_is_printed follows the option the user set", "[WipeTowerE
     config.set_key_value("enable_prime_tower", new ConfigOptionBool(true));
     CHECK(prime_tower_is_printed(config, 0, 1, false));
 }
+
+TEST_CASE("normalize_fdm_2 keeps independent support layer height only on plates that print no prime tower", "[WipeTowerEstimate]") {
+    // The option's tooltip states this rule: a plate that prints a prime tower prints support at the
+    // object's layer heights whatever the option says.
+    const int  used_filaments = GENERATE(1, 2);
+    const bool tower          = GENERATE(false, true);
+
+    DynamicPrintConfig config = preset_shaped_defaults();
+    config.set_key_value("enable_prime_tower", new ConfigOptionBool(tower));
+    config.set_key_value("independent_support_layer_height", new ConfigOptionBool(true));
+
+    DynamicPrintConfig normalized = config;
+    normalized.normalize_fdm_2(/*num_objects=*/1, used_filaments);
+
+    CAPTURE(used_filaments, tower);
+    CHECK(normalized.opt_bool("independent_support_layer_height") == !prime_tower_is_printed(config, used_filaments, 1, false));
+}
