@@ -262,6 +262,9 @@ inline constexpr float DEFAULT_FILAMENT_DENSITY = 1.245f;
             //BBS
             int  object_label_id{-1};
             float print_z{0.0f};
+            // Orca: printed inside a batched support interface block (Batched_Interface_Start_Tag): the
+            // move belongs to the layer it is printed in but sits at its own, different Z.
+            bool batched_interface{ false };
 
             float volumetric_rate() const { return feedrate * mm3_per_mm; }
             float actual_volumetric_rate() const { return actual_feedrate * mm3_per_mm; }
@@ -390,6 +393,12 @@ inline constexpr float DEFAULT_FILAMENT_DENSITY = 1.245f;
 
         BedType bed_type = BedType::btCount;
         void reset();
+
+        // Orca: the Z to label each preview layer with when moves are batched_interface, numbered the
+        // way the preview numbers its layers (consecutively over the moves that exist). The preview
+        // otherwise labels a layer with its last extrusion's Z, which in a layer hosting a batch is the
+        // top interface layer, above the layers that follow. Empty when no move is batched.
+        std::vector<double> batched_interface_layer_zs() const;
 
         //BBS: add mutex for protection of gcode result
         mutable std::mutex result_mutex;
@@ -573,6 +582,14 @@ inline constexpr float DEFAULT_FILAMENT_DENSITY = 1.245f;
         static const std::string Machine_End_GCode_Start_Tag;
         static const std::string Nozzle_Change_Start_Tag;
         static const std::string Nozzle_Change_End_Tag;
+        // Orca: bracket the support interface layers GCode prints inside an earlier layer's G-code
+        // (support_interface_batch). The block carries no layer change, so the layer counter and the
+        // per-layer statistics keep counting the layer it is printed in; its moves keep their real Z.
+        // Public so the emission site can reference them single-sourced.
+        static const std::string Batched_Interface_Start_Tag;
+        static const std::string Batched_Interface_End_Tag;
+        // Before each batched layer's moves, followed by that layer's print Z. Informational only.
+        static const std::string Batched_Interface_Layer_Tag;
         static const std::string Toolchange_Wipe_Tag;
     public:
         enum class ETags : unsigned char
@@ -1202,6 +1219,8 @@ inline constexpr float DEFAULT_FILAMENT_DENSITY = 1.245f;
         int m_object_label_id{-1};
         MassLocator m_mass_locator;
         float m_print_z{0.0f};
+        // Inside a Batched_Interface_Start_Tag / Batched_Interface_End_Tag block.
+        bool m_in_batched_interface{false};
         std::vector<float> m_remaining_volume;
         ExtruderTemps m_filament_nozzle_temp;
         ExtruderTemps m_filament_nozzle_temp_first_layer;

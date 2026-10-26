@@ -172,6 +172,10 @@ const std::string GCodeProcessor::VFlush_End_Tag  = " VFLUSH_END";
 //Orca: External device purge tag
 const std::string GCodeProcessor::External_Purge_Tag = " EXTERNAL_PURGE";
 
+const std::string GCodeProcessor::Batched_Interface_Start_Tag = " BATCHED_INTERFACE_START";
+const std::string GCodeProcessor::Batched_Interface_End_Tag   = " BATCHED_INTERFACE_END";
+const std::string GCodeProcessor::Batched_Interface_Layer_Tag = " BATCHED_INTERFACE_LAYER:";
+
 // SKIPPABLE region tags. SKIPTYPE carries a trailing "<type>" payload so it is matched with
 // starts_with; START/END are whole-line tags.
 const std::string GCodeProcessor::Skippable_Start_Tag = " SKIPPABLE_START";
@@ -2665,6 +2669,34 @@ void GCodeProcessor::UsedFilaments::process_caches(GCodeProcessor* processor)
     process_total_volume_cache(processor);
 }
 
+std::vector<double> GCodeProcessorResult::batched_interface_layer_zs() const
+{
+    if (std::none_of(moves.begin(), moves.end(), [](const MoveVertex &mv) { return mv.batched_interface; }))
+        return {};
+
+    // Same rule as libvgcode::Layers::update (last extrusion that is not custom G-code), applied
+    // to the moves outside the batch; a layer printing only batched moves falls back to those.
+    std::vector<double> zs;
+    bool                layer_has_own_z = false;
+    unsigned int        src_layer_id    = std::numeric_limits<unsigned int>::max();
+    for (size_t i = 1; i < moves.size(); ++i) {
+        const MoveVertex &mv = moves[i];
+        if (mv.layer_id != src_layer_id) {
+            src_layer_id = mv.layer_id;
+            zs.emplace_back(0.0);
+            layer_has_own_z = false;
+        }
+        if (mv.type != EMoveType::Extrude || mv.extrusion_role == erCustom)
+            continue;
+        if (!mv.batched_interface) {
+            zs.back()       = double(mv.position.z());
+            layer_has_own_z = true;
+        } else if (!layer_has_own_z)
+            zs.back() = double(mv.position.z());
+    }
+    return zs;
+}
+
 void GCodeProcessorResult::reset() {
     //BBS: add mutex for protection of gcode result
     lock();
@@ -3712,6 +3744,7 @@ void GCodeProcessor::reset()
     // reset SKIPPABLE tracking + the collected ranges (stored on the member; see run_post_process).
     m_skippable = false;
     m_skippable_type = SkipType::stNone;
+    m_in_batched_interface = false;
     m_skippable_blocks.clear();
     // reset the first-pass usage-block state (rebuilt each run_post_process).
     m_filament_blocks.clear();
@@ -4622,6 +4655,17 @@ void GCodeProcessor::process_tags(const std::string_view comment, bool producers
     // layer change tag
     if (comment == reserved_tag(ETags::Layer_Change)) {
         ++m_layer_id;
+        // A batch never spans a layer change; closing it here keeps a missing end tag from marking the rest of the file.
+        m_in_batched_interface = false;
+        return;
+    }
+
+    if (comment == Batched_Interface_Start_Tag) {
+        m_in_batched_interface = true;
+        return;
+    }
+    if (comment == Batched_Interface_End_Tag) {
+        m_in_batched_interface = false;
         return;
     }
 }
@@ -7406,7 +7450,8 @@ void GCodeProcessor::store_move_vertex(EMoveType type, EMovePathType path_type, 
         std::max<unsigned int>(1, m_layer_id) - 1,
         internal_only,
         m_object_label_id,
-        m_print_z
+        m_print_z,
+        m_in_batched_interface
     });
 
     if (type == EMoveType::Seam) {

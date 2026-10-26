@@ -557,3 +557,99 @@ TEST_CASE("Each extrusion weighs its filament's density", "[GCodeProcessor]")
     const Vec3d dense = center_of(masses[1]->total());
     CHECK_THAT((plate - light).dot(dense - light) / (dense - light).squaredNorm(), Catch::Matchers::WithinAbs(0.75, 0.01));
 }
+
+namespace {
+
+// Four 0.2 mm layers; the second hosts a batch of the interface layers at Z 0.4, 0.6 and 0.8 and
+// then returns to its own Z. `end_tag` false drops the batch's end tag.
+std::string batched_interface_gcode(bool end_tag)
+{
+    std::ostringstream g;
+    g << "G90\nM83\n"
+      << ";LAYER_CHANGE\n;Z:0.2\n;HEIGHT:0.2\nG1 Z0.2 F3000\n;TYPE:Outer wall\nG1 X10 Y10\nG1 X20 E1\n"
+      << ";LAYER_CHANGE\n;Z:0.4\nG1 Z0.4\nG1 X10 Y20\nG1 X20 E1\n"
+      << "; BATCHED_INTERFACE_START\n;TYPE:Support interface\n"
+      << "G1 X10 Y30\nG1 X20 E1\n"
+      << "G1 Z0.6\nG1 X10 Y30\nG1 X20 E1\n"
+      << "G1 Z0.8\nG1 X10 Y30\nG1 X20 E1\n";
+    if (end_tag)
+        g << "; BATCHED_INTERFACE_END\n";
+    g << "G1 Z0.4\n"
+      << ";LAYER_CHANGE\n;Z:0.6\nG1 Z0.6\n;TYPE:Outer wall\nG1 X10 Y20\nG1 X20 E1\n"
+      << ";LAYER_CHANGE\n;Z:0.8\nG1 Z0.8\nG1 X10 Y20\nG1 X20 E1\n";
+    return g.str();
+}
+
+// The result is not copyable, so it stays in `processor`.
+const GCodeProcessorResult &process_gcode_string(GCodeProcessor &processor, const std::string &gcode)
+{
+    const bool was_bbl_printer = GCodeProcessor::s_IsBBLPrinter;
+    const ScopeGuard restore_bbl_printer([was_bbl_printer] { GCodeProcessor::s_IsBBLPrinter = was_bbl_printer; });
+    GCodeProcessor::s_IsBBLPrinter = false;
+
+    ScopedTemporaryFile temp(".gcode");
+    {
+        std::ofstream out(temp.string());
+        out << gcode;
+    }
+    processor.apply_config(FullPrintConfig{});
+    processor.process_file(temp.string());
+    return processor.get_result();
+}
+
+} // namespace
+
+TEST_CASE("Batched interface moves stay in the layer that prints them", "[GCodeProcessor][SupportInterfaceBatch]")
+{
+    GCodeProcessor processor;
+    const GCodeProcessorResult &result = process_gcode_string(processor, batched_interface_gcode(true));
+
+    size_t batched = 0;
+    for (const auto &move : result.moves) {
+        if (!is_block_move(move) || move.type != EMoveType::Extrude || !move.batched_interface)
+            continue;
+        ++batched;
+        CAPTURE(move.position.z());
+        CHECK(move.layer_id == 1);  // the second layer: no layer change inside the batch
+        CHECK(move.extrusion_role == erSupportMaterialInterface);
+    }
+    CHECK(batched == 3);  // one extrusion per interface layer, at its own Z
+
+    const auto top_interface = std::find_if(result.moves.begin(), result.moves.end(), [](const auto &m) {
+        return m.batched_interface && m.type == EMoveType::Extrude && std::abs(m.position.z() - 0.8f) < 1e-4f; });
+    CHECK(top_interface != result.moves.end());
+}
+
+TEST_CASE("Preview layer heights skip batched interface moves so they keep increasing", "[GCodeProcessor][SupportInterfaceBatch]")
+{
+    GCodeProcessor processor;
+    const std::vector<double> zs = process_gcode_string(processor, batched_interface_gcode(true)).batched_interface_layer_zs();
+
+    REQUIRE(zs.size() == 4);
+    CHECK_THAT(zs[0], Catch::Matchers::WithinAbs(0.2, 1e-4));
+    CHECK_THAT(zs[1], Catch::Matchers::WithinAbs(0.4, 1e-4));  // not 0.8, the batch's top
+    CHECK_THAT(zs[2], Catch::Matchers::WithinAbs(0.6, 1e-4));
+    CHECK_THAT(zs[3], Catch::Matchers::WithinAbs(0.8, 1e-4));
+}
+
+TEST_CASE("G-code without batched interface blocks keeps the preview's own layer heights", "[GCodeProcessor][SupportInterfaceBatch]")
+{
+    std::string gcode = batched_interface_gcode(true);
+    for (const char *tag : { "; BATCHED_INTERFACE_START\n", "; BATCHED_INTERFACE_END\n" })
+        gcode.erase(gcode.find(tag), std::string(tag).size());
+
+    GCodeProcessor processor;
+    CHECK(process_gcode_string(processor, gcode).batched_interface_layer_zs().empty());
+}
+
+TEST_CASE("A layer change closes a batched interface block that has no end tag", "[GCodeProcessor][SupportInterfaceBatch]")
+{
+    GCodeProcessor processor;
+    const GCodeProcessorResult &result = process_gcode_string(processor, batched_interface_gcode(false));
+    for (const auto &move : result.moves) {
+        if (move.type == EMoveType::Extrude && move.layer_id >= 2) {
+            CAPTURE(move.layer_id, move.position.z());
+            CHECK_FALSE(move.batched_interface);
+        }
+    }
+}
