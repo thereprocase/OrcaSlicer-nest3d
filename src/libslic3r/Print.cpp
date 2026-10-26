@@ -1914,57 +1914,55 @@ static StringObjectException validate_support_interface_batch(const Print &print
 }
 
 // Orca: interface runs that batching could not print with one filament round trip, as one message
-// per object. ToolOrdering writes the same notes into the G-code as comments; this is the copy the
-// user sees. Empty when every run batches.
+// per object with a sentence per cause. ToolOrdering writes the same notes into the G-code as
+// comments; this is the copy the user sees. Empty when every run batches.
 static std::string support_interface_run_warning(const PrintObject &object)
 {
+    using Cause = SupportInterfaceRunNote::Cause;
     const SupportInterfacePlan plan = plan_support_interface_batches(object);
     if (plan.notes.empty())
         return {};
 
-    // The planner leaves a run with a pause, colour change or custom G-code inside unbatched.
-    const auto  &custom_gcodes = object.print()->model().get_curr_plate_custom_gcodes().gcodes;
-    const double layer_height  = object.config().layer_height.value;
-    auto has_custom_gcode = [&](const SupportInterfaceRunNote &note) {
-        return std::any_of(custom_gcodes.begin(), custom_gcodes.end(), [&](const CustomGCode::Item &item) {
-            return item.print_z > note.bottom_z - layer_height + EPSILON && item.print_z < note.top_z + 0.5 * layer_height;
-        });
-    };
-
-    std::string split_runs, custom_runs;
-    double      min_lead    = 0.;
-    bool        unreachable = false;
+    // Per cause: the runs' Z ranges, and the largest lead, step and gap among them.
+    struct Group { std::string ranges; double min_lead = 0., step = 0., gap = 0.; };
+    std::map<Cause, Group> groups;
     for (const SupportInterfaceRunNote &note : plan.notes) {
-        const std::string range = batch_mm(note.bottom_z) + "-" + batch_mm(note.top_z);
-        if (note.batches == 0 && note.min_lead <= 0. && has_custom_gcode(note)) {
-            custom_runs += (custom_runs.empty() ? "" : ", ") + range;
-            continue;
-        }
-        split_runs += (split_runs.empty() ? "" : ", ") + range;
-        if (note.min_lead > 0.)
-            min_lead = std::max(min_lead, note.min_lead);
-        else
-            unreachable = true;
+        // Both stack causes get the same sentence.
+        Group &g = groups[note.cause == Cause::StackEnd ? Cause::StackStart : note.cause];
+        g.ranges += (g.ranges.empty() ? "" : ", ") + batch_mm(note.bottom_z) + "-" + batch_mm(note.top_z);
+        g.min_lead = std::max(g.min_lead, note.min_lead);
+        g.step     = std::max(g.step, note.step);
+        g.gap      = std::max(g.gap, note.gap);
     }
 
-    const std::string &name = object.model_object()->name;
-    std::string        msg;
-    if (!split_runs.empty()) {
-        msg = format(L("Batched interface filament changes: on %1%, the support interface at Z %2% mm needs more than one filament "
-                       "change round trip."), name, split_runs);
-        if (min_lead > 0. && !unreachable)
-            msg += " " + format(L("Set Batch lead height to %1% mm or more to print each run with one."), batch_mm(min_lead));
-        else if (min_lead > 0.)
-            msg += " " + format(L("Set Batch lead height to %1% mm or more to print some runs with one; the others are too deep for "
-                                  "the nozzle to reach."), batch_mm(min_lead));
-        else
-            msg += " " + std::string(L("No batch lead height within the nozzle's reach prints these runs with one each."));
-    }
-    if (!custom_runs.empty()) {
-        if (!msg.empty())
-            msg += "\n";
-        msg += format(L("Batched interface filament changes: on %1%, the support interface at Z %2% mm is printed with the usual "
-                        "filament changes because a pause, colour change or custom G-code is placed inside it."), name, custom_runs);
+    std::string msg = format(L("Batched interface filament changes on %1%: some support interface runs need more than one "
+                               "filament change round trip."), object.model_object()->name);
+    for (const auto &[cause, g] : groups) {
+        msg += "\n";
+        switch (cause) {
+        case Cause::LeadTooShallow:
+            msg += format(L("At Z %1% mm the interface is deeper than the batch lead height. Set Batch lead height to %2% mm or "
+                            "more to print it with one."), g.ranges, batch_mm(g.min_lead));
+            break;
+        case Cause::NoLeadFits:
+            msg += format(L("At Z %1% mm the interface is deeper than any batch lead height the nozzle can reach, so it is split."),
+                          g.ranges);
+            break;
+        case Cause::CustomGCode:
+            msg += format(L("At Z %1% mm a pause, colour change or custom G-code inside the interface keeps it from being batched. "
+                            "Move it above or below the interface to batch it."), g.ranges);
+            break;
+        case Cause::StackStart:
+        case Cause::StackEnd:
+            msg += format(L("At Z %1% mm support columns under the interface start or end at different heights, so it is split "
+                            "to keep every interface layer on support that is already printed."), g.ranges);
+            break;
+        case Cause::Clearance:
+            msg += format(L("At Z %1% mm the nozzle would pass material %2% mm taller than its tip, which needs %3% mm of space "
+                            "beside the interface. A wider Support/object XY distance or a lower Batch lead height lets it batch."),
+                          g.ranges, batch_mm(g.step), batch_mm(g.gap));
+            break;
+        }
     }
     return msg;
 }

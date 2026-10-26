@@ -644,3 +644,18 @@ TEST_CASE("A run that batches whole raises no batching notification", "[SupportI
     for (const PrintStateBase::Warning &w : print.step_state_with_warnings(psWipeTower).warnings)
         CHECK(w.message.find("Batched interface filament changes") == std::string::npos);
 }
+
+TEST_CASE("A pause inside an interface run is named as the reason it is not batched", "[SupportInterfaceBatch][Print]")
+{
+    Print print;
+    slice(print, batch_config(true), [](Model &model) {
+        model.plates_custom_gcodes[model.curr_plate_index].gcodes.push_back({ 5.8, CustomGCode::PausePrint, 1, "", "" });
+    });
+
+    const auto warnings = print.step_state_with_warnings(psWipeTower).warnings;
+    const auto it = std::find_if(warnings.begin(), warnings.end(), [](const PrintStateBase::Warning &w) {
+        return w.message.find("Batched interface filament changes") != std::string::npos; });
+    REQUIRE(it != warnings.end());
+    CHECK(it->message.find("pause, colour change or custom G-code") != std::string::npos);
+    CHECK(it->message.find("Set Batch lead height") == std::string::npos);  // a deeper lead would not help
+}
