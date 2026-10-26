@@ -78,18 +78,19 @@ try {
     $failExe = Build-TestInstaller 'restore failure package' $true @($fixtures[1], $fixtures[2]) $true
     Run-Installer $oldExe $oldInstall
     [IO.File]::AppendAllText((Join-Path $oldInstall 'resources\cert\printer.cer'), $extra.Pem)
+    # A failed capture only warns: the install must go ahead with stock trust, because most users have
+    # no added certificates and must never be blocked by this step.
     $locked = [IO.File]::Open((Join-Path $oldInstall 'resources\cert\printer.cer'), 'Open', 'Read', 'None')
-    try { Run-Installer $newExe $newInstall $true }
+    try { Run-Installer $newExe $newInstall }
     finally { $locked.Dispose() }
-    if (!(Test-Path (Join-Path $oldInstall 'Uninstall.exe'))) { throw 'Capture failure removed the old installer.' }
-    $registry = [Microsoft.Win32.RegistryKey]::OpenBaseKey('LocalMachine', 'Registry32')
-    try {
-        $key = $registry.OpenSubKey("SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\$identity")
-        if (!$key) { throw 'Capture failure removed the old uninstall entry.' }
-        try { if (!$key.GetValue('UninstallString').Contains($oldInstall)) { throw 'Old uninstall entry changed.' } }
-        finally { $key.Dispose() }
-    } finally { $registry.Dispose() }
-    Write-Host 'PASS failed capture aborts before old uninstall, including registry preservation'
+    $bundle = Join-Path $newInstall 'resources\cert\printer.cer'
+    if ([IO.File]::ReadAllText($bundle) -cne [IO.File]::ReadAllText((Join-Path $newInstall 'resources\cert\printer-stock.cer'))) {
+        throw 'Failed capture did not install the stock bundle.'
+    }
+    Write-Host 'PASS failed capture warns and installs with stock trust'
+    # Rebuild the legacy installation with a local certificate for the upgrade checks below.
+    Run-Installer $oldExe $oldInstall
+    [IO.File]::AppendAllText((Join-Path $oldInstall 'resources\cert\printer.cer'), $extra.Pem)
     Run-Installer $newExe $newInstall
     Check-NewTrust
     if (Test-Path (Join-Path $oldInstall 'resources\cert\printer.cer')) { throw 'Old uninstall did not run.' }
@@ -97,7 +98,8 @@ try {
     Run-Installer $newExe $newInstall
     Check-NewTrust
     Write-Host 'PASS real silent repeat upgrade without duplicate trust'
-    Run-Installer $failExe $newInstall $true
+    # A failed restore warns and keeps the installed stock bundle; the install itself succeeds.
+    Run-Installer $failExe $newInstall
     $recovery = Join-Path $newInstall 'resources\cert\printer-local-recovery.cer'
     $recovered = @(Read-Certificates $recovery)
     if ($recovered.Count -ne 1 -or $recovered[0].Hash -cne $extra.Hash) { throw 'Restore failure lost local recovery certificate.' }
