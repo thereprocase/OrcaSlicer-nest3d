@@ -1058,6 +1058,7 @@ SupportInterfacePlan plan_support_interface_batches(const PrintObject &object)
             return item.print_z > run_bottom + EPSILON && item.print_z < note.top_z + 0.5 * support_layers[b]->height;
         });
         if (custom != custom_gcodes.end()) {
+            note.cause  = SupportInterfaceRunNote::Cause::CustomGCode;
             note.reason = "custom G-code at Z " + format_mm(custom->print_z) + " mm falls inside the run";
             plan.notes.emplace_back(std::move(note));
             continue;
@@ -1097,24 +1098,32 @@ SupportInterfacePlan plan_support_interface_batches(const PrintObject &object)
         run.batch_layer(0, n - 1, lead, &failure, &close);
         switch (failure) {
         case InterfaceRun::Failure::TooDeep:
-            note.reason = "the run is deeper than a lead of " + format_mm(lead) + " mm covers"; break;
-        case InterfaceRun::Failure::StackStart:
-            note.reason = "an interface stack starts on support that would not be printed yet"; break;
-        case InterfaceRun::Failure::StackEnd:
-            note.reason = "support or object printed before the batch would rest on an interface layer"; break;
-        case InterfaceRun::Failure::TooClose:
-            note.reason = "the nozzle needs " + format_mm(close.second) + " mm between interface and material " + format_mm(close.first) +
-                          " mm taller (increase support/object XY distance)";
-            break;
-        case InterfaceRun::Failure::None: break;
-        }
-        if (failure == InterfaceRun::Failure::TooDeep)
             for (double step : run.step_heights())
                 if (step > lead + EPSILON && step <= clearance.max_lead() + EPSILON &&
                     run.batch_layer(0, n - 1, step) != size_t(-1)) {
                     note.min_lead = step;
                     break;
                 }
+            note.cause  = note.min_lead > 0. ? SupportInterfaceRunNote::Cause::LeadTooShallow : SupportInterfaceRunNote::Cause::NoLeadFits;
+            note.reason = "the run is deeper than a lead of " + format_mm(lead) + " mm covers";
+            break;
+        case InterfaceRun::Failure::StackStart:
+            note.cause  = SupportInterfaceRunNote::Cause::StackStart;
+            note.reason = "an interface stack starts on support that would not be printed yet";
+            break;
+        case InterfaceRun::Failure::StackEnd:
+            note.cause  = SupportInterfaceRunNote::Cause::StackEnd;
+            note.reason = "support or object printed before the batch would rest on an interface layer";
+            break;
+        case InterfaceRun::Failure::TooClose:
+            note.cause  = SupportInterfaceRunNote::Cause::Clearance;
+            note.step   = close.first;
+            note.gap    = close.second;
+            note.reason = "the nozzle needs " + format_mm(close.second) + " mm between interface and material " + format_mm(close.first) +
+                          " mm taller (increase support/object XY distance)";
+            break;
+        case InterfaceRun::Failure::None: break;
+        }
         plan.notes.emplace_back(std::move(note));
     }
     return plan;

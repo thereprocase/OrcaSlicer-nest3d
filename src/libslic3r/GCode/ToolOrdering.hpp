@@ -494,6 +494,18 @@ inline bool support_interface_batching_applies(const PrintObject &object)
 
 // A run of two or more interface layers that does not print as a single batch.
 struct SupportInterfaceRunNote {
+    enum class Cause {
+        CustomGCode,    // a pause, colour change or custom G-code falls inside the run
+        LeadTooShallow, // the run is deeper than the lead; min_lead would print it as one batch
+        NoLeadFits,     // the run is deeper than any lead within the nozzle's reach
+        StackStart,     // an interface stack starts on support not yet printed at the batch layer
+        StackEnd,       // material printed before the batch would rest on an interface layer
+        Clearance,      // the nozzle cone would hit a taller neighbour; see step and gap
+    };
+    Cause       cause    = Cause::LeadTooShallow;
+    // For Clearance: the step beside the interface and the gap the nozzle needs there.
+    double      step     = 0.;
+    double      gap      = 0.;
     double      bottom_z = 0.;
     double      top_z    = 0.;
     // Batches the run prints as, and layers it prints as usual, one filament change each.
