@@ -58,6 +58,17 @@ class NightlyPackages(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'Missing platform'):
             publisher.prepare_assets(self.artifacts, self.root / 'release')
 
+    def test_release_without_macos_is_complete_unless_macos_was_built(self):
+        for directory, filename in (
+            ('OrcaSlicer_Linux_ubuntu_2404_V2.5.0-dev', 'orca.AppImage'),
+            ('OrcaSlicer_Windows_V2.5.0-dev', 'orca.exe'),
+            ('OrcaSlicer-Linux-flatpak_V2.5.0-dev_x86_64.flatpak', 'orca.flatpak')):
+            self.package(directory, filename)
+        assets = publisher.prepare_assets(self.artifacts, self.root / 'release')
+        self.assertEqual(len(assets), 4)
+        with self.assertRaisesRegex(ValueError, 'Missing platform'):
+            publisher.prepare_assets(self.artifacts, self.root / 'release-mac', require_mac=True)
+
     def test_duplicate_normalized_asset_names_are_rejected(self):
         self.package('OrcaSlicer_Linux_V2.5.0-dev', 'orca.AppImage')
         self.package('OrcaSlicer_Linux_V2.6.0-dev', 'orca.AppImage')
