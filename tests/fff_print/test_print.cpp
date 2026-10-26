@@ -652,6 +652,18 @@ TEST_CASE("Batched interface filament changes warn when the support base may use
     CHECK(count_opt_key(own_base, "support_interface_not_for_body") == 0);
 }
 
+TEST_CASE("Batched interface filament changes warn when the support base uses the interface filament", "[Print][validate][SupportInterfaceBatch]")
+{
+    DynamicPrintConfig config = batched_interface_config();
+    config.set_deserialize_strict({ { "support_filament", "2" }, { "support_object_xy_distance", "0.35" } });
+
+    std::vector<StringObjectException> warnings;
+    CHECK(validate_cubes(config, warnings).string.empty());
+    CHECK(count_opt_key(warnings, "support_filament") == 1);
+    // Batching is skipped, so the nozzle never dips beside a wall and the XY distance is not at issue.
+    CHECK(count_opt_key(warnings, "support_object_xy_distance") == 0);
+}
+
 TEST_CASE("Batched interface filament warnings appear once for a plate of identical objects", "[Print][validate][SupportInterfaceBatch]")
 {
     DynamicPrintConfig config = batched_interface_config();

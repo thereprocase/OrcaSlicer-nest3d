@@ -1895,15 +1895,26 @@ static StringObjectException validate_support_interface_batch(const Print &print
             return err;
         }
 
-        // The object and its support base already print in the interface filament: there is no
-        // filament change to batch, and the dip below the current layer buys nothing.
+        // The cases where ToolOrdering's support_interface_batching_applies() turns batching off for
+        // the object. Batching then does nothing, which the user cannot see in the settings.
         const std::vector<unsigned int> object_filaments = object->object_extruders();
-        const bool base_matches = cfg.support_filament.value == 0 || cfg.support_filament.value == cfg.support_interface_filament.value;
-        if (base_matches && !object_filaments.empty() &&
-            std::all_of(object_filaments.begin(), object_filaments.end(), [interface_filament](unsigned int f) { return f == interface_filament; })) {
-            warn_once(L("Batched interface filament changes have no effect because the support interface uses the same filament as "
-                        "the object. Choose a different filament for Support/raft interface, or turn off batching."),
+        if (std::find(object_filaments.begin(), object_filaments.end(), interface_filament) != object_filaments.end()) {
+            warn_once(L("Batched interface filament changes are skipped because part of the object is printed with the support "
+                        "interface filament. Choose a Support/raft interface filament the object does not use."),
                       "support_interface_filament", object);
+            continue;
+        }
+        if (cfg.support_filament.value == cfg.support_interface_filament.value) {
+            warn_once(L("Batched interface filament changes are skipped because the support base uses the interface filament too, "
+                        "so every support layer needs it. Choose a different Support/raft base filament."),
+                      "support_filament", object);
+            continue;
+        }
+        // The option is only shown, and only applies, when the support base uses the default filament.
+        if (cfg.support_filament.value == 0 && !cfg.support_interface_not_for_body.value) {
+            warn_once(L("Batched interface filament changes are skipped because \"Avoid interface filament for base\" is off, so "
+                        "the support base may use the interface filament on any layer. Turn on \"Avoid interface filament for base\"."),
+                      "support_interface_not_for_body", object);
             continue;
         }
 
@@ -1915,12 +1926,6 @@ static StringObjectException validate_support_interface_batch(const Print &print
                                        "Increase Support/object XY distance to %2% mm, or lower Batch lead height.")) %
                        batch_mm(lead) % batch_mm(xy_required) % batch_mm(cfg.support_object_xy_distance.value)).str(),
                       "support_object_xy_distance", object);
-
-        // The option is only shown, and only applies, when the support base uses the default filament.
-        if (cfg.support_filament.value == 0 && !cfg.support_interface_not_for_body.value)
-            warn_once(L("\"Avoid interface filament for base\" is off, so the support base may also be printed with the interface "
-                        "filament, which adds filament changes outside the batch. Turn on \"Avoid interface filament for base\"."),
-                      "support_interface_not_for_body", object);
     }
     return {};
 }
