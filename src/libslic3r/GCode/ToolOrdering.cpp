@@ -448,6 +448,7 @@ void ToolOrdering::sort_and_build_data(const Print& print, unsigned int first_ex
     this->resolve_mixed_filaments(print.config());
     reorder_extruders_for_minimum_flush_volume(reorder_first_layer);
     this->enforce_mixed_component_order();
+    this->enforce_batched_interface_order();
     m_sorted = true;
 
     double max_layer_height = 0.;
@@ -470,6 +471,7 @@ void ToolOrdering::sort_and_build_data(const Print& print, unsigned int first_ex
         // Orca reorders a second time here (BBS has no such path); re-enforce so the
         // mixed sub-layer component order survives the extra pass.
         this->enforce_mixed_component_order();
+        this->enforce_batched_interface_order();
         this->fill_wipe_tower_partitions(print.config(), object_bottom_z, max_layer_height);
     }
 
@@ -484,6 +486,7 @@ void ToolOrdering::sort_and_build_data(const PrintObject& object , unsigned int 
     this->resolve_mixed_filaments(object.print()->config());
     reorder_extruders_for_minimum_flush_volume(reorder_first_layer);
     this->enforce_mixed_component_order();
+    this->enforce_batched_interface_order();
     m_sorted = true;
 
     double max_layer_height = calc_max_layer_height(object.print()->config(), object.config().layer_height);
@@ -494,6 +497,7 @@ void ToolOrdering::sort_and_build_data(const PrintObject& object , unsigned int 
         // Orca reorders a second time here (BBS has no such path); re-enforce so the
         // mixed sub-layer component order survives the extra pass.
         this->enforce_mixed_component_order();
+        this->enforce_batched_interface_order();
         this->fill_wipe_tower_partitions(object.print()->config(), object.layers().front()->print_z - object.layers().front()->height, max_layer_height);
     }
 
@@ -777,6 +781,124 @@ void ToolOrdering::initialize_layers(std::vector<coordf_t> &zs)
     }
 }
 
+bool support_interface_batching_applies(const PrintObject &object)
+{
+    const PrintObjectConfig &config    = object.config();
+    const int                interface = config.support_interface_filament.value; // 1-based, 0 = current filament
+    if (!config.support_interface_batch.value || interface == 0 || !config.support_interface_not_for_body.value ||
+        !object.has_support_material() || object.support_layers().empty())
+        return false;
+    // A support base printed with the interface filament leaves nothing to batch.
+    if (config.support_filament.value == interface)
+        return false;
+    // The body must never need the interface filament, or the deferred layers would still change to it.
+    const std::vector<unsigned int> body = object.object_extruders(); // 0-based
+    return std::find(body.begin(), body.end(), (unsigned int) (interface - 1)) == body.end();
+}
+
+// Same test as collect_extruders() and GCode::process_layer(): interface extrusions are the
+// top-level support entities whose role is the interface role.
+static bool has_interface_extrusions(const SupportLayer &layer)
+{
+    return std::any_of(layer.support_fills.entities.begin(), layer.support_fills.entities.end(),
+                       [](const ExtrusionEntity *ee) { return ee->role() == erSupportMaterialInterface; });
+}
+
+// Area covered by the interface extrusions. The closing merges neighbouring interface lines
+// (up to the wider interface spacing apart) into one surface without bridging the gaps between
+// interface and the object, which are at least support_object_xy_distance on both sides of a wall.
+static ExPolygons interface_footprint(const SupportLayer &layer, const PrintObjectConfig &config)
+{
+    Polygons covered;
+    for (const ExtrusionEntity *ee : layer.support_fills.entities)
+        if (ee->role() == erSupportMaterialInterface)
+            ee->polygons_covered_by_width(covered, float(SCALED_EPSILON));
+    const double spacing = std::max(config.support_interface_spacing.value, config.support_bottom_interface_spacing.value);
+    return closing_ex(covered, float(scale_(0.5 * spacing + 0.1)));
+}
+
+// True if part of `layer` is not covered by `neighbour`. Overhangs narrower than 0.5 mm count as
+// covered, as do slivers that an opening by 0.2 mm removes.
+static bool extends_past(const ExPolygons &layer, const ExPolygons &neighbour)
+{
+    return !opening_ex(diff_ex(layer, offset_ex(neighbour, float(scale_(0.5)))), float(scale_(0.2))).empty();
+}
+
+std::vector<SupportInterfaceBatch> plan_support_interface_batches(const PrintObject &object)
+{
+    std::vector<SupportInterfaceBatch> batches;
+    if (!support_interface_batching_applies(object))
+        return batches;
+
+    const auto    &support_layers = object.support_layers();
+    const double   lead           = std::max(0., object.config().support_interface_batch_lead.value);
+    // Raft interface layers print below the object's first layer; they are left alone.
+    const size_t   first_layer    = std::min(object.slicing_parameters().raft_layers(), support_layers.size());
+
+    for (size_t a = first_layer; a < support_layers.size();) {
+        if (!has_interface_extrusions(*support_layers[a])) {
+            ++a;
+            continue;
+        }
+        size_t b = a;
+        while (b + 1 < support_layers.size() && has_interface_extrusions(*support_layers[b + 1]))
+            ++b;
+
+        std::vector<double>     z;
+        std::vector<ExPolygons> footprints;
+        for (size_t i = a; i <= b; ++i) {
+            z.emplace_back(support_layers[i]->print_z);
+            footprints.emplace_back(interface_footprint(*support_layers[i], object.config()));
+        }
+        const size_t n = z.size();
+        // starts[j]: part of layer j rests on material other than interface layer j-1.
+        // ends[j]: part of layer j carries material other than interface layer j+1.
+        std::vector<bool> starts(n, false), ends(n, false);
+        for (size_t j = 1; j < n; ++j) {
+            starts[j]   = extends_past(footprints[j], footprints[j - 1]);
+            ends[j - 1] = extends_past(footprints[j - 1], footprints[j]);
+        }
+
+        // Greedily take the longest batch from i. The batch layer k is the highest layer at least
+        // `lead` below the top of the batch (and at least the first layer of the batch). A batch is valid if
+        //  - the lowest deferred layer is at most `lead` below the material already printed at k,
+        //  - every deferred layer rests on material printed before it: an interface stack may only
+        //    start at k + 1 or below,
+        //  - no material printed before the batch rests on a deferred layer: an interface stack
+        //    may only end at k or above.
+        for (size_t i = 0; i < n;) {
+            size_t best_last = i, best_k = i;
+            for (size_t e = i + 1; e < n; ++e) {
+                size_t k = i;
+                while (k < e && z[k + 1] <= z[e] - lead + EPSILON)
+                    ++k;
+                if (z[k] - z[i] > lead + EPSILON)
+                    break; // k only rises with e.
+                bool valid = true;
+                for (size_t j = i + 1; j <= e && valid; ++j)
+                    valid = !(starts[j] && j > k + 1);
+                for (size_t j = i; j < e && valid; ++j)
+                    valid = !(ends[j] && j < k);
+                if (valid) {
+                    best_last = e;
+                    best_k    = k;
+                }
+            }
+            if (best_last > i) {
+                SupportInterfaceBatch batch;
+                batch.first = a + i;
+                batch.last  = a + best_last;
+                batch.batch = a + best_k;
+                batch.footprints.assign(footprints.begin() + i, footprints.begin() + best_last + 1);
+                batches.emplace_back(std::move(batch));
+            }
+            i = best_last + 1;
+        }
+        a = b + 1;
+    }
+    return batches;
+}
+
 // Collect extruders reuqired to print layers.
 void ToolOrdering::collect_extruders(const PrintObject &object, const std::vector<std::pair<double, unsigned int>> &per_layer_extruder_switches)
 {
@@ -959,6 +1081,20 @@ void ToolOrdering::collect_extruders(const PrintObject &object, const std::vecto
     sort_remove_duplicates(firstLayerExtruders);
     const_cast<PrintObject&>(object).object_first_layer_wall_extruders = firstLayerExtruders;
 
+    // Batched support interface: the interface filament is only needed on each batch's batch layer.
+    const std::vector<SupportInterfaceBatch> interface_batches = plan_support_interface_batches(object);
+    for (const SupportInterfaceBatch &batch : interface_batches) {
+        LayerTools::BatchedInterface batched;
+        batched.object     = &object;
+        batched.extruder   = (unsigned int) (object.config().support_interface_filament.value - 1);
+        batched.footprints = batch.footprints;
+        for (size_t i = batch.first; i <= batch.last; ++i) {
+            batched.layers.emplace_back(object.support_layers()[i]);
+            this->tools_for_layer(object.support_layers()[i]->print_z).deferred_interface_objects.emplace_back(&object);
+        }
+        this->tools_for_layer(object.support_layers()[batch.batch]->print_z).batched_interfaces.emplace_back(std::move(batched));
+    }
+
     // Collect the support extruders.
     for (auto support_layer : object.support_layers()) {
         LayerTools   &layer_tools   = this->tools_for_layer(support_layer->print_z);
@@ -1001,7 +1137,11 @@ void ToolOrdering::collect_extruders(const PrintObject &object, const std::vecto
                 layer_tools.extruders.push_back(get_next_extruder(interface_not_for_body ? extruder_interface - 1 : -1, all_extruders) + 1);
             }
         }
-        if (has_interface) layer_tools.extruders.push_back(extruder_interface);
+        // A batched layer leaves its interface to the batch layer, which needs the interface filament.
+        const bool batched_layer = has_interface && layer_tools.defers_interface(&object);
+        const bool batch_layer   = std::any_of(layer_tools.batched_interfaces.begin(), layer_tools.batched_interfaces.end(),
+                                               [&object](const LayerTools::BatchedInterface &b) { return b.object == &object; });
+        if ((has_interface && !batched_layer) || batch_layer) layer_tools.extruders.push_back(extruder_interface);
         if (has_support || has_interface) {
             layer_tools.has_support = true;
             layer_tools.wiping_extrusions().is_support_overriddable_and_mark(role, object);
@@ -2748,6 +2888,17 @@ void ToolOrdering::resolve_mixed_filaments(const PrintConfig &config)
 
         prev_print_z = lt.print_z;
     }
+}
+
+// A batch layer prints its deferred interface last: the batch must stand on everything else printed
+// at that layer, and the next layer starts with the change back. The flush-minimizing reorder sees
+// no difference between [base, interface] and [interface, base] there, so pin the order here.
+void ToolOrdering::enforce_batched_interface_order()
+{
+    for (LayerTools &lt : m_layer_tools)
+        for (const LayerTools::BatchedInterface &batch : lt.batched_interfaces)
+            std::stable_partition(lt.extruders.begin(), lt.extruders.end(),
+                                  [&batch](unsigned int extruder) { return extruder != batch.extruder; });
 }
 
 void ToolOrdering::enforce_mixed_component_order()

@@ -3441,6 +3441,9 @@ void GCode::_do_export(Print& print, GCodeOutputStream &file, ThumbnailsGenerato
     m_config.apply(print.default_region_config());
     m_has_staggered_perimeters = false;
     m_staggered_clearance = 0.;
+    m_batched_interface_obstacles.clear();
+    m_in_interface_batch        = false;
+    m_interface_batch_footprint = nullptr;
     for (const PrintObject *object : print.objects()) {
         for (const PrintRegion &region : object->all_regions()) {
             if (!region.config().staggered_perimeters.value) continue;
@@ -6870,6 +6873,8 @@ LayerResult GCode::process_layer(
                 ExtrusionRole   role               = support_layer.support_fills.role();
                 bool            has_support        = role == erMixed || role == erSupportMaterial || role == erSupportTransition;
                 bool            has_interface      = role == erMixed || role == erSupportMaterialInterface;
+                // Batched support interface: this layer's interface prints with its batch.
+                const bool      interface_deferred = has_interface && layer_tools.defers_interface(&object);
                 // Extruder ID of the support base. -1 if "don't care".
                 unsigned int    support_extruder   = object.config().support_filament.value - 1;
                 // Shall the support be printed with the active extruder, preferably with non-soluble, to avoid tool changes?
@@ -6959,18 +6964,27 @@ LayerResult GCode::process_layer(
                     support_filaments[{ &support_layer, erSupportMaterial }] = support_extruder;
                     support_filaments[{ &support_layer, erSupportTransition }] = support_extruder;
                 }
-                if (has_interface) {
+                if (has_interface && !interface_deferred) {
                     support_filaments[{ &support_layer, erSupportMaterialInterface }] =
                         single_extruder ? (has_support ? support_extruder : interface_extruder) : interface_extruder;
                 }
-                // Assign an extruder to the base.
-                ObjectByExtruder &obj = object_by_extruder(by_extruder, has_support ? support_extruder : interface_extruder, &layer_to_print - layers.data(), layers.size());
-                obj.support = &support_layer.support_fills;
-                obj.support_extrusion_role = single_extruder ? erMixed : erSupportMaterial;
-                if (! single_extruder && has_interface) {
-                    ObjectByExtruder &obj_interface = object_by_extruder(by_extruder, interface_extruder, &layer_to_print - layers.data(), layers.size());
-                    obj_interface.support = &support_layer.support_fills;
-                    obj_interface.support_extrusion_role = erSupportMaterialInterface;
+                if (interface_deferred) {
+                    // Only the base prints with the layer.
+                    if (has_support) {
+                        ObjectByExtruder &obj = object_by_extruder(by_extruder, support_extruder, &layer_to_print - layers.data(), layers.size());
+                        obj.support = &support_layer.support_fills;
+                        obj.support_extrusion_role = erSupportMaterial;
+                    }
+                } else {
+                    // Assign an extruder to the base.
+                    ObjectByExtruder &obj = object_by_extruder(by_extruder, has_support ? support_extruder : interface_extruder, &layer_to_print - layers.data(), layers.size());
+                    obj.support = &support_layer.support_fills;
+                    obj.support_extrusion_role = single_extruder ? erMixed : erSupportMaterial;
+                    if (! single_extruder && has_interface) {
+                        ObjectByExtruder &obj_interface = object_by_extruder(by_extruder, interface_extruder, &layer_to_print - layers.data(), layers.size());
+                        obj_interface.support = &support_layer.support_fills;
+                        obj_interface.support_extrusion_role = erSupportMaterialInterface;
+                    }
                 }
             }
         }
@@ -7990,6 +8004,8 @@ LayerResult GCode::process_layer(
             m_need_change_layer_lift_z = true;
         }
 
+        if (!layer_tools.batched_interfaces.empty())
+            gcode += this->emit_batched_interfaces(print, layer_tools, extruder_id, ordering, single_object_instance_idx);
     }
 
     // Belt brim orphan sweep (Finding C).  A coincident belt_brim_by_layer band lives on
@@ -8307,6 +8323,10 @@ std::string GCode::change_layer(coordf_t print_z)
     m_need_change_layer_lift_z = true;
 
     m_nominal_z = z;
+    // Batched support interface printed up to here no longer stands above the nozzle.
+    m_batched_interface_obstacles.erase(std::remove_if(m_batched_interface_obstacles.begin(), m_batched_interface_obstacles.end(),
+                                                       [z](const BatchedInterfaceObstacle &o) { return o.top_z <= z + EPSILON; }),
+                                        m_batched_interface_obstacles.end());
     m_writer.get_position().z() = z;
 
     // forget last wiping path as wiping after raising Z is pointless
@@ -8317,6 +8337,163 @@ std::string GCode::change_layer(coordf_t print_z)
 }
 
 
+
+double GCode::batched_interface_clearance() const
+{
+    // At least the configured z-hop, and never less than 0.4 mm even when z-hop is off.
+    return std::max(0.4, m_config.z_hop.get_at(m_writer.filament() != nullptr ? m_writer.filament()->id() : 0));
+}
+
+double GCode::batched_interface_obstacle_z(const Polyline &travel) const
+{
+    if (m_in_interface_batch) {
+        // Within the footprint of the deferred layer being printed nothing stands taller than the
+        // nozzle; anywhere else the material printed so far may.
+        if (m_interface_batch_footprint != nullptr)
+            for (const ExPolygon &expoly : *m_interface_batch_footprint)
+                if (expoly.contains(travel))
+                    return 0.;
+        return m_interface_batch_top_z;
+    }
+    if (m_batched_interface_obstacles.empty())
+        return 0.;
+    BoundingBoxf box;
+    for (const Point &pt : travel.points)
+        box.merge(unscale(pt) + m_origin);
+    double top_z = 0.;
+    for (const BatchedInterfaceObstacle &obstacle : m_batched_interface_obstacles)
+        if (obstacle.top_z > m_nominal_z + EPSILON && obstacle.box.overlap(box))
+            top_z = std::max(top_z, obstacle.top_z);
+    return top_z;
+}
+
+std::string GCode::emit_batched_interfaces(const Print &print, const LayerTools &layer_tools, unsigned int extruder_id,
+                                           const std::vector<const PrintInstance*> *ordering, size_t single_object_instance_idx)
+{
+    // How far from a deferred island a travel still has to clear it: the nozzle tip and the cone above it.
+    static constexpr double nozzle_reach = 2.;
+
+    std::string gcode;
+    for (const LayerTools::BatchedInterface &batch : layer_tools.batched_interfaces) {
+        if (batch.extruder != extruder_id || batch.layers.empty())
+            continue;
+        const PrintObject &object = *batch.object;
+
+        // The object's instances in print order.
+        std::vector<size_t> instances;
+        if (single_object_instance_idx != size_t(-1))
+            instances.emplace_back(single_object_instance_idx);
+        else if (ordering != nullptr) {
+            for (const PrintInstance *instance : *ordering)
+                if (instance->print_object == &object)
+                    instances.emplace_back(instance - object.instances().data());
+        } else
+            for (size_t i = 0; i < object.instances().size(); ++i)
+                instances.emplace_back(i);
+        if (instances.empty())
+            continue;
+
+        const Layer   *layer_before = m_layer;
+        const coordf_t z_before     = m_nominal_z;
+        // Where the nozzle stood before the batch: the wipe tower or the end of an extrusion of this
+        // layer. Nothing taller than this layer stands there, so the batch parks the nozzle there and
+        // whatever follows (layer change, toolchange, lift) may lower Z without touching the batch.
+        const bool     park_defined = this->last_pos_defined();
+        const Vec2d    park         = this->point_to_gcode(this->last_pos());
+        const double   z_offset     = m_config.z_offset.value;
+        m_config.apply(print.default_region_config());
+        m_config.apply(object.config(), true);
+
+        gcode += "; BATCHED_INTERFACE_START\n";
+        m_in_interface_batch    = true;
+        m_interface_batch_top_z = m_max_layer_z + z_offset;
+        for (const BatchedInterfaceObstacle &obstacle : m_batched_interface_obstacles)
+            m_interface_batch_top_z = std::max(m_interface_batch_top_z, obstacle.top_z);
+
+        for (size_t i = 0; i < batch.layers.size(); ++i) {
+            const SupportLayer &support_layer = *batch.layers[i];
+            char buf[64];
+            sprintf(buf, "; BATCHED_INTERFACE_LAYER: %g\n", support_layer.print_z);
+            gcode += buf;
+            m_layer                     = &support_layer;
+            m_object_layer_over_raft    = false;
+            m_nominal_z                 = support_layer.print_z + z_offset;
+            m_need_change_layer_lift_z  = true;
+            m_interface_batch_footprint = &batch.footprints[i];
+
+            for (size_t instance_id : instances) {
+                const PrintInstance &instance = object.instances()[instance_id];
+                const size_t         label_id = instance.model_instance->get_labeled_id();
+                if (this->config().gcode_label_objects)
+                    gcode += std::string("; printing object ") + object.model_object()->name + " id:" + std::to_string(object.get_id()) +
+                             " copy " + std::to_string(instance.id) + "\n";
+                if (m_enable_exclude_object) {
+                    if (is_BBL_Printer())
+                        m_writer.set_object_start_str(std::string("; start printing object, unique label id: ") + std::to_string(label_id) + "\n" +
+                                                      "M624 " + _encode_label_ids_to_base64({label_id}) + "\n");
+                    else if (print.config().gcode_flavor.value == gcfKlipper)
+                        m_writer.set_object_start_str(std::string("EXCLUDE_OBJECT_START NAME=") + instance_name(instance) + "\n");
+                    else if (print.config().gcode_flavor.value == gcfMarlinLegacy || print.config().gcode_flavor.value == gcfMarlinFirmware ||
+                             print.config().gcode_flavor.value == gcfRepRapFirmware)
+                        m_writer.set_object_start_str(std::string("M486 S") + std::to_string(instance.unique_id) + "\n");
+                }
+
+                std::pair<const PrintObject*, Point> this_object_copy(&object, instance.shift);
+                if (m_last_obj_copy != this_object_copy)
+                    m_avoid_crossing_perimeters.use_external_mp_once();
+                m_last_obj_copy = this_object_copy;
+                this->set_origin(unscale(instance.shift));
+                this->on_set_origin(&object, instance.shift);
+
+                gcode += this->extrude_support(support_layer.support_fills, erSupportMaterialInterface);
+                gcode += this->extrude_support(support_layer.support_fills, erIroning);
+
+                if (this->config().gcode_label_objects)
+                    gcode += std::string("; stop printing object ") + object.model_object()->name + " id:" + std::to_string(object.get_id()) +
+                             " copy " + std::to_string(instance.id) + "\n";
+                if (!m_writer.is_object_start_str_empty())
+                    m_writer.set_object_start_str("");
+                else if (m_enable_exclude_object) {
+                    if (is_BBL_Printer())
+                        m_writer.set_object_end_str(std::string("; stop printing object, unique label id: ") + std::to_string(label_id) + "\n" + "M625\n");
+                    else if (print.config().gcode_flavor.value == gcfKlipper)
+                        m_writer.set_object_end_str(std::string("EXCLUDE_OBJECT_END NAME=") + instance_name(instance) + "\n");
+                    else if (print.config().gcode_flavor.value == gcfMarlinLegacy || print.config().gcode_flavor.value == gcfMarlinFirmware ||
+                             print.config().gcode_flavor.value == gcfRepRapFirmware)
+                        m_writer.set_object_end_str(std::string("M486 S-1\n"));
+                }
+
+                // Until the layers catch up, travels near this island have to clear it.
+                for (const ExPolygon &expoly : batch.footprints[i]) {
+                    const BoundingBox bbox = get_extents(expoly);
+                    BoundingBoxf      box(unscale(bbox.min) + m_origin, unscale(bbox.max) + m_origin);
+                    box.offset(nozzle_reach);
+                    m_batched_interface_obstacles.push_back({box, m_nominal_z});
+                }
+            }
+            m_interface_batch_top_z = std::max(m_interface_batch_top_z, m_nominal_z);
+            m_max_layer_z           = std::max(m_max_layer_z, float(support_layer.print_z));
+        }
+
+        m_writer.add_object_end_labels(gcode);
+        gcode += this->retract();
+        gcode += m_writer.travel_to_z(m_interface_batch_top_z + this->batched_interface_clearance(), "clear batched interface", true);
+        if (park_defined) {
+            const Point park_point = this->gcode_to_point(park);
+            gcode += m_writer.travel_to_xy(this->point_to_gcode(park_point), "park off batched interface");
+            this->set_last_pos(park_point);
+        }
+        gcode += m_writer.unlift();
+        gcode += "; BATCHED_INTERFACE_END\n";
+
+        m_in_interface_batch        = false;
+        m_interface_batch_footprint = nullptr;
+        m_layer                     = layer_before;
+        m_nominal_z                 = z_before;
+        m_need_change_layer_lift_z  = true;
+    }
+    return gcode;
+}
 
 static std::unique_ptr<EdgeGrid::Grid> calculate_layer_edge_grid(const Layer& layer)
 {
@@ -10300,7 +10477,19 @@ std::string GCode::travel_to(const Point& point, ExtrusionRole role, std::string
     // use G1 because we rely on paths being straight (G0 may make round paths)
     if (travel.size() >= 2) {
         // Orca: use `travel_to_xyz` to ensure we start at the correct z, in case we moved z in custom/filament change gcode
-        if (m_has_staggered_perimeters && m_layer != nullptr) {
+        if (const double obstacle_z = this->batched_interface_obstacle_z(travel); obstacle_z > 0.) {
+            // Batched support interface stands taller than the nozzle along this travel: rise above it
+            // in place, cross, and descend only over the target.
+            const double destination_z = z == DBL_MAX ? m_nominal_z : z;
+            const double clearance_z   = std::max({m_writer.get_position().z(), destination_z, obstacle_z + this->batched_interface_clearance()});
+            gcode += m_writer.travel_to_z(clearance_z, "batched interface clearance", true);
+            for (size_t i = 1; i < travel.size(); ++i)
+                gcode += m_writer.travel_to_xy(this->point_to_gcode(travel.points[i]), comment);
+            gcode += m_writer.travel_to_z(destination_z, "descend over target", true);
+            // The lift is done; drop any lift a retraction left pending.
+            gcode += m_writer.unlift();
+            m_need_change_layer_lift_z = false;
+        } else if (m_has_staggered_perimeters && m_layer != nullptr) {
             // Lift vertically before crossing any raised track, even for short
             // unretracted moves and regions where staggering is disabled.
             const double destination_z = z == DBL_MAX ? m_nominal_z : z;

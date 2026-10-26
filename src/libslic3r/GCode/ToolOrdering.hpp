@@ -18,6 +18,7 @@
 
 #include <boost/container/small_vector.hpp>
 #include <vector>
+#include "../ExPolygon.hpp"
 #include "../FilamentMixer.hpp"
 #include "../MultiNozzleUtils.hpp"
 #include "../ObjectID.hpp"
@@ -31,6 +32,7 @@ namespace Slic3r {
 
 class Print;
 class PrintObject;
+class SupportLayer;
 class LayerTools;
 namespace CustomGCode { struct Item; }
 class PrintRegion;
@@ -249,6 +251,26 @@ public:
         return mixed_group_by_slot(slot_id) != nullptr;
     }
 
+    // Batched support interface (support_interface_batch). A batch prints the interface extrusions
+    // of several consecutive support layers of one object with a single filament change: they are
+    // deferred from their own layers and printed on the batch layer, after everything else on it.
+    struct BatchedInterface {
+        const PrintObject                *object   = nullptr;
+        // 0-based interface filament.
+        unsigned int                      extruder = 0;
+        // The deferred support layers, in ascending print_z.
+        std::vector<const SupportLayer*>  layers;
+        // Area covered by each deferred layer's interface extrusions, in object coordinates.
+        std::vector<ExPolygons>           footprints;
+    };
+    // Batches printed on this layer.
+    std::vector<BatchedInterface>   batched_interfaces;
+    // Objects whose interface extrusions on this layer are printed by a batch instead.
+    std::vector<const PrintObject*> deferred_interface_objects;
+    bool defers_interface(const PrintObject *object) const {
+        return std::find(deferred_interface_objects.begin(), deferred_interface_objects.end(), object) != deferred_interface_objects.end();
+    }
+
     WipingExtrusions& wiping_extrusions() {
         m_wiping_extrusions.set_layer_tools_ptr(this);
         return m_wiping_extrusions;
@@ -382,6 +404,7 @@ private:
     void                reorder_extruders_for_minimum_flush_volume(bool reorder_first_layer);
     void                resolve_mixed_filaments(const PrintConfig &config);
     void                enforce_mixed_component_order();
+    void                enforce_batched_interface_order();
 
     // BBS
     std::vector<unsigned int> generate_first_layer_tool_order(const Print& print);
@@ -438,6 +461,23 @@ private:
 // Out-of-range entries, duplicates and non-numeric tokens are dropped, so a partially valid string
 // still orders the filaments it does name. Exposed for unit testing.
 std::vector<unsigned int> parse_cyclic_order(const std::string& str, unsigned int number_of_extruders);
+
+// Batched support interface: one batch of a run of consecutive support layers that carry interface
+// extrusions. Indices are into PrintObject::support_layers(). The interface extrusions of layers
+// [first, last] are printed on layer `batch`, after its other extrusions.
+struct SupportInterfaceBatch {
+    size_t                  first = 0;
+    size_t                  last  = 0;
+    size_t                  batch = 0;
+    // Interface footprint of each layer first..last, in object coordinates.
+    std::vector<ExPolygons> footprints;
+};
+// Whether support_interface_batch applies to the object: a dedicated interface filament that the
+// object body and the support base never use.
+bool support_interface_batching_applies(const PrintObject &object);
+// Split the object's interface runs into batches. Runs a single layer thick are left out, they
+// already print with one round trip. Exposed for unit testing.
+std::vector<SupportInterfaceBatch> plan_support_interface_batches(const PrintObject &object);
 
 } // namespace SLic3r
 
