@@ -246,6 +246,22 @@ TEST_CASE("Batched support interface plans one batch for a four layer interface 
     CHECK(batch.footprints.size() == 4);
 }
 
+TEST_CASE("Batched support interface splits a run deeper than the lead allows", "[SupportInterfaceBatch]")
+{
+    // With a 0.2 mm lead, the lowest deferred layer may sit one 0.2 mm layer below the batch layer:
+    // three of the four interface layers fit in one batch, the fourth prints on its own.
+    DynamicPrintConfig config = batch_config(true);
+    config.set_deserialize_strict({ { "support_interface_batch_lead", 0.2 } });
+    Print print;
+    slice(print, config);
+    const PrintObject &object  = *print.objects().front();
+    const auto         batches = plan_support_interface_batches(object);
+    REQUIRE(batches.size() == 1);
+    CHECK(batches.front().last - batches.front().first == 2);
+    const auto &layers = object.support_layers();
+    CHECK(layers[batches.front().batch]->print_z - layers[batches.front().first]->print_z <= 0.2 + eps);
+}
+
 TEST_CASE("Batched support interface loads the interface filament once per run", "[SupportInterfaceBatch]")
 {
     const Parsed stock   = parse(slice(batch_config(false)));
