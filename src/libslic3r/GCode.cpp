@@ -6504,6 +6504,9 @@ LayerResult GCode::process_layer(
     float height = first_layer ? static_cast<float>(print_z) : static_cast<float>(print_z) - m_last_layer_z;
     sprintf(buf, ";%s%g\n", GCodeProcessor::reserved_tag(GCodeProcessor::ETags::Height).c_str(), height);
     gcode += buf;
+    // Why interface runs starting here print as more than one batch or as usual (support_interface_batch).
+    for (const std::string &note : layer_tools.batched_interface_notes)
+        gcode += note;
     // update caches
     m_last_layer_z = static_cast<float>(print_z);
     m_max_layer_z  = std::max(m_max_layer_z, m_last_layer_z);
@@ -8404,7 +8407,14 @@ std::string GCode::emit_batched_interfaces(const Print &print, const LayerTools 
         m_config.apply(print.default_region_config());
         m_config.apply(object.config(), true);
 
-        gcode += "; BATCHED_INTERFACE_START\n";
+        // Travels that stay this far inside a deferred layer's footprint run where its lines run:
+        // as far from taller neighbours as the extrusions, which the plan keeps clear of the nozzle.
+        const float             travel_inset = float(scale_(std::max(0., 0.5 * support_material_interface_flow(&object).width() - 0.05)));
+        std::vector<ExPolygons> travel_areas;
+        for (const ExPolygons &footprint : batch.footprints)
+            travel_areas.emplace_back(offset_ex(footprint, -travel_inset));
+
+        gcode += ";" + GCodeProcessor::Batched_Interface_Start_Tag + "\n";
         m_in_interface_batch    = true;
         m_interface_batch_top_z = m_max_layer_z + z_offset;
         for (const BatchedInterfaceObstacle &obstacle : m_batched_interface_obstacles)
@@ -8413,13 +8423,13 @@ std::string GCode::emit_batched_interfaces(const Print &print, const LayerTools 
         for (size_t i = 0; i < batch.layers.size(); ++i) {
             const SupportLayer &support_layer = *batch.layers[i];
             char buf[64];
-            sprintf(buf, "; BATCHED_INTERFACE_LAYER: %g\n", support_layer.print_z);
+            sprintf(buf, ";%s %g\n", GCodeProcessor::Batched_Interface_Layer_Tag.c_str(), support_layer.print_z);
             gcode += buf;
             m_layer                     = &support_layer;
             m_object_layer_over_raft    = false;
             m_nominal_z                 = support_layer.print_z + z_offset;
             m_need_change_layer_lift_z  = true;
-            m_interface_batch_footprint = &batch.footprints[i];
+            m_interface_batch_footprint = &travel_areas[i];
 
             for (size_t instance_id : instances) {
                 const PrintInstance &instance = object.instances()[instance_id];
@@ -8476,6 +8486,7 @@ std::string GCode::emit_batched_interfaces(const Print &print, const LayerTools 
         }
 
         m_writer.add_object_end_labels(gcode);
+        gcode += ";" + GCodeProcessor::Batched_Interface_End_Tag + "\n";
         gcode += this->retract();
         gcode += m_writer.travel_to_z(m_interface_batch_top_z + this->batched_interface_clearance(), "clear batched interface", true);
         if (park_defined) {
@@ -8484,7 +8495,6 @@ std::string GCode::emit_batched_interfaces(const Print &print, const LayerTools 
             this->set_last_pos(park_point);
         }
         gcode += m_writer.unlift();
-        gcode += "; BATCHED_INTERFACE_END\n";
 
         m_in_interface_batch        = false;
         m_interface_batch_footprint = nullptr;

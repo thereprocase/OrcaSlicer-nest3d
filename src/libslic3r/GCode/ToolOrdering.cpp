@@ -6,6 +6,8 @@
 #include "libslic3r/FilamentGroup.hpp"
 #include "Print.hpp"
 #include "ToolOrdering.hpp"
+#include "NozzleClearance.hpp"
+#include "Flow.hpp"
 #include "Layer.hpp"
 #include "ClipperUtils.hpp"
 #include "ParameterUtils.hpp"
@@ -20,6 +22,7 @@
 #include "I18N.hpp"
 #include "../BeltBrim.hpp"
 
+#include <boost/format.hpp>
 #include <boost/log/trivial.hpp>
 #include <vector>
 #include <string>
@@ -781,22 +784,25 @@ void ToolOrdering::initialize_layers(std::vector<coordf_t> &zs)
     }
 }
 
-// Print's validation warns about each case rejected here.
-bool support_interface_batching_applies(const PrintObject &object)
+SupportInterfaceBatchSkip support_interface_batch_skip(const PrintObject &object)
 {
     const PrintObjectConfig &config    = object.config();
     const int                interface = config.support_interface_filament.value; // 1-based, 0 = current filament
-    if (!config.support_interface_batch.value || interface == 0 || !object.has_support_material() || object.support_layers().empty())
-        return false;
-    // A support base printed with the interface filament leaves nothing to batch.
+    if (!config.support_interface_batch.value)
+        return SupportInterfaceBatchSkip::Off;
+    if (interface == 0)
+        return SupportInterfaceBatchSkip::NoInterfaceFilament;
+    if (!object.has_support_material())
+        return SupportInterfaceBatchSkip::NoSupport;
     if (config.support_filament.value == interface)
-        return false;
-    // A base in the default filament may fall back to the interface filament on any layer unless told not to.
+        return SupportInterfaceBatchSkip::BaseUsesInterface;
+    // Only a base in the default filament may fall back to the interface filament.
     if (config.support_filament.value == 0 && !config.support_interface_not_for_body.value)
-        return false;
-    // The body must never need the interface filament, or the deferred layers would still change to it.
+        return SupportInterfaceBatchSkip::BaseMayUseInterface;
     const std::vector<unsigned int> body = object.object_extruders(); // 0-based
-    return std::find(body.begin(), body.end(), (unsigned int) (interface - 1)) == body.end();
+    if (std::find(body.begin(), body.end(), (unsigned int) (interface - 1)) != body.end())
+        return SupportInterfaceBatchSkip::BodyUsesInterface;
+    return SupportInterfaceBatchSkip::None;
 }
 
 // Same test as collect_extruders() and GCode::process_layer(): interface extrusions are the
@@ -820,6 +826,19 @@ static ExPolygons interface_footprint(const SupportLayer &layer, const PrintObje
     return closing_ex(covered, float(scale_(0.5 * spacing + 0.1)));
 }
 
+// Area covered by everything else the support layer prints.
+static void collect_base_coverage(const ExtrusionEntityCollection &collection, bool top_level, Polygons &out)
+{
+    for (const ExtrusionEntity *ee : collection.entities) {
+        if (top_level && ee->role() == erSupportMaterialInterface)
+            continue;
+        if (const auto *sub = dynamic_cast<const ExtrusionEntityCollection*>(ee))
+            collect_base_coverage(*sub, false, out);
+        else if (ee->role() != erIroning)
+            ee->polygons_covered_by_width(out, float(SCALED_EPSILON));
+    }
+}
+
 // True if part of `layer` is not covered by `neighbour`. Overhangs narrower than 0.5 mm count as
 // covered, as do slivers that an opening by 0.2 mm removes.
 static bool extends_past(const ExPolygons &layer, const ExPolygons &neighbour)
@@ -827,16 +846,193 @@ static bool extends_past(const ExPolygons &layer, const ExPolygons &neighbour)
     return !opening_ex(diff_ex(layer, offset_ex(neighbour, float(scale_(0.5)))), float(scale_(0.2))).empty();
 }
 
-std::vector<SupportInterfaceBatch> plan_support_interface_batches(const PrintObject &object)
-{
-    std::vector<SupportInterfaceBatch> batches;
-    if (!support_interface_batching_applies(object))
-        return batches;
+namespace {
 
-    const auto    &support_layers = object.support_layers();
-    const double   lead           = std::max(0., object.config().support_interface_batch_lead.value);
+// One run of consecutive support layers carrying interface, and everything of the object printed
+// within its height, for checking candidate batches.
+class InterfaceRun
+{
+public:
+    InterfaceRun(const PrintObject &object, size_t first, size_t last, NozzleClearance clearance, double line_width)
+        : m_clearance(clearance), m_line_width(line_width)
+    {
+        const auto &support_layers = object.support_layers();
+        for (size_t i = first; i <= last; ++i) {
+            const SupportLayer &layer = *support_layers[i];
+            m_z.emplace_back(layer.print_z);
+            m_bottom.emplace_back(layer.print_z - layer.height);
+            m_footprints.emplace_back(interface_footprint(layer, object.config()));
+        }
+        const size_t n = m_z.size();
+        m_starts.assign(n, false);
+        m_ends.assign(n, false);
+        for (size_t j = 1; j < n; ++j) {
+            m_starts[j]   = extends_past(m_footprints[j], m_footprints[j - 1]);
+            m_ends[j - 1] = extends_past(m_footprints[j - 1], m_footprints[j]);
+        }
+        // Object and support base printed within the height of the run, on their own print_z:
+        // with independent support layer heights the two interleave.
+        for (const Layer *layer : object.layers())
+            if (layer->print_z > m_z.front() - EPSILON && layer->print_z < m_z.back() + EPSILON)
+                m_material.push_back({ layer->print_z, layer->lslices });
+        for (size_t i = first; i <= last; ++i) {
+            Polygons base;
+            collect_base_coverage(support_layers[i]->support_fills, true, base);
+            if (!base.empty())
+                m_material.push_back({ support_layers[i]->print_z, union_ex(base) });
+        }
+        m_close.assign(n, std::vector<int8_t>(m_material.size(), -1));
+    }
+
+    size_t size() const { return m_z.size(); }
+    double z(size_t j) const { return m_z[j]; }
+    double bottom(size_t j) const { return m_bottom[j]; }
+    const std::vector<ExPolygons> &footprints() const { return m_footprints; }
+
+    enum class Failure { None, TooDeep, StackStart, StackEnd, TooClose };
+
+    // Can the layers [i, e] print as one batch on layer k with this lead? `close` receives the
+    // delta and gap of the first pair found too close.
+    Failure check(size_t i, size_t e, size_t k, double lead, std::pair<double, double> *close = nullptr)
+    {
+        // Material printed before the batch stands at most z_k; the lowest deferred layer may sit
+        // at most `lead` below it. Material printed after it starts at the next print_z above z_k;
+        // the top deferred layer may stand at most `lead` above that.
+        if (m_z[k] - m_z[i] > lead + EPSILON || m_z[e] - this->next_above(m_z[k], m_z[e]) > lead + EPSILON)
+            return Failure::TooDeep;
+        // A deferred layer must rest on material printed before it...
+        for (size_t j = i + 1; j <= e; ++j)
+            if (m_starts[j] && m_bottom[j] > m_z[k] + EPSILON)
+                return Failure::StackStart;
+        // ...and material printed before the batch must not rest on one.
+        for (size_t j = i; j < e; ++j)
+            if (m_ends[j] && m_z[j] < m_z[k] - EPSILON)
+                return Failure::StackEnd;
+        // Beside taller material the nozzle cone needs room: material printed before the batch
+        // and taller than a deferred layer, and material printed after it and lower than one.
+        for (size_t j = i; j <= e; ++j)
+            for (size_t m = 0; m < m_material.size(); ++m) {
+                const double zm     = m_material[m].z;
+                const bool   before = zm < m_z[k] + EPSILON && zm > m_z[j] + EPSILON;
+                const bool   after  = zm > m_z[k] + EPSILON && zm < m_z[j] - EPSILON;
+                if ((before || after) && !this->clear(j, m)) {
+                    if (close != nullptr) {
+                        const double delta = std::abs(zm - m_z[j]);
+                        *close = { delta, m_clearance.required_gap(delta, m_line_width) };
+                    }
+                    return Failure::TooClose;
+                }
+            }
+        return Failure::None;
+    }
+
+    // The batch layer for [i, e] at this lead: the valid layer with the smallest worst-case step
+    // on either side, the higher one on a tie. size_t(-1) if none is valid; then `failure` tells
+    // the most specific reason.
+    size_t batch_layer(size_t i, size_t e, double lead, Failure *failure = nullptr, std::pair<double, double> *close = nullptr)
+    {
+        size_t  best      = size_t(-1);
+        double  best_step = 0.;
+        Failure worst     = Failure::TooDeep;
+        for (size_t k = i; k <= e; ++k) {
+            std::pair<double, double> k_close;
+            const Failure f = this->check(i, e, k, lead, &k_close);
+            if (f == Failure::None) {
+                const double step = std::max(m_z[k] - m_z[i], m_z[e] - this->next_above(m_z[k], m_z[e]));
+                if (best == size_t(-1) || step < best_step + EPSILON) {
+                    best      = k;
+                    best_step = step;
+                }
+            } else if (int(f) > int(worst)) {
+                worst = f;
+                if (close != nullptr)
+                    *close = k_close;
+            }
+        }
+        if (failure != nullptr)
+            *failure = best == size_t(-1) ? worst : Failure::None;
+        return best;
+    }
+
+    // The print_z steps within the run that a lead has to cover, ascending.
+    std::vector<double> step_heights() const
+    {
+        std::vector<double> zs = m_z;
+        for (const Material &m : m_material)
+            zs.emplace_back(m.z);
+        std::vector<double> steps;
+        for (double a : zs)
+            for (double b : zs)
+                if (b > a + EPSILON)
+                    steps.emplace_back(b - a);
+        std::sort(steps.begin(), steps.end());
+        return steps;
+    }
+
+private:
+    struct Material {
+        double     z;
+        ExPolygons area;
+    };
+
+    // Lowest print_z of the run above z, or `limit` if none is below it.
+    double next_above(double z, double limit) const
+    {
+        double next = limit;
+        for (double zz : m_z)
+            if (zz > z + EPSILON)
+                next = std::min(next, zz);
+        for (const Material &m : m_material)
+            if (m.z > z + EPSILON)
+                next = std::min(next, m.z);
+        return next;
+    }
+
+    // Deferred layer j keeps the nozzle clear of material m: the material stays out of the
+    // footprint grown by the gap the nozzle cone needs at their height difference.
+    bool clear(size_t j, size_t m)
+    {
+        int8_t &cached = m_close[j][m];
+        if (cached < 0) {
+            const double gap = m_clearance.required_gap(std::abs(m_material[m].z - m_z[j]), m_line_width);
+            cached = int8_t(intersection_ex(m_material[m].area, offset_ex(m_footprints[j], float(scale_(std::max(gap, 0.))))).empty());
+        }
+        return cached != 0;
+    }
+
+    NozzleClearance                  m_clearance;
+    double                           m_line_width;
+    std::vector<double>              m_z;
+    std::vector<double>              m_bottom;
+    std::vector<ExPolygons>          m_footprints;
+    // starts[j]: part of layer j rests on material other than interface layer j-1.
+    // ends[j]: part of layer j carries material other than interface layer j+1.
+    std::vector<bool>                m_starts, m_ends;
+    std::vector<Material>            m_material;
+    std::vector<std::vector<int8_t>> m_close;
+};
+
+std::string format_mm(double value) { return (boost::format("%.2f") % value).str(); }
+
+} // namespace
+
+SupportInterfacePlan plan_support_interface_batches(const PrintObject &object)
+{
+    SupportInterfacePlan plan;
+    if (!support_interface_batching_applies(object))
+        return plan;
+
+    const PrintConfig     &print_config = object.print()->config();
+    const NozzleClearance  clearance    = nozzle_clearance(
+        nozzle_diameter_for_filament(print_config, object.config().support_interface_filament.value, object.print()->is_BBL_printer()),
+        print_config.nozzle_height.value);
+    const double           lead         = std::max(0., std::min(object.config().support_interface_batch_lead.value, clearance.max_lead()));
+    const double           line_width   = support_material_interface_flow(&object).width();
+    const auto            &custom_gcodes = object.print()->model().get_curr_plate_custom_gcodes().gcodes;
+
+    const auto   &support_layers = object.support_layers();
     // Raft interface layers print below the object's first layer; they are left alone.
-    const size_t   first_layer    = std::min(object.slicing_parameters().raft_layers(), support_layers.size());
+    const size_t  first_layer    = std::min(object.slicing_parameters().raft_layers(), support_layers.size());
 
     for (size_t a = first_layer; a < support_layers.size();) {
         if (!has_interface_extrusions(*support_layers[a])) {
@@ -846,60 +1042,82 @@ std::vector<SupportInterfaceBatch> plan_support_interface_batches(const PrintObj
         size_t b = a;
         while (b + 1 < support_layers.size() && has_interface_extrusions(*support_layers[b + 1]))
             ++b;
+        const size_t first = a;
+        a = b + 1;
+        if (b == first)
+            continue;
 
-        std::vector<double>     z;
-        std::vector<ExPolygons> footprints;
-        for (size_t i = a; i <= b; ++i) {
-            z.emplace_back(support_layers[i]->print_z);
-            footprints.emplace_back(interface_footprint(*support_layers[i], object.config()));
-        }
-        const size_t n = z.size();
-        // starts[j]: part of layer j rests on material other than interface layer j-1.
-        // ends[j]: part of layer j carries material other than interface layer j+1.
-        std::vector<bool> starts(n, false), ends(n, false);
-        for (size_t j = 1; j < n; ++j) {
-            starts[j]   = extends_past(footprints[j], footprints[j - 1]);
-            ends[j - 1] = extends_past(footprints[j - 1], footprints[j]);
+        SupportInterfaceRunNote note;
+        note.bottom_z = support_layers[first]->print_z;
+        note.top_z    = support_layers[b]->print_z;
+
+        // A pause, colour change or custom G-code inside the run has to happen between its layers
+        // as they print; a batch would move the interface across it.
+        const double run_bottom = support_layers[first]->print_z - support_layers[first]->height;
+        auto custom = std::find_if(custom_gcodes.begin(), custom_gcodes.end(), [&](const CustomGCode::Item &item) {
+            return item.print_z > run_bottom + EPSILON && item.print_z < note.top_z + 0.5 * support_layers[b]->height;
+        });
+        if (custom != custom_gcodes.end()) {
+            note.reason = "custom G-code at Z " + format_mm(custom->print_z) + " mm falls inside the run";
+            plan.notes.emplace_back(std::move(note));
+            continue;
         }
 
-        // Greedily take the longest batch from i. The batch layer k is the highest layer at least
-        // `lead` below the top of the batch (and at least the first layer of the batch). A batch is valid if
-        //  - the lowest deferred layer is at most `lead` below the material already printed at k,
-        //  - every deferred layer rests on material printed before it: an interface stack may only
-        //    start at k + 1 or below,
-        //  - no material printed before the batch rests on a deferred layer: an interface stack
-        //    may only end at k or above.
+        InterfaceRun run(object, first, b, clearance, line_width);
+        const size_t n = run.size();
         for (size_t i = 0; i < n;) {
             size_t best_last = i, best_k = i;
             for (size_t e = i + 1; e < n; ++e) {
-                size_t k = i;
-                while (k < e && z[k + 1] <= z[e] - lead + EPSILON)
-                    ++k;
-                if (z[k] - z[i] > lead + EPSILON)
-                    break; // k only rises with e.
-                bool valid = true;
-                for (size_t j = i + 1; j <= e && valid; ++j)
-                    valid = !(starts[j] && j > k + 1);
-                for (size_t j = i; j < e && valid; ++j)
-                    valid = !(ends[j] && j < k);
-                if (valid) {
+                InterfaceRun::Failure failure;
+                const size_t k = run.batch_layer(i, e, lead, &failure);
+                if (k != size_t(-1)) {
                     best_last = e;
                     best_k    = k;
-                }
+                } else if (failure == InterfaceRun::Failure::TooDeep)
+                    break; // A longer batch only gets deeper.
             }
             if (best_last > i) {
                 SupportInterfaceBatch batch;
-                batch.first = a + i;
-                batch.last  = a + best_last;
-                batch.batch = a + best_k;
-                batch.footprints.assign(footprints.begin() + i, footprints.begin() + best_last + 1);
-                batches.emplace_back(std::move(batch));
-            }
+                batch.first = first + i;
+                batch.last  = first + best_last;
+                batch.batch = first + best_k;
+                batch.footprints.assign(run.footprints().begin() + i, run.footprints().begin() + best_last + 1);
+                plan.batches.emplace_back(std::move(batch));
+                ++note.batches;
+            } else
+                ++note.single_layers;
             i = best_last + 1;
         }
-        a = b + 1;
+        if (note.batches == 1 && plan.batches.back().first == first && plan.batches.back().last == b)
+            continue; // One batch for the whole run.
+
+        // Explain why the run is not one batch, and which lead would make it one.
+        InterfaceRun::Failure     failure;
+        std::pair<double, double> close;
+        run.batch_layer(0, n - 1, lead, &failure, &close);
+        switch (failure) {
+        case InterfaceRun::Failure::TooDeep:
+            note.reason = "the run is deeper than a lead of " + format_mm(lead) + " mm covers"; break;
+        case InterfaceRun::Failure::StackStart:
+            note.reason = "an interface stack starts on support that would not be printed yet"; break;
+        case InterfaceRun::Failure::StackEnd:
+            note.reason = "support or object printed before the batch would rest on an interface layer"; break;
+        case InterfaceRun::Failure::TooClose:
+            note.reason = "the nozzle needs " + format_mm(close.second) + " mm between interface and material " + format_mm(close.first) +
+                          " mm taller (increase support/object XY distance)";
+            break;
+        case InterfaceRun::Failure::None: break;
+        }
+        if (failure == InterfaceRun::Failure::TooDeep)
+            for (double step : run.step_heights())
+                if (step > lead + EPSILON && step <= clearance.max_lead() + EPSILON &&
+                    run.batch_layer(0, n - 1, step) != size_t(-1)) {
+                    note.min_lead = step;
+                    break;
+                }
+        plan.notes.emplace_back(std::move(note));
     }
-    return batches;
+    return plan;
 }
 
 // Collect extruders reuqired to print layers.
@@ -1085,8 +1303,22 @@ void ToolOrdering::collect_extruders(const PrintObject &object, const std::vecto
     const_cast<PrintObject&>(object).object_first_layer_wall_extruders = firstLayerExtruders;
 
     // Batched support interface: the interface filament is only needed on each batch's batch layer.
-    const std::vector<SupportInterfaceBatch> interface_batches = plan_support_interface_batches(object);
-    for (const SupportInterfaceBatch &batch : interface_batches) {
+    const SupportInterfacePlan interface_plan = plan_support_interface_batches(object);
+    for (const SupportInterfaceRunNote &note : interface_plan.notes) {
+        std::string line = "; batched interface: run Z " + format_mm(note.bottom_z) + "-" + format_mm(note.top_z) + " prints as ";
+        if (note.batches == 0)
+            line += "usual";
+        else {
+            line += std::to_string(note.batches) + (note.batches == 1 ? " batch" : " batches");
+            if (note.single_layers > 0)
+                line += " and " + std::to_string(note.single_layers) + " single layer" + (note.single_layers == 1 ? "" : "s");
+        }
+        line += ": " + note.reason;
+        if (note.min_lead > 0.)
+            line += "; one batch needs a lead of at least " + format_mm(note.min_lead) + " mm";
+        this->tools_for_layer(note.bottom_z).batched_interface_notes.emplace_back(line + "\n");
+    }
+    for (const SupportInterfaceBatch &batch : interface_plan.batches) {
         LayerTools::BatchedInterface batched;
         batched.object     = &object;
         batched.extruder   = (unsigned int) (object.config().support_interface_filament.value - 1);

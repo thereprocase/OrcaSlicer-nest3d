@@ -914,8 +914,8 @@ protected:
         double       top_z;
     };
     std::vector<BatchedInterfaceObstacle> m_batched_interface_obstacles;
-    // While a batch prints: the top of the tallest material printed so far and the footprint of
-    // the deferred layer being printed. Travels that leave the footprint clear the tallest material.
+    // While a batch prints: the top of the tallest material printed so far and the area of the
+    // deferred layer being printed that its lines run in. Travels that leave it clear the tallest material.
     bool              m_in_interface_batch        = false;
     double            m_interface_batch_top_z     = 0.;
     const ExPolygons *m_interface_batch_footprint = nullptr;

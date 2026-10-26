@@ -265,6 +265,9 @@ public:
     };
     // Batches printed on this layer.
     std::vector<BatchedInterface>   batched_interfaces;
+    // Why runs of interface layers starting on this layer were split or printed as usual, as
+    // G-code comment lines.
+    std::vector<std::string>        batched_interface_notes;
     // Objects whose interface extrusions on this layer are printed by a batch instead.
     std::vector<const PrintObject*> deferred_interface_objects;
     bool defers_interface(const PrintObject *object) const {
@@ -472,12 +475,44 @@ struct SupportInterfaceBatch {
     // Interface footprint of each layer first..last, in object coordinates.
     std::vector<ExPolygons> footprints;
 };
-// Whether support_interface_batch applies to the object: a dedicated interface filament that the
-// object body and the support base never use.
-bool support_interface_batching_applies(const PrintObject &object);
+// Why support_interface_batch does nothing for an object. Batching needs a dedicated interface
+// filament that neither the object body nor the support base ever uses.
+enum class SupportInterfaceBatchSkip {
+    None,                // batching applies
+    Off,                 // support_interface_batch is off
+    NoInterfaceFilament, // the interface prints with the current filament (support_interface_filament == 0)
+    NoSupport,           // the object has no support
+    BaseUsesInterface,   // support_filament == support_interface_filament
+    BaseMayUseInterface, // default base filament and support_interface_not_for_body off
+    BodyUsesInterface,   // part of the object prints with the interface filament
+};
+SupportInterfaceBatchSkip support_interface_batch_skip(const PrintObject &object);
+inline bool support_interface_batching_applies(const PrintObject &object)
+{
+    return support_interface_batch_skip(object) == SupportInterfaceBatchSkip::None;
+}
+
+// A run of two or more interface layers that does not print as a single batch.
+struct SupportInterfaceRunNote {
+    double      bottom_z = 0.;
+    double      top_z    = 0.;
+    // Batches the run prints as, and layers it prints as usual, one filament change each.
+    size_t      batches       = 0;
+    size_t      single_layers = 0;
+    // Smallest lead that prints the run as one batch, 0 if no lead within the nozzle's reach does.
+    double      min_lead = 0.;
+    // Why, in English; also written to the G-code as a comment.
+    std::string reason;
+};
+
+struct SupportInterfacePlan {
+    std::vector<SupportInterfaceBatch>   batches;
+    std::vector<SupportInterfaceRunNote> notes;
+};
+
 // Split the object's interface runs into batches. Runs a single layer thick are left out, they
-// already print with one round trip. Exposed for unit testing.
-std::vector<SupportInterfaceBatch> plan_support_interface_batches(const PrintObject &object);
+// already print with one round trip.
+SupportInterfacePlan plan_support_interface_batches(const PrintObject &object);
 
 } // namespace SLic3r
 
