@@ -7440,19 +7440,24 @@ void PrintConfigDef::init_fff_params()
                       "The object and support base are printed up to the lead height below the top of the interface, "
                       "then the interface layers are printed from the bottom up, then printing continues with the base filament.\n"
                       "This saves time and purge waste. While the interface is printed, the nozzle moves next to parts of the print "
-                      "that are up to the lead height taller than the layer it prints, so use a support/object XY distance of at least 1 mm.");
+                      "that are up to the lead height taller than the layer it prints, so the support/object XY distance must leave room "
+                      "for the nozzle tip and cone. The slicer warns when it does not.");
     def->mode     = comAdvanced;
     def->set_default_value(new ConfigOptionBool(false));
 
     def = this->add("support_interface_batch_lead", coFloat);
     def->label    = L("Batch lead height");
     def->category = L("Support");
-    def->tooltip  = L("How far below the top of a support interface the filament change happens when interface filament changes are batched.\n"
-                      "A larger value lets more interface layers be printed in one batch, but the nozzle then moves next to taller walls "
-                      "and is more likely to scrape them.");
+    def->tooltip  = L("How much taller than the nozzle tip the print next to it may be while layers are printed out of order. "
+                      "The object and support base run up to this far ahead of the interface before the change to the interface filament, "
+                      "and the interface then stands up to this far above them when the base filament resumes.\n"
+                      "A larger value batches more interface layers per filament change, but needs a wider support/object XY distance "
+                      "so the nozzle cone clears the walls. It is capped by the height of the nozzle that sticks out below the heater "
+                      "block and silicone sock (the printer's nozzle height minus 0.15 mm).");
     def->sidetext = L("mm"); // millimeters, CIS languages need translation
     def->min      = 0.2;
-    def->max      = 1.0;
+    // The real cap depends on the printer's nozzle_height and is checked in Print::validate().
+    def->max      = 5.0;
     def->mode     = comAdvanced;
     def->set_default_value(new ConfigOptionFloat(0.4));
 

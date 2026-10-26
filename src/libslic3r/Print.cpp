@@ -1840,6 +1840,91 @@ StringObjectException Print::check_multi_filament_valid(const Print& print)
     return ret;
 }
 
+// Orca: nozzle clearance model for batched support interface layers. The nozzle is a flat tip of
+// radius 1.25 x nozzle diameter under a 45 degree cone, and only its lowest nozzle_height (minus a
+// margin) is predictable; above that sit the heater block and silicone sock.
+static constexpr double batch_clearance_margin = 0.15;
+
+static double support_interface_batch_lead_max(const PrintConfig &config)
+{
+    return config.nozzle_height.value - batch_clearance_margin;
+}
+
+// XY distance that keeps the tip and cone off a wall `lead` taller than the tip, measured from the
+// edge of the interface: the nozzle centre runs half a line width inside it.
+static double support_interface_batch_xy_required(double nozzle_diameter, double lead, double line_width)
+{
+    return 1.25 * nozzle_diameter + lead + batch_clearance_margin - 0.5 * line_width;
+}
+
+static std::string batch_mm(double value) { return (boost::format("%.2f") % value).str(); }
+
+// Batched support interface filament changes. A lead the nozzle cannot reach is refused; every
+// other case prints and only warns, naming the setting that removes the warning. One warning per
+// cause for the whole plate, attached to the first object that triggers it, keeps a plate of copies
+// from stacking identical notifications.
+static StringObjectException validate_support_interface_batch(const Print &print, std::vector<StringObjectException> &warnings)
+{
+    auto warn_once = [&warnings](std::string msg, const char *opt_key, const PrintObject *object) {
+        for (const StringObjectException &w : warnings)
+            if (w.opt_key == opt_key)
+                return;
+        StringObjectException w;
+        w.string     = std::move(msg);
+        w.opt_key    = opt_key;
+        w.object     = object->model_object();
+        w.is_warning = true;
+        warnings.push_back(std::move(w));
+    };
+
+    for (const PrintObject *object : print.objects()) {
+        const PrintObjectConfig &cfg = object->config();
+        if (!cfg.support_interface_batch.value || !object->has_support_material() || cfg.support_interface_filament.value == 0)
+            continue;
+        const unsigned int interface_filament = (unsigned int) cfg.support_interface_filament.value - 1;
+        const double       lead               = cfg.support_interface_batch_lead.value;
+
+        const double lead_max = support_interface_batch_lead_max(print.config());
+        if (lead > lead_max + EPSILON) {
+            StringObjectException err;
+            err.string  = (boost::format(L("Batch lead height is %1% mm, but the printer profile's nozzle sticks out only %2% mm below "
+                                           "the heater block and silicone sock. Set Batch lead height to %3% mm or less.")) %
+                           batch_mm(lead) % batch_mm(print.config().nozzle_height.value) % batch_mm(lead_max)).str();
+            err.opt_key = "support_interface_batch_lead";
+            err.object  = object->model_object();
+            return err;
+        }
+
+        // The object and its support base already print in the interface filament: there is no
+        // filament change to batch, and the dip below the current layer buys nothing.
+        const std::vector<unsigned int> object_filaments = object->object_extruders();
+        const bool base_matches = cfg.support_filament.value == 0 || cfg.support_filament.value == cfg.support_interface_filament.value;
+        if (base_matches && !object_filaments.empty() &&
+            std::all_of(object_filaments.begin(), object_filaments.end(), [interface_filament](unsigned int f) { return f == interface_filament; })) {
+            warn_once(L("Batched interface filament changes have no effect because the support interface uses the same filament as "
+                        "the object. Choose a different filament for Support/raft interface, or turn off batching."),
+                      "support_interface_filament", object);
+            continue;
+        }
+
+        const double nozzle_diameter = nozzle_diameter_for_filament(print.config(), cfg.support_interface_filament.value, print.is_BBL_printer());
+        const double xy_required     = support_interface_batch_xy_required(nozzle_diameter, lead, support_material_interface_flow(object).width());
+        if (cfg.support_object_xy_distance.value < xy_required - EPSILON)
+            warn_once((boost::format(L("With a batch lead height of %1% mm, the nozzle tip and cone need a support/object XY distance of "
+                                       "at least %2% mm to stay off the walls while batched interface layers are printed; it is %3% mm. "
+                                       "Increase Support/object XY distance to %2% mm, or lower Batch lead height.")) %
+                       batch_mm(lead) % batch_mm(xy_required) % batch_mm(cfg.support_object_xy_distance.value)).str(),
+                      "support_object_xy_distance", object);
+
+        // The option is only shown, and only applies, when the support base uses the default filament.
+        if (cfg.support_filament.value == 0 && !cfg.support_interface_not_for_body.value)
+            warn_once(L("\"Avoid interface filament for base\" is off, so the support base may also be printed with the interface "
+                        "filament, which adds filament changes outside the batch. Turn on \"Avoid interface filament for base\"."),
+                      "support_interface_not_for_body", object);
+    }
+    return {};
+}
+
 // Precondition: Print::validate() requires the Print::apply() to be called its invocation.
 //BBS: refine seq-print validation logic
 // The exception's own message is just "Errors"; the detail is in the per-object errors,
@@ -2114,6 +2199,15 @@ StringObjectException Print::validate(std::vector<StringObjectException> *warnin
                 return e < is_mixed.size() && is_mixed[e] && e < gradient.size() && gradient[e]; }))
             warn(L("A gradient mixed filament is used, but 'Mixed color sublayer' is disabled. The gradient will not be printed."),
                  "enable_mixed_color_sublayer");
+    }
+
+    {
+        std::vector<StringObjectException> batch_warnings;
+        StringObjectException              batch_error = validate_support_interface_batch(*this, batch_warnings);
+        for (StringObjectException &w : batch_warnings)
+            add_warning(std::move(w));
+        if (!batch_error.string.empty())
+            return batch_error;
     }
 
     if (nozzles < 2 && extruders.size() > 1) {
