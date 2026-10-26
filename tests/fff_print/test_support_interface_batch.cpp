@@ -334,13 +334,28 @@ TEST_CASE("Batched support interface prints a run as usual around a custom G-cod
 
 TEST_CASE("Batched support interface prints inside the owning object's exclude-object label", "[SupportInterfaceBatch]")
 {
+    // Skipping the object on the printer has to skip its batch too: Bambu firmware by M624/M625,
+    // Klipper by EXCLUDE_OBJECT.
+    const bool bbl = GENERATE(false, true);
+    CAPTURE(bbl);
     DynamicPrintConfig config = batch_config(true);
     config.set_deserialize_strict({ { "exclude_object", 1 }, { "gcode_flavor", "klipper" } });
-    const Parsed batched = parse(slice(config));
+    Print print;
+    print.is_BBL_printer() = bbl;
+    const Parsed batched = parse(slice(print, config));
     REQUIRE(batched.batches.size() == 1);
     REQUIRE(batched.batch_labels.size() >= 2);
-    CHECK_THAT(batched.batch_labels.front(), Catch::Matchers::StartsWith("EXCLUDE_OBJECT_START NAME="));
-    CHECK_THAT(batched.batch_labels.back(), Catch::Matchers::StartsWith("EXCLUDE_OBJECT_END NAME="));
+    if (bbl) {
+        CHECK_THAT(batched.batch_labels.front(), Catch::Matchers::StartsWith("M624 "));
+        CHECK_THAT(batched.batch_labels.back(), Catch::Matchers::StartsWith("M625"));
+    } else {
+        CHECK_THAT(batched.batch_labels.front(), Catch::Matchers::StartsWith("EXCLUDE_OBJECT_START NAME="));
+        CHECK_THAT(batched.batch_labels.back(), Catch::Matchers::StartsWith("EXCLUDE_OBJECT_END NAME="));
+    }
+    // Every start label inside the block is closed inside it.
+    const auto starts = std::count_if(batched.batch_labels.begin(), batched.batch_labels.end(), [](const std::string &l) {
+        return l.rfind("M624", 0) == 0 || l.rfind("EXCLUDE_OBJECT_START", 0) == 0; });
+    CHECK(size_t(2 * starts) == batched.batch_labels.size());
 }
 
 TEST_CASE("Batched support interface reports why batching is skipped for an object", "[SupportInterfaceBatch]")
