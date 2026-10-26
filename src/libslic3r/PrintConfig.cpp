@@ -7450,8 +7450,10 @@ void PrintConfigDef::init_fff_params()
     def->category = L("Support");
     def->tooltip  = L("How much taller than the nozzle tip the print next to it may be while layers are printed out of order. "
                       "The object and support base run up to this far ahead of the interface before the change to the interface filament, "
-                      "and the interface then stands up to this far above them when the base filament resumes.\n"
-                      "A larger value batches more interface layers per filament change, but needs a wider support/object XY distance "
+                      "and the interface then stands up to this far above them when the base filament resumes. "
+                      "One batch covers interface layers from this far below the layer where the filament changes up to this far above "
+                      "the layer printed after it; a deeper interface is split into several batches.\n"
+                      "A larger value batches deeper interfaces, but needs a wider support/object XY distance "
                       "so the nozzle cone clears the walls. It is capped by the height of the nozzle that sticks out below the heater "
                       "block and silicone sock (the printer's nozzle height minus 0.15 mm).");
     def->sidetext = L("mm"); // millimeters, CIS languages need translation
