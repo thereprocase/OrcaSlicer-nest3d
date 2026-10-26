@@ -293,6 +293,7 @@ TEST_CASE("Batched support interface splits a run deeper than the lead allows an
     for (const SupportInterfaceBatch &batch : plan.batches)
         CHECK(layers[batch.batch]->print_z - layers[batch.first]->print_z <= 0.2 + eps);
     REQUIRE(plan.notes.size() == 1);
+    CHECK(plan.notes.front().cause == SupportInterfaceRunNote::Cause::LeadTooShallow);
     CHECK_THAT(plan.notes.front().min_lead, Catch::Matchers::WithinAbs(0.4, eps));
     REQUIRE(batched.notes.size() == 1);
     CHECK_THAT(batched.notes.front(), Catch::Matchers::ContainsSubstring("deeper than a lead of 0.20 mm"));
@@ -325,6 +326,10 @@ TEST_CASE("Batched support interface prints a run as usual around a custom G-cod
     CHECK(batched.batches.empty());
     REQUIRE(batched.notes.size() == 1);
     CHECK_THAT(batched.notes.front(), Catch::Matchers::ContainsSubstring("custom G-code at Z 5.80"));
+    const auto plan = plan_support_interface_batches(*print.objects().front());
+    REQUIRE(plan.notes.size() == 1);
+    CHECK(plan.notes.front().cause == SupportInterfaceRunNote::Cause::CustomGCode);
+    CHECK(plan.notes.front().batches == 0);
 }
 
 TEST_CASE("Batched support interface prints inside the owning object's exclude-object label", "[SupportInterfaceBatch]")
@@ -422,6 +427,33 @@ void check_nozzle_clearance(const Parsed &batched)
     CHECK(lowest_clearance >= -eps);
 }
 
+// Interface line samples that print over nothing printed before them (no material within 0.3 mm
+// below), and those with material printed before them standing over them.
+std::pair<int, int> unsupported_interface(const Parsed &parsed)
+{
+    HeightMap printed;
+    int       floating = 0, covered = 0;
+    for (const Move &m : parsed.moves) {
+        if (!m.extrudes)
+            continue;
+        if (m.interface) {
+            Move point = m;
+            const Vec2d a = m.from.head<2>(), b = m.to.head<2>();
+            const size_t n = std::max<size_t>(1, size_t(std::ceil((b - a).norm() / 0.2)));
+            for (size_t i = 0; i <= n; ++i) {
+                const Vec2d p = a + (b - a) * (double(i) / n);
+                point.from = Vec3d(p.x(), p.y(), m.to.z());
+                point.to   = point.from;
+                const double below = printed.max_near(point, 0.3);
+                floating += below < m.to.z() - 0.3;
+                covered  += printed.max_near(point, 0.05) > m.to.z() + eps;
+            }
+        }
+        printed.deposit(m);
+    }
+    return { floating, covered };
+}
+
 } // namespace
 
 TEST_CASE("Batched support interface never moves the nozzle through printed material", "[SupportInterfaceBatch]")
@@ -446,9 +478,15 @@ TEST_CASE("Batched support interface works on tree hybrid supports and independe
     REQUIRE_FALSE(batched.batches.empty());
     CHECK(batched.off_layer_extrusions == 0);
     check_nozzle_clearance(batched);
-    // Never more round trips than stock.
     config.set_deserialize_strict({ { "support_interface_batch", 0 } });
-    CHECK(batched.loads_of_interface < parse(slice(config)).loads_of_interface);
+    const Parsed stock = parse(slice(config));
+    CHECK(batched.loads_of_interface < stock.loads_of_interface);
+    // Where the interface stacks start and end decides what a batch may hold: no deferred line may
+    // print over less than it would stock, and nothing printed before it may stand over it.
+    const auto [batched_floating, batched_covered] = unsupported_interface(batched);
+    const auto [stock_floating, stock_covered]     = unsupported_interface(stock);
+    CHECK(batched_floating <= stock_floating);
+    CHECK(batched_covered == stock_covered);
 }
 
 TEST_CASE("Batched support interface plans two wipe tower toolchanges per run", "[SupportInterfaceBatch]")
@@ -566,4 +604,28 @@ TEST_CASE("A batched interface run reads in print order in the processor and the
     // One round trip fewer shows up in the time estimate.
     const auto normal = static_cast<size_t>(PrintEstimatedStatistics::ETimeMode::Normal);
     CHECK(result.print_statistics.modes[normal].time < stock_result.print_statistics.modes[normal].time);
+}
+
+TEST_CASE("A split interface run is reported to the user with the lead that would batch it", "[SupportInterfaceBatch][Print]")
+{
+    // Same run as above: a 0.2 mm lead splits it, a 0.4 mm lead would print it as one batch.
+    DynamicPrintConfig config = batch_config(true);
+    config.set_deserialize_strict({ { "support_interface_top_layers", 6 }, { "support_interface_batch_lead", 0.2 } });
+    Print print;
+    slice(print, config);
+
+    const auto warnings = print.step_state_with_warnings(psWipeTower).warnings;
+    const auto it = std::find_if(warnings.begin(), warnings.end(), [](const PrintStateBase::Warning &w) {
+        return w.message.find("Batched interface filament changes") != std::string::npos; });
+    REQUIRE(it != warnings.end());
+    CHECK(it->level == PrintStateBase::WarningLevel::NON_CRITICAL);
+    CHECK(it->message.find("0.40 mm or more") != std::string::npos);
+}
+
+TEST_CASE("A run that batches whole raises no batching notification", "[SupportInterfaceBatch][Print]")
+{
+    Print print;
+    slice(print, batch_config(true));
+    for (const PrintStateBase::Warning &w : print.step_state_with_warnings(psWipeTower).warnings)
+        CHECK(w.message.find("Batched interface filament changes") == std::string::npos);
 }
