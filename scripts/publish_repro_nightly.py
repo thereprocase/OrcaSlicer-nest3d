@@ -50,7 +50,8 @@ def publish_build_archive(sha, run_id, assets, notes):
     return tag
 
 
-def prepare_assets(artifacts, output):
+def prepare_assets(artifacts, output, require_mac=False):
+    """macOS is optional unless the run built it (build-macos); the other platforms are always required."""
     output.mkdir(exist_ok=False)
     assets = []
     for directory in sorted(artifacts.iterdir()):
@@ -76,7 +77,7 @@ def prepare_assets(artifacts, output):
                 raise ValueError(f'Duplicate release asset: {target.name}')
             shutil.make_archive(str(target.with_suffix('')), 'zip', directory)
         assets.append(target)
-    required = {'.AppImage', '.dmg', '.exe', '.flatpak'}
+    required = {'.AppImage', '.exe', '.flatpak'} | ({'.dmg'} if require_mac else set())
     missing = required - {path.suffix for path in assets}
     if missing:
         raise ValueError(f'Missing platform packages: {sorted(missing)}')
@@ -97,12 +98,14 @@ def main():
                         help='Original Build all run ID (not a separate publisher run)')
     parser.add_argument('--output', type=Path, default=Path('nightly-release'))
     parser.add_argument('--dry-run', action='store_true')
+    parser.add_argument('--require-mac', action='store_true',
+                        help='Fail unless a macOS package is present (runs that built macOS)')
     parser.add_argument('--archive-only', action='store_true',
                         help='Retain a verified older build without moving the rolling nightly')
     args = parser.parse_args()
     if not re.fullmatch('[a-f0-9]{40}', args.sha):
         parser.error('--sha must be a full commit SHA')
-    assets = prepare_assets(args.artifacts, args.output)
+    assets = prepare_assets(args.artifacts, args.output, require_mac=args.require_mac)
     print('\n'.join(str(path) for path in assets), flush=True)
     if args.dry_run:
         return

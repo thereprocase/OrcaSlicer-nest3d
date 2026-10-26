@@ -41,7 +41,22 @@ class PortableTests(unittest.TestCase):
                      'unit_tests_flatpak_x86_64', 'unit_tests_flatpak_aarch64',
                      'slice_check_linux'):
             self.assertIn('- ' + gate + '\n', needs)
-        self.assertIn('success()', publish.split('    if:', 1)[1].split('    runs-on:', 1)[0])
+        condition = publish.split('    if:', 1)[1].split('    runs-on:', 1)[0]
+        self.assertIn('!failure()', condition)
+        for gate in ('check_repro_build_wiring', 'build_linux', 'build_windows', 'slice_check_linux',
+                     'unit_tests_linux_x86_64', 'unit_tests_windows_x64'):
+            self.assertIn(f"needs.{gate}.result == 'success'", condition)
+
+    def test_fork_builds_macos_only_on_request(self):
+        # Hosted macOS runners are contended; the fork builds macOS only from a manual run with build-macos.
+        workflow = (ROOT / '.github/workflows/build_all.yml').read_text()
+        self.assertIn('      build-macos:\n', workflow)
+        macos = workflow.split('  build_macos_arch:', 1)[1].split('    uses:', 1)[0]
+        self.assertIn("(github.repository != 'thereprocase/OrcaSlicer-nest3d' || inputs.build-macos)", macos)
+        publish = workflow.split('  publish_repro_nightly:', 1)[1]
+        condition = publish.split('    if:', 1)[1].split('    runs-on:', 1)[0]
+        self.assertIn("needs.build_macos_universal.result == 'skipped'", condition)
+        self.assertIn("inputs.build-macos && '--require-mac'", publish)
 
     def test_linux_amd64_tests_run_on_the_build_runner(self):
         # The amd64 build leg and its unit tests each compute the LINUX_RUNNER choice;
