@@ -277,6 +277,7 @@ set(lisbslic3r_sources
     GCode/PchipInterpolatorHelper.cpp
     GCode/PchipInterpolatorHelper.hpp
     GCode/PressureEqualizer.cpp
+    GCode/NozzleClearance.hpp
     GCode/PressureEqualizer.hpp
     GCode/PrintExtents.cpp
     GCode/PrintExtents.hpp
