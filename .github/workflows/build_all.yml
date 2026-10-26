@@ -65,6 +65,11 @@ on:
         description: 'Only build dependencies (bypasses caching)'
         type: boolean
         default: false
+      build-macos:
+        # macOS hosted runners are heavily contended, so this fork builds macOS only on request.
+        description: 'Also build and test macOS (this fork skips it otherwise)'
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -163,8 +168,9 @@ jobs:
         arch:
           - arm64
           - x86_64
-    # Scheduled builds also run on this fork's integration branch.
-    if: ${{ !cancelled() && (github.event_name != 'schedule' || github.repository == 'OrcaSlicer/OrcaSlicer' || (github.repository == 'thereprocase/OrcaSlicer-nest3d' && github.ref == 'refs/heads/repro-dev')) }}
+    # Scheduled builds also run on this fork's integration branch. The fork skips macOS unless a manual
+    # run asks for it with build-macos; hosted macOS runners are too contended for every push.
+    if: ${{ !cancelled() && (github.event_name != 'schedule' || github.repository == 'OrcaSlicer/OrcaSlicer' || (github.repository == 'thereprocase/OrcaSlicer-nest3d' && github.ref == 'refs/heads/repro-dev')) && (github.repository != 'thereprocase/OrcaSlicer-nest3d' || inputs.build-macos) }}
     uses: ./.github/workflows/build_check_cache.yml
     with:
       os: ${{ vars.SELF_HOSTED && 'orca-macos-arm64' || 'macos-15' }}
@@ -544,8 +550,14 @@ jobs:
       - unit_tests_flatpak_x86_64
       - unit_tests_flatpak_aarch64
       - slice_check_linux
+    # Every gate must pass; the two macOS gates may instead be skipped when macOS wasn't requested.
     if: >-
-      success() && github.repository == 'thereprocase/OrcaSlicer-nest3d' &&
+      !cancelled() && !failure() && github.repository == 'thereprocase/OrcaSlicer-nest3d' &&
+      needs.check_repro_build_wiring.result == 'success' && needs.build_linux.result == 'success' &&
+      needs.build_windows.result == 'success' && needs.slice_check_linux.result == 'success' &&
+      needs.unit_tests_linux_x86_64.result == 'success' && needs.unit_tests_windows_x64.result == 'success' &&
+      (inputs.build-macos && needs.build_macos_universal.result == 'success' && needs.unit_tests_macos_arm64.result == 'success' ||
+       !inputs.build-macos && needs.build_macos_universal.result == 'skipped' && needs.unit_tests_macos_arm64.result == 'skipped') &&
       github.ref == 'refs/heads/repro-dev' && !inputs.build-deps-only &&
       (github.event_name == 'push' || github.event_name == 'schedule' || github.event_name == 'workflow_dispatch')
     runs-on: ubuntu-24.04
@@ -565,4 +577,4 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
-        run: python3 scripts/publish_repro_nightly.py nightly-artifacts --sha "$GITHUB_SHA"
+        run: python3 scripts/publish_repro_nightly.py nightly-artifacts --sha "$GITHUB_SHA" ${{ inputs.build-macos && '--require-mac' || '' }}
