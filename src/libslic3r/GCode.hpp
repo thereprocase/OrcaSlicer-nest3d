@@ -2,6 +2,8 @@
 #define slic3r_GCode_hpp_
 
 #include "ExtrusionEntity.hpp"
+#include "BoundingBox.hpp"
+#include "ExPolygon.hpp"
 #include "Polygon.hpp"
 #include "Config.hpp"
 #include "Print.hpp"
@@ -543,6 +545,13 @@ protected:
     std::string     preamble();
     // BBS
     std::string     change_layer(coordf_t print_z);
+    // Print the batched support interface of this layer assigned to extruder_id (support_interface_batch).
+    std::string     emit_batched_interfaces(const Print &print, const LayerTools &layer_tools, unsigned int extruder_id,
+                                            const std::vector<const PrintInstance*> *ordering, size_t single_object_instance_idx);
+    // Absolute Z a travel has to clear because of batched support interface, 0 if nothing is in its way.
+    double          batched_interface_obstacle_z(const Polyline &travel) const;
+    // Height kept above batched support interface when crossing it.
+    double          batched_interface_clearance() const;
     // Bedslinger model: derive the Y-axis acceleration limit from the machine force/bed-mass config
     // and the mass already printed. Yields the min machine Y acceleration when the A2L config keys are
     // unset (i.e. every existing printer), so it is inert for them.
@@ -897,6 +906,19 @@ protected:
     coordf_t m_nominal_z;
     bool m_has_staggered_perimeters = false;
     double m_staggered_clearance = 0.;
+    // Batched support interface (support_interface_batch). Deferred interface that stands above the
+    // layer being printed: bounding boxes in print coordinates (G-code XY without the extruder
+    // offset), grown by the nozzle's reach, with the absolute Z of their top.
+    struct BatchedInterfaceObstacle {
+        BoundingBoxf box;
+        double       top_z;
+    };
+    std::vector<BatchedInterfaceObstacle> m_batched_interface_obstacles;
+    // While a batch prints: the top of the tallest material printed so far and the area of the
+    // deferred layer being printed that its lines run in. Travels that leave it clear the tallest material.
+    bool              m_in_interface_batch        = false;
+    double            m_interface_batch_top_z     = 0.;
+    const ExPolygons *m_interface_batch_footprint = nullptr;
     // Mixed-color sublayer state. Non-zero only while emitting a mixed slot's sub-layer:
     // scales extrusion flow to the sub-layer's share of the nominal layer height, and
     // reports that sub-height as the effective extrusion height. Reset to 0 afterwards.

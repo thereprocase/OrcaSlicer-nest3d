@@ -37,6 +37,8 @@
 #include <chrono>
 #include <optional>
 #include "GCode/GCodeProcessor.hpp"
+#include "GCode/NozzleClearance.hpp"
+#include "GCode/ToolOrdering.hpp"
 #include "GCode/ThumbnailData.hpp"
 #include "ExtrusionEntity.hpp"
 #include <math.h>
@@ -1840,6 +1842,131 @@ StringObjectException Print::check_multi_filament_valid(const Print& print)
     return ret;
 }
 
+static std::string batch_mm(double value) { return (boost::format("%.2f") % value).str(); }
+
+// Batched support interface filament changes. A lead the nozzle cannot reach is refused; every
+// other case prints and only warns, naming the setting that removes the warning. One warning per
+// cause for the whole plate, attached to the first object that triggers it, keeps a plate of copies
+// from stacking identical notifications.
+static StringObjectException validate_support_interface_batch(const Print &print, std::vector<StringObjectException> &warnings)
+{
+    auto warn_once = [&warnings](std::string msg, const char *opt_key, const PrintObject *object) {
+        for (const StringObjectException &w : warnings)
+            if (w.opt_key == opt_key)
+                return;
+        StringObjectException w;
+        w.string     = std::move(msg);
+        w.opt_key    = opt_key;
+        w.object     = object->model_object();
+        w.is_warning = true;
+        warnings.push_back(std::move(w));
+    };
+
+    for (const PrintObject *object : print.objects()) {
+        const PrintObjectConfig &cfg = object->config();
+        if (!cfg.support_interface_batch.value || !object->has_support_material() || cfg.support_interface_filament.value == 0)
+            continue;
+        const double          lead            = cfg.support_interface_batch_lead.value;
+        const double          nozzle_diameter = nozzle_diameter_for_filament(print.config(), cfg.support_interface_filament.value, print.is_BBL_printer());
+        const NozzleClearance nozzle          = nozzle_clearance(nozzle_diameter, print.config().nozzle_height.value);
+
+        const double lead_max = nozzle.max_lead();
+        if (lead > lead_max + EPSILON) {
+            StringObjectException err;
+            err.string  = (boost::format(L("Batch lead height is %1% mm, but the printer profile's nozzle sticks out only %2% mm below "
+                                           "the heater block and silicone sock. Set Batch lead height to %3% mm or less.")) %
+                           batch_mm(lead) % batch_mm(print.config().nozzle_height.value) % batch_mm(lead_max)).str();
+            err.opt_key = "support_interface_batch_lead";
+            err.object  = object->model_object();
+            return err;
+        }
+
+        // Batching then does nothing for the object, which the user cannot see in the settings.
+        switch (support_interface_batch_skip(*object)) {
+        case SupportInterfaceBatchSkip::None: break;
+        case SupportInterfaceBatchSkip::BodyUsesInterface:
+            warn_once(L("Batched interface filament changes are skipped because part of the object is printed with the support "
+                        "interface filament. Choose a Support/raft interface filament the object does not use."),
+                      "support_interface_filament", object);
+            continue;
+        case SupportInterfaceBatchSkip::BaseUsesInterface:
+            warn_once(L("Batched interface filament changes are skipped because the support base uses the interface filament too, "
+                        "so every support layer needs it. Choose a different Support/raft base filament."),
+                      "support_filament", object);
+            continue;
+        case SupportInterfaceBatchSkip::BaseMayUseInterface:
+            warn_once(L("Batched interface filament changes are skipped because \"Avoid interface filament for base\" is off, so "
+                        "the support base may use the interface filament on any layer. Turn on \"Avoid interface filament for base\"."),
+                      "support_interface_not_for_body", object);
+            continue;
+        default: continue; // off, or nothing to batch; the settings page already shows why
+        }
+
+        const double xy_required = nozzle.required_gap(lead, support_material_interface_flow(object).width());
+        if (cfg.support_object_xy_distance.value < xy_required - EPSILON)
+            warn_once((boost::format(L("With a batch lead height of %1% mm, the nozzle tip and cone need a support/object XY distance of "
+                                       "at least %2% mm to stay off the walls while batched interface layers are printed; it is %3% mm. "
+                                       "Increase Support/object XY distance to %2% mm, or lower Batch lead height.")) %
+                       batch_mm(lead) % batch_mm(xy_required) % batch_mm(cfg.support_object_xy_distance.value)).str(),
+                      "support_object_xy_distance", object);
+    }
+    return {};
+}
+
+// Orca: interface runs that batching could not print with one filament round trip, as one message
+// per object with a sentence per cause. ToolOrdering writes the same notes into the G-code as
+// comments; this is the copy the user sees. Empty when every run batches.
+static std::string support_interface_run_warning(const PrintObject &object)
+{
+    using Cause = SupportInterfaceRunNote::Cause;
+    const SupportInterfacePlan plan = plan_support_interface_batches(object);
+    if (plan.notes.empty())
+        return {};
+
+    // Per cause: the runs' Z ranges, and the largest lead, step and gap among them.
+    struct Group { std::string ranges; double min_lead = 0., step = 0., gap = 0.; };
+    std::map<Cause, Group> groups;
+    for (const SupportInterfaceRunNote &note : plan.notes) {
+        // Both stack causes get the same sentence.
+        Group &g = groups[note.cause == Cause::StackEnd ? Cause::StackStart : note.cause];
+        g.ranges += (g.ranges.empty() ? "" : ", ") + batch_mm(note.bottom_z) + "-" + batch_mm(note.top_z);
+        g.min_lead = std::max(g.min_lead, note.min_lead);
+        g.step     = std::max(g.step, note.step);
+        g.gap      = std::max(g.gap, note.gap);
+    }
+
+    std::string msg = format(L("Batched interface filament changes on %1%: some support interface runs need more than one "
+                               "filament change round trip."), object.model_object()->name);
+    for (const auto &[cause, g] : groups) {
+        msg += "\n";
+        switch (cause) {
+        case Cause::LeadTooShallow:
+            msg += format(L("At Z %1% mm the interface is deeper than the batch lead height. Set Batch lead height to %2% mm or "
+                            "more to print it with one."), g.ranges, batch_mm(g.min_lead));
+            break;
+        case Cause::NoLeadFits:
+            msg += format(L("At Z %1% mm the interface is deeper than any batch lead height the nozzle can reach, so it is split."),
+                          g.ranges);
+            break;
+        case Cause::CustomGCode:
+            msg += format(L("At Z %1% mm a pause, colour change or custom G-code inside the interface keeps it from being batched. "
+                            "Move it above or below the interface to batch it."), g.ranges);
+            break;
+        case Cause::StackStart:
+        case Cause::StackEnd:
+            msg += format(L("At Z %1% mm support columns under the interface start or end at different heights, so it is split "
+                            "to keep every interface layer on support that is already printed."), g.ranges);
+            break;
+        case Cause::Clearance:
+            msg += format(L("At Z %1% mm the nozzle would pass material %2% mm taller than its tip, which needs %3% mm of space "
+                            "beside the interface. A wider Support/object XY distance or a lower Batch lead height lets it batch."),
+                          g.ranges, batch_mm(g.step), batch_mm(g.gap));
+            break;
+        }
+    }
+    return msg;
+}
+
 // Precondition: Print::validate() requires the Print::apply() to be called its invocation.
 //BBS: refine seq-print validation logic
 // The exception's own message is just "Errors"; the detail is in the per-object errors,
@@ -2114,6 +2241,15 @@ StringObjectException Print::validate(std::vector<StringObjectException> *warnin
                 return e < is_mixed.size() && is_mixed[e] && e < gradient.size() && gradient[e]; }))
             warn(L("A gradient mixed filament is used, but 'Mixed color sublayer' is disabled. The gradient will not be printed."),
                  "enable_mixed_color_sublayer");
+    }
+
+    {
+        std::vector<StringObjectException> batch_warnings;
+        StringObjectException              batch_error = validate_support_interface_batch(*this, batch_warnings);
+        for (StringObjectException &w : batch_warnings)
+            add_warning(std::move(w));
+        if (!batch_error.string.empty())
+            return batch_error;
     }
 
     if (nozzles < 2 && extruders.size() > 1) {
@@ -3516,6 +3652,10 @@ void Print::process(long long *time_cost_with_cache, bool use_cache)
                 throw Slic3r::SlicingError(L("The print is empty. The model is not printable with current print settings."));
 
         }
+        for (const PrintObject *object : m_objects)
+            if (support_interface_batching_applies(*object))
+                if (const std::string msg = support_interface_run_warning(*object); !msg.empty())
+                    this->active_step_add_warning(PrintStateBase::WarningLevel::NON_CRITICAL, msg);
         this->set_done(psWipeTower);
         if (m_pipeline_plugin_active) run_pipeline_hook(SlicingPipelineStepPlugin::psWipeTower, nullptr);
     }

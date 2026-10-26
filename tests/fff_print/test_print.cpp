@@ -546,6 +546,176 @@ TEST_CASE("Print::validate tolerates a null warnings pointer", "[Print][validate
     CHECK(err.string.empty());
 }
 
+namespace {
+
+// Supports on, interface in filament 2, the object in filament 1 (build_cubes auto-assigns
+// filament 1 to a single-volume object). With a 0.4 mm nozzle and a 0.4 mm lead the nozzle model
+// needs 0.5 + 0.4 + 0.15 mm minus half an interface line, under 1 mm, so only the key a test
+// changes warns.
+DynamicPrintConfig batched_interface_config()
+{
+    return multifilament_config(3, {
+        { "nozzle_height",                  "2.5" },
+        { "enable_support",                 "1" },
+        { "support_interface_filament",     "2" },
+        { "support_interface_not_for_body", "1" },
+        { "support_object_xy_distance",     "1" },
+        { "support_interface_batch",        "1" },
+        { "support_interface_batch_lead",   "0.4" },
+    });
+}
+
+const StringObjectException *find_opt_key(const std::vector<StringObjectException>& warnings, const std::string& key)
+{
+    auto it = std::find_if(warnings.begin(), warnings.end(), [&](const StringObjectException& w) { return w.opt_key == key; });
+    return it == warnings.end() ? nullptr : &*it;
+}
+
+} // namespace
+
+TEST_CASE("Batched interface filament changes warn about a support/object XY distance the nozzle cone cannot clear", "[Print][validate][SupportInterfaceBatch]")
+{
+    DynamicPrintConfig config = batched_interface_config();
+    config.set_deserialize_strict({ { "support_object_xy_distance", "0.35" } });
+
+    std::vector<StringObjectException> warnings;
+    CHECK(validate_cubes(config, warnings).string.empty());  // a warning, never a refusal
+
+    REQUIRE(count_opt_key(warnings, "support_object_xy_distance") == 1);
+    const std::string &msg = find_opt_key(warnings, "support_object_xy_distance")->string;
+    CHECK(msg.find("0.40 mm") != std::string::npos);  // the lead the user set
+    CHECK(msg.find("0.35 mm") != std::string::npos);  // the XY distance the user set
+    CHECK(msg.find("Increase Support/object XY distance") != std::string::npos);  // the fix
+}
+
+TEST_CASE("Batched interface filament changes stay quiet when the XY distance clears the nozzle cone", "[Print][validate][SupportInterfaceBatch]")
+{
+    std::vector<StringObjectException> warnings;
+    CHECK(validate_cubes(batched_interface_config(), warnings).string.empty());
+
+    CHECK(count_opt_key(warnings, "support_object_xy_distance") == 0);
+    CHECK(count_opt_key(warnings, "support_interface_filament") == 0);
+    CHECK(count_opt_key(warnings, "support_interface_not_for_body") == 0);
+}
+
+TEST_CASE("A taller batch lead needs a wider support/object XY distance", "[Print][validate][SupportInterfaceBatch]")
+{
+    // At a 1 mm lead the cone is 1 mm wider at the top of the wall: 0.5 + 1 + 0.15 mm minus half a line is over 1 mm.
+    DynamicPrintConfig config = batched_interface_config();
+    config.set_deserialize_strict({ { "support_interface_batch_lead", "1" } });
+
+    std::vector<StringObjectException> warnings;
+    CHECK(validate_cubes(config, warnings).string.empty());
+    CHECK(count_opt_key(warnings, "support_object_xy_distance") == 1);
+}
+
+TEST_CASE("A batch lead taller than the exposed nozzle is refused", "[Print][validate][SupportInterfaceBatch]")
+{
+    // nozzle_height 2.5 mm leaves 2.5 - 0.15 = 2.35 mm below the heater block and sock.
+    DynamicPrintConfig config = batched_interface_config();
+    config.set_deserialize_strict({ { "support_interface_batch_lead", "2.4" }, { "support_object_xy_distance", "5" } });
+
+    std::vector<StringObjectException> warnings;
+    const StringObjectException err = validate_cubes(config, warnings);
+    CHECK(err.opt_key == "support_interface_batch_lead");
+    CHECK(err.string.find("2.35 mm or less") != std::string::npos);
+
+    config.set_deserialize_strict({ { "support_interface_batch_lead", "2.35" } });
+    std::vector<StringObjectException> at_cap;
+    CHECK(validate_cubes(config, at_cap).string.empty());
+}
+
+TEST_CASE("Batched interface filament changes warn when the interface uses the object's filament", "[Print][validate][SupportInterfaceBatch]")
+{
+    DynamicPrintConfig config = batched_interface_config();
+    config.set_deserialize_strict({ { "support_interface_filament", "1" } });
+
+    std::vector<StringObjectException> warnings;
+    CHECK(validate_cubes(config, warnings).string.empty());
+
+    CHECK(count_opt_key(warnings, "support_interface_filament") == 1);
+}
+
+TEST_CASE("Batched interface filament changes warn when the support base may use the interface filament", "[Print][validate][SupportInterfaceBatch]")
+{
+    DynamicPrintConfig config = batched_interface_config();
+    config.set_deserialize_strict({ { "support_interface_not_for_body", "0" } });
+
+    std::vector<StringObjectException> warnings;
+    CHECK(validate_cubes(config, warnings).string.empty());
+    CHECK(count_opt_key(warnings, "support_interface_not_for_body") == 1);
+
+    // With its own base filament the option is hidden in the GUI and has no effect, so pointing at it would be no help.
+    config.set_deserialize_strict({ { "support_filament", "3" } });
+    std::vector<StringObjectException> own_base;
+    CHECK(validate_cubes(config, own_base).string.empty());
+    CHECK(count_opt_key(own_base, "support_interface_not_for_body") == 0);
+}
+
+TEST_CASE("Batched interface filament changes warn when the support base uses the interface filament", "[Print][validate][SupportInterfaceBatch]")
+{
+    DynamicPrintConfig config = batched_interface_config();
+    config.set_deserialize_strict({ { "support_filament", "2" }, { "support_object_xy_distance", "0.35" } });
+
+    std::vector<StringObjectException> warnings;
+    CHECK(validate_cubes(config, warnings).string.empty());
+    CHECK(count_opt_key(warnings, "support_filament") == 1);
+    // Batching is skipped, so the nozzle never dips beside a wall and the XY distance is not at issue.
+    CHECK(count_opt_key(warnings, "support_object_xy_distance") == 0);
+}
+
+TEST_CASE("Batched interface filament warnings appear once for a plate of identical objects", "[Print][validate][SupportInterfaceBatch]")
+{
+    DynamicPrintConfig config = batched_interface_config();
+    config.set_deserialize_strict({ { "support_object_xy_distance", "0.35" } });
+
+    std::vector<StringObjectException> warnings;
+    CHECK(validate_cubes(config, warnings, /*n=*/3).string.empty());
+    CHECK(count_opt_key(warnings, "support_object_xy_distance") == 1);
+}
+
+TEST_CASE("Interface batching settings are not checked while batching is off", "[Print][validate][SupportInterfaceBatch]")
+{
+    DynamicPrintConfig config = batched_interface_config();
+    config.set_deserialize_strict({
+        { "support_interface_batch",        "0" },
+        { "support_object_xy_distance",     "0.35" },
+        { "support_interface_not_for_body", "0" },
+    });
+
+    std::vector<StringObjectException> warnings;
+    CHECK(validate_cubes(config, warnings).string.empty());
+    CHECK(count_opt_key(warnings, "support_object_xy_distance") == 0);
+    CHECK(count_opt_key(warnings, "support_interface_not_for_body") == 0);
+}
+
+TEST_CASE("Changing interface batching keeps the slices and support and regenerates the tool ordering", "[Print][SupportInterfaceBatch]")
+{
+    // Batching only moves interface tool changes between layers, so toggling it must not re-slice.
+    DynamicPrintConfig config = batched_interface_config();
+    config.set_deserialize_strict({ { "support_interface_batch", "0" } });
+
+    Slic3r::Model model;
+    Slic3r::Print print;
+    init_print(std::vector<TriangleMesh>{ cube(20) }, print, model, config);
+    print.process();
+    REQUIRE(print.is_step_done(psWipeTower));
+    const PrintObject *object = print.objects().front();
+    REQUIRE(object->is_step_done(posSlice));
+    REQUIRE(object->is_step_done(posSupportMaterial));
+
+    // Re-derive the config the way init_print did so the diff is the batching key alone.
+    DynamicPrintConfig toggled = DynamicPrintConfig::full_print_config();
+    toggled.apply(config);
+    toggled.set_key_value("gcode_comments", new ConfigOptionBool(true));
+    toggled.set_key_value("support_interface_batch", new ConfigOptionBool(true));
+    print.apply(model, toggled);
+
+    CHECK(object->is_step_done(posSlice));
+    CHECK(object->is_step_done(posSupportMaterial));
+    CHECK_FALSE(print.is_step_done(psWipeTower));
+}
+
 TEST_CASE("Purge tower selection keeps ordinary printers on the classic path", "[Print][PurgeTower][Regression]")
 {
     DynamicPrintConfig config = multifilament_config(2, {

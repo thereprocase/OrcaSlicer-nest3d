@@ -1307,6 +1307,9 @@ PRINT_CONFIG_CLASS_DEFINE(
     ((ConfigOptionBool,                support_interface_not_for_body))
     ((ConfigOptionBool,                support_interface_loop_pattern))
     ((ConfigOptionInt,                 support_interface_filament))
+    // Orca: print each support interface run with one filament change round trip.
+    ((ConfigOptionBool,                support_interface_batch))
+    ((ConfigOptionFloat,               support_interface_batch_lead))
     ((ConfigOptionInt,                 support_interface_top_layers))
     ((ConfigOptionInt,                 support_interface_bottom_layers))
     // Spacing between interface lines (the hatching distance). Set zero to get a solid interface.
