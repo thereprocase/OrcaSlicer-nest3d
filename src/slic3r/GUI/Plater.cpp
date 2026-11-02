@@ -17463,20 +17463,25 @@ void Plater::calib_fan_tower(const Calib_Params& params) {
     wxString    title;
     switch (params.mode) {
     case CalibMode::Calib_Overhang_Fan_Tower:      asset = "fan_tower/fan_tower.drc";               title = _L("Overhang fan speed test"); break;
-    case CalibMode::Calib_Fan_Tower:               asset = "fan_tower/fan_tower.drc";               title = _L("Part cooling fan speed test"); break;
+    case CalibMode::Calib_Part_Fan_Tower:               asset = "fan_tower/fan_tower.drc";               title = _L("Part cooling fan speed test"); break;
     case CalibMode::Calib_Bridge_Fan_Tower:        asset = "fan_tower/bridge_fan_tower.drc";        title = _L("Bridge fan speed test"); break;
     case CalibMode::Calib_Small_Feature_Fan_Tower: asset = "fan_tower/small_feature_fan_tower.drc"; title = _L("Small feature fan speed test"); break;
     default: assert(false); return;
     }
-    new_project(false, false, title);
+    if (new_project(false, false, title) == wxID_CANCEL)
+        return;
     wxGetApp().mainframe->select_tab(TAB_ID_PREPARE);
     if (!_add_tower_blocks(asset, params.start, params.end + 10.0, params))
         return;
 
-    // Overhang markers only reach the cooling pass while this is on.
+    // Overhang markers only reach the cooling pass while this is on. The slope of the overhang tower leaves
+    // about two thirds of each wall supported, and stock profiles with a 50% or 95% threshold would never
+    // mark it, so the threshold is pinned where the slope qualifies and the stringing pillars do not.
     auto filament_config = &wxGetApp().preset_bundle->filaments.get_edited_preset().config;
     if (fan_tower_steps_overhang_fan(params.mode))
         set_config_values<bool, ConfigOptionBools>(filament_config, "enable_overhang_bridge_fan", true);
+    if (params.mode == CalibMode::Calib_Overhang_Fan_Tower)
+        set_config_values<int, ConfigOptionEnumsGeneric>(filament_config, "overhang_fan_threshold", Overhang_threshold_2_4);
 
     changed_objects({ 0 });
     wxGetApp().get_tab(Preset::TYPE_PRINT)->update_dirty();
@@ -17534,6 +17539,8 @@ bool Plater::_add_tower_blocks(const std::string& asset, double bottom_z, double
     model().objects[0]->config.set_key_value("seam_slope_type", new ConfigOptionEnum<SeamScarfType>(SeamScarfType::None));
     model().objects[0]->config.set_key_value("overhang_reverse", new ConfigOptionBool(false));
     model().objects[0]->config.set_key_value("precise_z_height", new ConfigOptionBool(false));
+    // Supports would fill the overhangs and bridges the towers exist to show.
+    model().objects[0]->config.set_key_value("enable_support", new ConfigOptionBool(false));
 
     auto print_config = &wxGetApp().preset_bundle->prints.get_edited_preset().config;
     print_config->set_key_value("enable_wrapping_detection", new ConfigOptionBool(false));

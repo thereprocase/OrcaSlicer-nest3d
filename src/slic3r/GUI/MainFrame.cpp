@@ -4692,14 +4692,16 @@ void MainFrame::run_calibration(CalibKind calib_kind)
     case CalibKind::PartFan:
     case CalibKind::BridgeFan:
     case CalibKind::SmallFeatureFan: {
-        const CalibMode mode = calib_kind == CalibKind::PartFan         ? CalibMode::Calib_Fan_Tower :
-                               calib_kind == CalibKind::BridgeFan       ? CalibMode::Calib_Bridge_Fan_Tower :
-                               calib_kind == CalibKind::SmallFeatureFan ? CalibMode::Calib_Small_Feature_Fan_Tower :
-                                                                    CalibMode::Calib_Overhang_Fan_Tower;
-        Fan_Tower_Test_Dlg*& dlg = m_fan_tower_calib_dlgs[mode];
-        if (!dlg)
-            dlg = new Fan_Tower_Test_Dlg((wxWindow*) this, wxID_ANY, m_plater, mode);
+        CalibMode mode = CalibMode::Calib_Overhang_Fan_Tower;
+        switch (calib_kind) {
+        case CalibKind::PartFan:         mode = CalibMode::Calib_Part_Fan_Tower; break;
+        case CalibKind::BridgeFan:       mode = CalibMode::Calib_Bridge_Fan_Tower; break;
+        case CalibKind::SmallFeatureFan: mode = CalibMode::Calib_Small_Feature_Fan_Tower; break;
+        default: break;
+        }
+        auto dlg = new Fan_Tower_Test_Dlg((wxWindow*) this, wxID_ANY, m_plater, mode);
         dlg->ShowModal();
+        dlg->Destroy();
         break;
     }
     case CalibKind::Cornering: {

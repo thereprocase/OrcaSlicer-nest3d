@@ -8,6 +8,7 @@
 #include <algorithm>
 #include <cstddef>
 #include <cstring>
+#include <set>
 #include "libslic3r/GCode/CoolingBuffer.hpp"
 #include "libslic3r/GCodeReader.hpp"
 #include "libslic3r/Model.hpp"
@@ -374,10 +375,9 @@ TEST_CASE("Overhang fan tower steps the overhang fan and pins the base fan", "[C
     for (int band = 0; band <= 100; band += 10)
         CHECK(std::find(tagged.begin(), tagged.end(), band) != tagged.end());
 
-    // The configured 90% base maximum and 60% overhang speed must never reach the printer as themselves;
     // 20% is the pinned base, and overhangs below it are honoured.
-    // GCodeWriter truncates: 10% is S25, matching the sliced tower.
-    const auto pwm = [](int percent) { return int(percent * 255. / 100.); };
+    // GCodeWriter truncates 255.5 * percent / 100: 10% is S25, matching the sliced tower.
+    const auto pwm = [](int percent) { return int(255.5 * percent / 100.); };
     CHECK(std::find(fan_commands.begin(), fan_commands.end(), pwm(20)) != fan_commands.end());
     CHECK(std::find(fan_commands.begin(), fan_commands.end(), pwm(10)) != fan_commands.end());
     CHECK(std::find(fan_commands.begin(), fan_commands.end(), pwm(100)) != fan_commands.end());
@@ -405,7 +405,7 @@ TEST_CASE("Part cooling fan tower pins every fan to the block's speed", "[Coolin
     Model model;
     init_print({make_cube(10., 10., 30.)}, print, model, config);
     Calib_Params params;
-    params.mode  = CalibMode::Calib_Fan_Tower;
+    params.mode  = CalibMode::Calib_Part_Fan_Tower;
     params.start = 0.;
     params.end   = 100.;
     params.step  = 10.;
@@ -416,8 +416,8 @@ TEST_CASE("Part cooling fan tower pins every fan to the block's speed", "[Coolin
     std::vector<int> fan_commands;
     std::istringstream lines(output);
     for (std::string line; std::getline(lines, line);) {
-        if (line.rfind(CoolingBuffer::calib_fan_tag, 0) == 0)
-            tagged.push_back(std::stoi(line.substr(strlen(CoolingBuffer::calib_fan_tag))));
+        if (line.rfind(CoolingBuffer::calib_part_fan_tag, 0) == 0)
+            tagged.push_back(std::stoi(line.substr(strlen(CoolingBuffer::calib_part_fan_tag))));
         else if (line.rfind("M106 S", 0) == 0)
             fan_commands.push_back(std::stoi(line.substr(6)));
     }
@@ -426,9 +426,41 @@ TEST_CASE("Part cooling fan tower pins every fan to the block's speed", "[Coolin
     for (int band = 0; band <= 100; band += 10)
         CHECK(std::find(tagged.begin(), tagged.end(), band) != tagged.end());
     // No overhang marker switch and no layer-time ramp: the profile's own speeds never reach the printer.
-    const auto pwm = [](int percent) { return int(percent * 255. / 100.); };
+    const auto pwm = [](int percent) { return int(255.5 * percent / 100.); };
     for (int percent : {15, 65, 95})
         CHECK(std::find(fan_commands.begin(), fan_commands.end(), pwm(percent)) == fan_commands.end());
     for (int band = 10; band <= 100; band += 10)
         CHECK(std::find(fan_commands.begin(), fan_commands.end(), pwm(band)) != fan_commands.end());
+}
+
+TEST_CASE("Each fan tower writes its own tag over the requested range", "[Cooling][Calib]")
+{
+    DynamicPrintConfig config = Slic3r::DynamicPrintConfig::full_print_config();
+    config.set_deserialize_strict({{"layer_height", "0.2"}, {"initial_layer_print_height", "0.2"}});
+    const auto tags_of = [&](CalibMode mode, const char *tag) {
+        Print print;
+        Model model;
+        // A tower cut from 30% to 60% is 40 mm tall; its tags must stay inside that range.
+        init_print({make_cube(10., 10., 40.)}, print, model, config);
+        Calib_Params params;
+        params.mode  = mode;
+        params.start = 30.;
+        params.end   = 60.;
+        params.step  = 10.;
+        print.set_calib_params(params);
+        std::set<int> bands;
+        std::istringstream lines(gcode(print));
+        for (std::string line; std::getline(lines, line);) {
+            if (line.rfind(tag, 0) == 0)
+                bands.insert(std::stoi(line.substr(strlen(tag))));
+            else
+                CHECK(line.rfind("; Calib_", 0) != 0);
+        }
+        return bands;
+    };
+    const std::set<int> expected{30, 40, 50, 60};
+    CHECK(tags_of(CalibMode::Calib_Overhang_Fan_Tower, CoolingBuffer::calib_overhang_fan_tag) == expected);
+    CHECK(tags_of(CalibMode::Calib_Bridge_Fan_Tower, CoolingBuffer::calib_overhang_fan_tag) == expected);
+    CHECK(tags_of(CalibMode::Calib_Part_Fan_Tower, CoolingBuffer::calib_part_fan_tag) == expected);
+    CHECK(tags_of(CalibMode::Calib_Small_Feature_Fan_Tower, CoolingBuffer::calib_part_fan_tag) == expected);
 }

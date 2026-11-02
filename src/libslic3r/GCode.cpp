@@ -6657,7 +6657,7 @@ LayerResult GCode::process_layer(
             break;
         }
         case CalibMode::Calib_Overhang_Fan_Tower:
-        case CalibMode::Calib_Fan_Tower:
+        case CalibMode::Calib_Part_Fan_Tower:
         case CalibMode::Calib_Bridge_Fan_Tower:
         case CalibMode::Calib_Small_Feature_Fan_Tower: {
             // CoolingBuffer runs later in the layer pipeline, so the value travels with the layer's G-code.
@@ -6665,7 +6665,7 @@ LayerResult GCode::process_layer(
                                                                     static_cast<float>(print.calib_params().end),
                                                                     static_cast<float>(print.calib_params().step));
             const char *tag = fan_tower_steps_overhang_fan(print.calib_mode()) ? CoolingBuffer::calib_overhang_fan_tag :
-                                                                                CoolingBuffer::calib_fan_tag;
+                                                                                CoolingBuffer::calib_part_fan_tag;
             gcode += std::string(tag) + std::to_string(std::lround(fan)) + "\n";
             break;
         }

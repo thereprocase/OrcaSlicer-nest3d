@@ -26,7 +26,6 @@
 #include <map>
 #include <vector>
 
-#include "libslic3r/calib.hpp"
 #include "GUI_Utils.hpp"
 #include "Event.hpp"
 //BBS: GUI refactor
@@ -500,7 +499,6 @@ public:
     MaxVolumetricSpeed_Test_Dlg* m_vol_test_dlg { nullptr };
     VFA_Test_Dlg* m_vfa_test_dlg { nullptr };
     Retraction_Test_Dlg* m_retraction_calib_dlg{ nullptr };
-    std::map<CalibMode, Fan_Tower_Test_Dlg*> m_fan_tower_calib_dlgs;
     Input_Shaping_Freq_Test_Dlg* m_IS_freq_calib_dlg{ nullptr };
     Input_Shaping_Damp_Test_Dlg* m_IS_damp_calib_dlg{ nullptr };
     Cornering_Test_Dlg* m_cornering_calib_dlg{ nullptr };

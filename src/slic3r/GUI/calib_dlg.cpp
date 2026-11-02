@@ -1157,7 +1157,7 @@ void Retraction_Test_Dlg::on_dpi_changed(const wxRect& suggested_rect) {
 static wxString fan_tower_title(CalibMode mode)
 {
     switch (mode) {
-    case CalibMode::Calib_Fan_Tower:               return _L("Part cooling fan speed");
+    case CalibMode::Calib_Part_Fan_Tower:               return _L("Part cooling fan speed");
     case CalibMode::Calib_Bridge_Fan_Tower:        return _L("Bridge fan speed");
     case CalibMode::Calib_Small_Feature_Fan_Tower: return _L("Small feature fan speed");
     default:                                       return _L("Overhang fan speed");
@@ -1167,18 +1167,31 @@ static wxString fan_tower_title(CalibMode mode)
 static wxString fan_tower_note(CalibMode mode)
 {
     switch (mode) {
-    case CalibMode::Calib_Fan_Tower:
-        return _L("Every fan runs at the block's speed, with the layer time fan ramp off.\n"
-                  "Read the overhang slope and the strings between the body and the pillars.");
+    case CalibMode::Calib_Part_Fan_Tower:
+        return _L("The part, overhang and bridge fans all run at the block's speed, with the layer time fan ramp off; "
+                  "the auxiliary fan keeps its profile value.\n"
+                  "Read the overhang slope and the strings between the body and the pillars.\n"
+                  "Enter the best block's speed as the filament's minimum and maximum fan speed, and as its overhang fan "
+                  "speed when the slope decided it.\n"
+                  "Each block is labelled with its speed.");
     case CalibMode::Calib_Bridge_Fan_Tower:
-        return _L("The part fan stays at the filament's minimum; the fan over each block's bridge rises 10% per block.\n"
-                  "Read the bridge underside and the strings between the pillars.");
+        return _L("The part fan stays at the filament's minimum fan speed; the fan over each block's bridge rises 10% per block.\n"
+                  "Read the bridge underside. The strings stay the same on every block, since travel moves run at the part fan.\n"
+                  "Enter the best block's speed as the filament's overhang fan speed, which also covers external bridges. "
+                  "Speeds below the minimum fan speed have no effect in normal prints.\n"
+                  "Each block is labelled with its speed.");
     case CalibMode::Calib_Small_Feature_Fan_Tower:
-        return _L("Every fan runs at the block's speed; the filament's slow-down for short layers stays on.\n"
-                  "Read the fin edge, the pillar surfaces and the strings between them.");
+        return _L("The part, overhang and bridge fans all run at the block's speed; the filament's slow-down for short "
+                  "layers stays on and the auxiliary fan keeps its profile value.\n"
+                  "Read the fin edge, the pillar surfaces and the strings between them.\n"
+                  "Enter the best block's speed as the filament's maximum fan speed and keep the minimum fan speed at or below it.\n"
+                  "Each block is labelled with its speed.");
     default:
-        return _L("The part fan stays at the filament's minimum; the overhang fan rises 10% per block.\n"
-                  "Read the overhang slope and the strings between the body and the pillars.");
+        return _L("The part fan stays at the filament's minimum fan speed; the overhang fan rises 10% per block.\n"
+                  "Read the overhang slope. The strings stay the same on every block, since travel moves run at the part fan.\n"
+                  "Enter the best block's speed as the filament's overhang fan speed. "
+                  "Speeds below the minimum fan speed have no effect in normal prints.\n"
+                  "Each block is labelled with its speed.");
     }
 }
 
@@ -1210,10 +1223,17 @@ Fan_Tower_Test_Dlg::Fan_Tower_Test_Dlg(wxWindow* parent, wxWindowID id, Plater* 
         settings_sizer->Add(row, 0, wxLEFT, FromDIP(3));
         return input;
     };
-    m_tiStart = add_row(start_str, 0);
+    // Below the filament's minimum fan speed the overhang fan has no effect in normal prints, so the stepped
+    // towers start there by default. The dialog is built per use, so the default follows the selected filament.
+    int start = 0;
+    if (fan_tower_steps_overhang_fan(m_mode)) {
+        const int fan_min = wxGetApp().preset_bundle->filaments.get_edited_preset().config.opt_int("fan_min_speed", 0);
+        start = std::clamp((fan_min + 9) / 10 * 10, 0, 90);
+    }
+    m_tiStart = add_row(start_str, start);
     m_tiEnd   = add_row(end_str, 100);
 
-    auto note = new wxStaticText(this, wxID_ANY, fan_tower_note(m_mode) + "\n" + _L("Each block is labelled with its speed."));
+    auto note = new wxStaticText(this, wxID_ANY, fan_tower_note(m_mode));
     settings_sizer->Add(note, 0, wxALL, FromDIP(5));
 
     v_sizer->Add(settings_sizer, 0, wxTOP | wxRIGHT | wxLEFT | wxEXPAND, FromDIP(10));

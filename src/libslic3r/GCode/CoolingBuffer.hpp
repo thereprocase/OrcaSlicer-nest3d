@@ -32,7 +32,7 @@ public:
     // Comments followed by a percentage, written per layer by the fan calibration towers: the first steps the
     // overhang fan over a pinned base fan, the second pins every fan to the value.
     static constexpr const char *calib_overhang_fan_tag = "; Calib_Overhang_Fan_tower: S";
-    static constexpr const char *calib_fan_tag          = "; Calib_Fan_tower: S";
+    static constexpr const char *calib_part_fan_tag          = "; Calib_Part_Fan_tower: S";
     std::string process_layer(std::string &&gcode, size_t layer_id, bool flush);
 
 private:
