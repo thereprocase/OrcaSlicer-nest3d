@@ -140,7 +140,8 @@ enum class CalibKind : int
     Cornering, 
     InputShapingFreq, 
     InputShapingDamp,
-    VFA
+    VFA,
+    OverhangFan
 };
 
 class MainFrame : public DPIFrame
@@ -495,6 +496,7 @@ public:
     MaxVolumetricSpeed_Test_Dlg* m_vol_test_dlg { nullptr };
     VFA_Test_Dlg* m_vfa_test_dlg { nullptr };
     Retraction_Test_Dlg* m_retraction_calib_dlg{ nullptr };
+    Overhang_Fan_Test_Dlg* m_overhang_fan_calib_dlg{ nullptr };
     Input_Shaping_Freq_Test_Dlg* m_IS_freq_calib_dlg{ nullptr };
     Input_Shaping_Damp_Test_Dlg* m_IS_damp_calib_dlg{ nullptr };
     Cornering_Test_Dlg* m_cornering_calib_dlg{ nullptr };

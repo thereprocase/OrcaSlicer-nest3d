@@ -1151,6 +1151,76 @@ void Retraction_Test_Dlg::on_dpi_changed(const wxRect& suggested_rect) {
 
 }
 
+// Overhang_Fan_Test_Dlg
+//
+
+Overhang_Fan_Test_Dlg::Overhang_Fan_Test_Dlg(wxWindow* parent, wxWindowID id, Plater* plater)
+    : DPIDialog(parent, id, _L("Overhang fan speed"), wxDefaultPosition, wxDefaultSize, wxDEFAULT_DIALOG_STYLE), m_plater(plater)
+{
+    SetBackgroundColour(*wxWHITE); // make sure background color set for dialog
+    SetForegroundColour(wxColour("#363636"));
+    SetFont(Label::Body_14);
+
+    wxBoxSizer* v_sizer = new wxBoxSizer(wxVERTICAL);
+
+    wxString start_str = _L("Start fan speed: ");
+    wxString end_str   = _L("End fan speed: ");
+    const auto st_size = wxSize(GetTextMax(this, std::vector<wxString>{start_str, end_str}), -1);
+    const auto ti_size = FromDIP(wxSize(120, -1));
+
+    LabeledStaticBox* stb = new LabeledStaticBox(this, _L("Settings"));
+    wxStaticBoxSizer* settings_sizer = new wxStaticBoxSizer(stb, wxVERTICAL);
+    settings_sizer->AddSpacer(FromDIP(5));
+
+    auto add_row = [&](const wxString& label, int value) {
+        auto row  = new wxBoxSizer(wxHORIZONTAL);
+        auto text = new wxStaticText(this, wxID_ANY, label, wxDefaultPosition, st_size, wxALIGN_LEFT);
+        auto input = new TextInput(this, std::to_string(value), "%", "", wxDefaultPosition, ti_size);
+        input->GetTextCtrl()->SetValidator(wxTextValidator(wxFILTER_NUMERIC));
+        row->Add(text, 0, wxALL | wxALIGN_CENTER_VERTICAL, FromDIP(2));
+        row->Add(input, 0, wxALL | wxALIGN_CENTER_VERTICAL, FromDIP(2));
+        settings_sizer->Add(row, 0, wxLEFT, FromDIP(3));
+        return input;
+    };
+    m_tiStart = add_row(start_str, 0);
+    m_tiEnd   = add_row(end_str, 100);
+
+    auto note = new wxStaticText(this, wxID_ANY, _L("Fan speed rises 10% per block, going up. Each block is labelled with its speed."));
+    settings_sizer->Add(note, 0, wxALL, FromDIP(5));
+
+    v_sizer->Add(settings_sizer, 0, wxTOP | wxRIGHT | wxLEFT | wxEXPAND, FromDIP(10));
+    v_sizer->AddSpacer(FromDIP(5));
+
+    auto dlg_btns = new DialogButtons(this, {"OK"});
+    v_sizer->Add(dlg_btns, 0, wxEXPAND);
+    dlg_btns->GetOK()->Bind(wxEVT_BUTTON, &Overhang_Fan_Test_Dlg::on_start, this);
+
+    wxGetApp().UpdateDlgDarkUI(this);
+    SetSizerAndFit(v_sizer);
+}
+
+void Overhang_Fan_Test_Dlg::on_start(wxCommandEvent& event) {
+    unsigned long start = 0, end = 0;
+    const bool valid = m_tiStart->GetTextCtrl()->GetValue().ToULong(&start) && m_tiEnd->GetTextCtrl()->GetValue().ToULong(&end);
+    if (!valid || end > 100 || start >= end || start % 10 != 0 || end % 10 != 0) {
+        MessageDialog msg_dlg(nullptr, _L("Please input valid values:\nMultiples of 10 from 0 to 100\nStart fan speed below end fan speed"), wxEmptyString, wxICON_WARNING | wxOK);
+        msg_dlg.ShowModal();
+        return;
+    }
+    m_params.start = start;
+    m_params.end   = end;
+    m_params.step  = 10;
+    m_params.nozzle_based_resize = true;
+    m_params.mode  = CalibMode::Calib_Overhang_Fan_Tower;
+    m_plater->calib_overhang_fan(m_params);
+    EndModal(wxID_OK);
+}
+
+void Overhang_Fan_Test_Dlg::on_dpi_changed(const wxRect& suggested_rect) {
+    this->Refresh();
+    Fit();
+}
+
 // Input_Shaping_Freq_Test_Dlg
 //
 

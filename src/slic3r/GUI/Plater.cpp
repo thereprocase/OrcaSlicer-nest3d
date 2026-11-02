@@ -17428,11 +17428,62 @@ void Plater::calib_temp(const Calib_Params& params) {
         }
     }
 
-    if (!add_model(false, Slic3r::resources_dir() + "/calib/temperature_tower/temperature_tower.drc"))
+    // The model has one 10 mm block per 5 degrees, from 500 at its base.
+    const double temp_tower_bottom = (500 - lround(params.start)) / 5 * 10.0;
+    const double temp_tower_top    = ((500 - lround(params.end)) / 5 + 1) * 10.0;
+    if (!_add_tower_blocks("temperature_tower/temperature_tower.drc", temp_tower_bottom, temp_tower_top, params))
         return;
-    auto printer_config = &wxGetApp().preset_bundle->printers.get_edited_preset().config;
     auto filament_config = &wxGetApp().preset_bundle->filaments.get_edited_preset().config;
     auto start_temp = lround(params.start);
+    set_config_values<int, ConfigOptionInts>(filament_config, "nozzle_temperature_initial_layer", (int) start_temp);
+    set_config_values<int, ConfigOptionInts>(filament_config, "nozzle_temperature", (int) start_temp);
+
+    changed_objects({ 0 });
+    wxGetApp().get_tab(Preset::TYPE_PRINT)->update_dirty();
+    wxGetApp().get_tab(Preset::TYPE_FILAMENT)->update_dirty();
+    wxGetApp().get_tab(Preset::TYPE_PRINT)->reload_config();
+    wxGetApp().get_tab(Preset::TYPE_FILAMENT)->reload_config();
+
+    p->background_process.fff_print()->set_calib_params(params);
+}
+
+void Plater::calib_overhang_fan(const Calib_Params& params) {
+    // A belt printer cannot print the upright tower, and the sectioned belt variant only varies temperature.
+    const auto &belt_config = wxGetApp().preset_bundle->printers.get_edited_preset().config;
+    if (belt_config.has("belt_printer") && belt_config.opt_bool("belt_printer")) {
+        MessageDialog dlg(static_cast<wxWindow *>(wxGetApp().mainframe), _L("The overhang fan tower is not available on belt printers."),
+                          _L("Overhang fan tower"), wxICON_ERROR | wxOK);
+        dlg.ShowModal();
+        return;
+    }
+
+    new_project(false, false, _L("Overhang fan speed test"));
+    wxGetApp().mainframe->select_tab(TAB_ID_PREPARE);
+    // The model has one 10 mm block per 10% of fan speed, from 0% at its base, so percent and height coincide.
+    if (!_add_tower_blocks("overhang_fan_tower/overhang_fan_tower.drc", params.start, params.end + 10.0, params))
+        return;
+
+    // Overhang markers only reach the cooling pass while this is on.
+    auto filament_config = &wxGetApp().preset_bundle->filaments.get_edited_preset().config;
+    set_config_values<bool, ConfigOptionBools>(filament_config, "enable_overhang_bridge_fan", true);
+
+    changed_objects({ 0 });
+    wxGetApp().get_tab(Preset::TYPE_PRINT)->update_dirty();
+    wxGetApp().get_tab(Preset::TYPE_FILAMENT)->update_dirty();
+    wxGetApp().get_tab(Preset::TYPE_PRINT)->reload_config();
+    wxGetApp().get_tab(Preset::TYPE_FILAMENT)->reload_config();
+
+    p->background_process.fff_print()->set_calib_params(params);
+}
+
+// Loads a calibration tower cut down to the height range [bottom_z, top_z], with the object settings
+// every test printed on this tower shape needs.
+bool Plater::_add_tower_blocks(const std::string& asset, double bottom_z, double top_z, const Calib_Params& params) {
+    constexpr double base_temp_tower_nozzle_diameter = 0.4;
+
+    if (!add_model(false, Slic3r::resources_dir() + "/calib/" + asset))
+        return false;
+    auto printer_config = &wxGetApp().preset_bundle->printers.get_edited_preset().config;
     const ConfigOptionFloats* nozzle_diameter_config = printer_config->option<ConfigOptionFloats>("nozzle_diameter");
     size_t nozzle_id = static_cast<size_t>(std::max(params.extruder_id, 0));
     double nozzle_diameter = base_temp_tower_nozzle_diameter;
@@ -17444,28 +17495,17 @@ void Plater::calib_temp(const Calib_Params& params) {
         nozzle_diameter = base_temp_tower_nozzle_diameter;
 
     const double nozzle_scale = nozzle_diameter / base_temp_tower_nozzle_diameter;
-    const double block_height = base_temp_tower_block_height;
 
     // cut upper
     auto obj_bb = model().objects[0]->bounding_box_exact();
-    auto block_count = lround((500 - params.end) / base_temp_tower_temp_step + 1);
-    if (block_count > 0) {
-        // subtract EPSILON offset to avoid cutting at the exact location where the flat surface is
-        auto new_height = block_count * block_height - EPSILON;
-        if (new_height < obj_bb.size().z()) {
-            cut_horizontal(0, 0, new_height, ModelObjectCutAttribute::KeepLower);
-        }
-    }
+    // subtract EPSILON offset to avoid cutting at the exact location where the flat surface is
+    if (top_z - EPSILON < obj_bb.size().z())
+        cut_horizontal(0, 0, top_z - EPSILON, ModelObjectCutAttribute::KeepLower);
 
     // cut bottom
     obj_bb = model().objects[0]->bounding_box_exact();
-    block_count = lround((500 - params.start) / base_temp_tower_temp_step);
-    if (block_count > 0) {
-        auto new_height = block_count * block_height + EPSILON;
-        if (new_height < obj_bb.size().z()) {
-            cut_horizontal(0, 0, new_height, ModelObjectCutAttribute::KeepUpper);
-        }
-    }
+    if (bottom_z > 0 && bottom_z + EPSILON < obj_bb.size().z())
+        cut_horizontal(0, 0, bottom_z + EPSILON, ModelObjectCutAttribute::KeepUpper);
 
     if (params.nozzle_based_resize && std::abs(nozzle_scale - 1.0) > EPSILON)
         model().objects[0]->scale(nozzle_scale, nozzle_scale, nozzle_scale);
@@ -17473,8 +17513,6 @@ void Plater::calib_temp(const Calib_Params& params) {
     model().objects[0]->ensure_on_bed();
 
     printer_config->set_key_value("resonance_avoidance", new ConfigOptionBool{false});
-    set_config_values<int, ConfigOptionInts>(filament_config, "nozzle_temperature_initial_layer", (int) start_temp);
-    set_config_values<int, ConfigOptionInts>(filament_config, "nozzle_temperature", (int) start_temp);
     // When resizing is disabled the 0.4 mm / 0.2 mm reference model is printed as-is (preset layer height kept).
     if (params.nozzle_based_resize)
         model().objects[0]->config.set_key_value("layer_height", new ConfigOptionFloat(nozzle_diameter/2));
@@ -17490,15 +17528,7 @@ void Plater::calib_temp(const Calib_Params& params) {
     print_config->set_key_value("enable_wrapping_detection", new ConfigOptionBool(false));
     if (params.nozzle_based_resize)
         print_config->set_key_value("initial_layer_print_height", new ConfigOptionFloat(nozzle_diameter/2));
-
-
-    changed_objects({ 0 });
-    wxGetApp().get_tab(Preset::TYPE_PRINT)->update_dirty();
-    wxGetApp().get_tab(Preset::TYPE_FILAMENT)->update_dirty();
-    wxGetApp().get_tab(Preset::TYPE_PRINT)->reload_config();
-    wxGetApp().get_tab(Preset::TYPE_FILAMENT)->reload_config();
-
-    p->background_process.fff_print()->set_calib_params(params);
+    return true;
 }
 
 // ORCA-Belt: sectioned temperature test. Each temperature gets its own block

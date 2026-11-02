@@ -3625,6 +3625,11 @@ void MainFrame::init_menubar_as_editor()
         [this](wxCommandEvent&) { run_calibration(CalibKind::Retraction); }, "", nullptr,
         [this]() {return m_plater->is_view3D_shown();; }, this);
 
+    // Overhang fan speed
+    append_menu_item(m_topbar->GetCalibMenu(), wxID_ANY, _L("Overhang fan speed"), _L("Overhang fan speed"),
+        [this](wxCommandEvent&) { run_calibration(CalibKind::OverhangFan); }, "", nullptr,
+        [this]() {return m_plater->is_view3D_shown();; }, this);
+
     // Cornering
     append_menu_item(m_topbar->GetCalibMenu(), wxID_ANY, _L("Cornering"), _L("Cornering calibration"),
         [this](wxCommandEvent&) { run_calibration(CalibKind::Cornering); }, "", nullptr,
@@ -3729,6 +3734,11 @@ void MainFrame::init_menubar_as_editor()
     // Retraction
     append_menu_item(calib_menu, wxID_ANY, _L("Retraction"), _L("Retraction"),
         [this](wxCommandEvent&) { run_calibration(CalibKind::Retraction); }, "", nullptr,
+        [this]() {return m_plater->is_view3D_shown();; }, this);
+
+    // Overhang fan speed
+    append_menu_item(calib_menu, wxID_ANY, _L("Overhang fan speed"), _L("Overhang fan speed"),
+        [this](wxCommandEvent&) { run_calibration(CalibKind::OverhangFan); }, "", nullptr,
         [this]() {return m_plater->is_view3D_shown();; }, this);
 
     // Cornering
@@ -4654,6 +4664,12 @@ void MainFrame::run_calibration(CalibKind calib_kind)
         if (!m_retraction_calib_dlg)
             m_retraction_calib_dlg = new Retraction_Test_Dlg((wxWindow*) this, wxID_ANY, m_plater);
         m_retraction_calib_dlg->ShowModal();
+        break;
+    }
+    case CalibKind::OverhangFan: {
+        if (!m_overhang_fan_calib_dlg)
+            m_overhang_fan_calib_dlg = new Overhang_Fan_Test_Dlg((wxWindow*) this, wxID_ANY, m_plater);
+        m_overhang_fan_calib_dlg->ShowModal();
         break;
     }
     case CalibKind::Cornering: {

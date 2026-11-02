@@ -6656,6 +6656,14 @@ LayerResult GCode::process_layer(
             }
             break;
         }
+        case CalibMode::Calib_Overhang_Fan_Tower: {
+            // CoolingBuffer runs later in the layer pipeline, so the value travels with the layer's G-code.
+            const float fan = this->interpolate_value_across_layers(static_cast<float>(print.calib_params().start),
+                                                                    static_cast<float>(print.calib_params().end),
+                                                                    static_cast<float>(print.calib_params().step));
+            gcode += std::string(CoolingBuffer::calib_overhang_fan_tag) + std::to_string(std::lround(fan)) + "\n";
+            break;
+        }
         case CalibMode::Calib_VFA_Tower: {
             // Step the outer wall speed from start to end across the tower's layers. Plater::calib_VFA sizes the
             // geometry so each speed step spans one visual block (a fixed number of layers), so the layer-based

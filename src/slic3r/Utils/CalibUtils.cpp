@@ -278,6 +278,8 @@ std::string get_calib_mode_name(CalibMode cali_mode, int stage)
         return "input_shaping_damp_calib_mode";
     case CalibMode::Calib_Cornering:
         return "cornering_calib_mode";
+    case CalibMode::Calib_Overhang_Fan_Tower:
+        return "overhang_fan_tower_calib_mode";
     default:
         assert(false);
         return "";
@@ -417,6 +419,8 @@ CalibMode CalibUtils::get_calib_mode_by_name(const std::string name, int& cali_s
     }
     else if (name == "temp_tower_calib_mode")
         return CalibMode::Calib_Temp_Tower;
+    else if (name == "overhang_fan_tower_calib_mode")
+        return CalibMode::Calib_Overhang_Fan_Tower;
     else if (name == "vol_speed_tower_calib_mode")
         return CalibMode::Calib_Vol_speed_Tower;
     else if (name == "vfa_tower_calib_mode")

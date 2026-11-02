@@ -751,6 +751,9 @@ std::string CoolingBuffer::apply_layer_cooldown(
     const unsigned int part_cooling_fan_min_pwm = static_cast<unsigned int>(std::max(0, m_config.part_cooling_fan_min_pwm.value));
     bool overhang_fan_control= false;
     int  overhang_fan_speed   = 0;
+    int  calib_overhang_fan   = -1;
+    if (const size_t tag = gcode.find(calib_overhang_fan_tag); tag != std::string::npos)
+        calib_overhang_fan = std::atoi(gcode.c_str() + tag + strlen(calib_overhang_fan_tag));
     bool internal_bridge_fan_control= false; // ORCA: Add support for separate internal bridge fan speed control
     int  internal_bridge_fan_speed   = 0; // ORCA: Add support for separate internal bridge fan speed control
     bool supp_interface_fan_control= false;
@@ -758,7 +761,7 @@ std::string CoolingBuffer::apply_layer_cooldown(
     bool ironing_fan_control= false; // ORCA: Add support for ironing fan speed control
     int  ironing_fan_speed   = 0; // ORCA: Add support for ironing fan speed control
     auto change_extruder_set_fan = [ this, layer_id, layer_time, &new_gcode, part_cooling_fan_min_pwm,
-        &overhang_fan_control, &overhang_fan_speed,
+        &overhang_fan_control, &overhang_fan_speed, calib_overhang_fan,
         &internal_bridge_fan_control, &internal_bridge_fan_speed,
         &supp_interface_fan_control, &supp_interface_fan_speed,
         &ironing_fan_control, &ironing_fan_speed
@@ -845,6 +848,14 @@ std::string CoolingBuffer::apply_layer_cooldown(
             supp_interface_fan_control = supp_interface_fan_speed >= 0;
 
             overhang_fan_control = overhang_fan_speed > fan_speed_new;
+            if (calib_overhang_fan >= 0) {
+                // A tower's short layers would push the base fan to maximum and the first-layers ramp would
+                // scale the test value. Pin both, and honour speeds below the base fan, so each block's
+                // overhangs print at exactly the speed it tests.
+                fan_speed_new        = fan_min_speed;
+                overhang_fan_speed   = calib_overhang_fan;
+                overhang_fan_control = true;
+            }
             
             // ORCA: Add support for separate internal bridge fan speed control
             internal_bridge_fan_speed   = EXTRUDER_CONFIG(internal_bridge_fan_speed);

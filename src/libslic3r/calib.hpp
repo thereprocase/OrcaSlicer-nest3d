@@ -33,7 +33,8 @@ enum class CalibMode : int {
     Calib_Retraction_tower,
     Calib_Input_shaping_freq,
     Calib_Input_shaping_damp,
-    Calib_Cornering
+    Calib_Cornering,
+    Calib_Overhang_Fan_Tower
 };
 
 enum class CalibState { Start = 0, Preset, Calibration, CoarseSave, FineCalibration, Save, Finish };
