@@ -3625,10 +3625,21 @@ void MainFrame::init_menubar_as_editor()
         [this](wxCommandEvent&) { run_calibration(CalibKind::Retraction); }, "", nullptr,
         [this]() {return m_plater->is_view3D_shown();; }, this);
 
-    // Overhang fan speed
-    append_menu_item(m_topbar->GetCalibMenu(), wxID_ANY, _L("Overhang fan speed"), _L("Overhang fan speed"),
+    // Fan speed (with submenu)
+    auto fan_menu = new wxMenu();
+    append_menu_item(fan_menu, wxID_ANY, _L("Part cooling fan"), _L("Part cooling fan speed tower"),
+        [this](wxCommandEvent&) { run_calibration(CalibKind::PartFan); }, "", nullptr,
+        [this]() {return m_plater->is_view3D_shown(); }, this);
+    append_menu_item(fan_menu, wxID_ANY, _L("Overhang fan"), _L("Overhang fan speed tower"),
         [this](wxCommandEvent&) { run_calibration(CalibKind::OverhangFan); }, "", nullptr,
-        [this]() {return m_plater->is_view3D_shown();; }, this);
+        [this]() {return m_plater->is_view3D_shown(); }, this);
+    append_menu_item(fan_menu, wxID_ANY, _L("Bridge fan"), _L("Bridge fan speed tower"),
+        [this](wxCommandEvent&) { run_calibration(CalibKind::BridgeFan); }, "", nullptr,
+        [this]() {return m_plater->is_view3D_shown(); }, this);
+    append_menu_item(fan_menu, wxID_ANY, _L("Small feature fan"), _L("Small feature fan speed tower"),
+        [this](wxCommandEvent&) { run_calibration(CalibKind::SmallFeatureFan); }, "", nullptr,
+        [this]() {return m_plater->is_view3D_shown(); }, this);
+    m_topbar->GetCalibMenu()->AppendSubMenu(fan_menu, _L("Fan speed"));
 
     // Cornering
     append_menu_item(m_topbar->GetCalibMenu(), wxID_ANY, _L("Cornering"), _L("Cornering calibration"),
@@ -3736,10 +3747,21 @@ void MainFrame::init_menubar_as_editor()
         [this](wxCommandEvent&) { run_calibration(CalibKind::Retraction); }, "", nullptr,
         [this]() {return m_plater->is_view3D_shown();; }, this);
 
-    // Overhang fan speed
-    append_menu_item(calib_menu, wxID_ANY, _L("Overhang fan speed"), _L("Overhang fan speed"),
+    // Fan speed (with submenu)
+    auto fan_menu = new wxMenu();
+    append_menu_item(fan_menu, wxID_ANY, _L("Part cooling fan"), _L("Part cooling fan speed tower"),
+        [this](wxCommandEvent&) { run_calibration(CalibKind::PartFan); }, "", nullptr,
+        [this]() {return m_plater->is_view3D_shown(); }, this);
+    append_menu_item(fan_menu, wxID_ANY, _L("Overhang fan"), _L("Overhang fan speed tower"),
         [this](wxCommandEvent&) { run_calibration(CalibKind::OverhangFan); }, "", nullptr,
-        [this]() {return m_plater->is_view3D_shown();; }, this);
+        [this]() {return m_plater->is_view3D_shown(); }, this);
+    append_menu_item(fan_menu, wxID_ANY, _L("Bridge fan"), _L("Bridge fan speed tower"),
+        [this](wxCommandEvent&) { run_calibration(CalibKind::BridgeFan); }, "", nullptr,
+        [this]() {return m_plater->is_view3D_shown(); }, this);
+    append_menu_item(fan_menu, wxID_ANY, _L("Small feature fan"), _L("Small feature fan speed tower"),
+        [this](wxCommandEvent&) { run_calibration(CalibKind::SmallFeatureFan); }, "", nullptr,
+        [this]() {return m_plater->is_view3D_shown(); }, this);
+    calib_menu->AppendSubMenu(fan_menu, _L("Fan speed"));
 
     // Cornering
     append_menu_item(calib_menu, wxID_ANY, _L("Cornering"), _L("Cornering calibration"),
@@ -4666,10 +4688,18 @@ void MainFrame::run_calibration(CalibKind calib_kind)
         m_retraction_calib_dlg->ShowModal();
         break;
     }
-    case CalibKind::OverhangFan: {
-        if (!m_overhang_fan_calib_dlg)
-            m_overhang_fan_calib_dlg = new Overhang_Fan_Test_Dlg((wxWindow*) this, wxID_ANY, m_plater);
-        m_overhang_fan_calib_dlg->ShowModal();
+    case CalibKind::OverhangFan:
+    case CalibKind::PartFan:
+    case CalibKind::BridgeFan:
+    case CalibKind::SmallFeatureFan: {
+        const CalibMode mode = calib_kind == CalibKind::PartFan         ? CalibMode::Calib_Fan_Tower :
+                               calib_kind == CalibKind::BridgeFan       ? CalibMode::Calib_Bridge_Fan_Tower :
+                               calib_kind == CalibKind::SmallFeatureFan ? CalibMode::Calib_Small_Feature_Fan_Tower :
+                                                                    CalibMode::Calib_Overhang_Fan_Tower;
+        Fan_Tower_Test_Dlg*& dlg = m_fan_tower_calib_dlgs[mode];
+        if (!dlg)
+            dlg = new Fan_Tower_Test_Dlg((wxWindow*) this, wxID_ANY, m_plater, mode);
+        dlg->ShowModal();
         break;
     }
     case CalibKind::Cornering: {

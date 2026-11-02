@@ -1151,11 +1151,39 @@ void Retraction_Test_Dlg::on_dpi_changed(const wxRect& suggested_rect) {
 
 }
 
-// Overhang_Fan_Test_Dlg
+// Fan_Tower_Test_Dlg
 //
 
-Overhang_Fan_Test_Dlg::Overhang_Fan_Test_Dlg(wxWindow* parent, wxWindowID id, Plater* plater)
-    : DPIDialog(parent, id, _L("Overhang fan speed"), wxDefaultPosition, wxDefaultSize, wxDEFAULT_DIALOG_STYLE), m_plater(plater)
+static wxString fan_tower_title(CalibMode mode)
+{
+    switch (mode) {
+    case CalibMode::Calib_Fan_Tower:               return _L("Part cooling fan speed");
+    case CalibMode::Calib_Bridge_Fan_Tower:        return _L("Bridge fan speed");
+    case CalibMode::Calib_Small_Feature_Fan_Tower: return _L("Small feature fan speed");
+    default:                                       return _L("Overhang fan speed");
+    }
+}
+
+static wxString fan_tower_note(CalibMode mode)
+{
+    switch (mode) {
+    case CalibMode::Calib_Fan_Tower:
+        return _L("Every fan runs at the block's speed, with the layer time fan ramp off.\n"
+                  "Read the overhang slope and the strings between the body and the pillars.");
+    case CalibMode::Calib_Bridge_Fan_Tower:
+        return _L("The part fan stays at the filament's minimum; the fan over each block's bridge rises 10% per block.\n"
+                  "Read the bridge underside and the strings between the pillars.");
+    case CalibMode::Calib_Small_Feature_Fan_Tower:
+        return _L("Every fan runs at the block's speed; the filament's slow-down for short layers stays on.\n"
+                  "Read the fin edge, the pillar surfaces and the strings between them.");
+    default:
+        return _L("The part fan stays at the filament's minimum; the overhang fan rises 10% per block.\n"
+                  "Read the overhang slope and the strings between the body and the pillars.");
+    }
+}
+
+Fan_Tower_Test_Dlg::Fan_Tower_Test_Dlg(wxWindow* parent, wxWindowID id, Plater* plater, CalibMode mode)
+    : DPIDialog(parent, id, fan_tower_title(mode), wxDefaultPosition, wxDefaultSize, wxDEFAULT_DIALOG_STYLE), m_mode(mode), m_plater(plater)
 {
     SetBackgroundColour(*wxWHITE); // make sure background color set for dialog
     SetForegroundColour(wxColour("#363636"));
@@ -1185,7 +1213,7 @@ Overhang_Fan_Test_Dlg::Overhang_Fan_Test_Dlg(wxWindow* parent, wxWindowID id, Pl
     m_tiStart = add_row(start_str, 0);
     m_tiEnd   = add_row(end_str, 100);
 
-    auto note = new wxStaticText(this, wxID_ANY, _L("Fan speed rises 10% per block, going up. Each block is labelled with its speed."));
+    auto note = new wxStaticText(this, wxID_ANY, fan_tower_note(m_mode) + "\n" + _L("Each block is labelled with its speed."));
     settings_sizer->Add(note, 0, wxALL, FromDIP(5));
 
     v_sizer->Add(settings_sizer, 0, wxTOP | wxRIGHT | wxLEFT | wxEXPAND, FromDIP(10));
@@ -1193,13 +1221,13 @@ Overhang_Fan_Test_Dlg::Overhang_Fan_Test_Dlg(wxWindow* parent, wxWindowID id, Pl
 
     auto dlg_btns = new DialogButtons(this, {"OK"});
     v_sizer->Add(dlg_btns, 0, wxEXPAND);
-    dlg_btns->GetOK()->Bind(wxEVT_BUTTON, &Overhang_Fan_Test_Dlg::on_start, this);
+    dlg_btns->GetOK()->Bind(wxEVT_BUTTON, &Fan_Tower_Test_Dlg::on_start, this);
 
     wxGetApp().UpdateDlgDarkUI(this);
     SetSizerAndFit(v_sizer);
 }
 
-void Overhang_Fan_Test_Dlg::on_start(wxCommandEvent& event) {
+void Fan_Tower_Test_Dlg::on_start(wxCommandEvent& event) {
     unsigned long start = 0, end = 0;
     const bool valid = m_tiStart->GetTextCtrl()->GetValue().ToULong(&start) && m_tiEnd->GetTextCtrl()->GetValue().ToULong(&end);
     if (!valid || end > 100 || start >= end || start % 10 != 0 || end % 10 != 0) {
@@ -1211,12 +1239,12 @@ void Overhang_Fan_Test_Dlg::on_start(wxCommandEvent& event) {
     m_params.end   = end;
     m_params.step  = 10;
     m_params.nozzle_based_resize = true;
-    m_params.mode  = CalibMode::Calib_Overhang_Fan_Tower;
-    m_plater->calib_overhang_fan(m_params);
+    m_params.mode  = m_mode;
+    m_plater->calib_fan_tower(m_params);
     EndModal(wxID_OK);
 }
 
-void Overhang_Fan_Test_Dlg::on_dpi_changed(const wxRect& suggested_rect) {
+void Fan_Tower_Test_Dlg::on_dpi_changed(const wxRect& suggested_rect) {
     this->Refresh();
     Fit();
 }

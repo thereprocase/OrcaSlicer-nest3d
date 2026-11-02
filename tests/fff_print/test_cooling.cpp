@@ -382,3 +382,53 @@ TEST_CASE("Overhang fan tower steps the overhang fan and pins the base fan", "[C
     CHECK(std::find(fan_commands.begin(), fan_commands.end(), pwm(10)) != fan_commands.end());
     CHECK(std::find(fan_commands.begin(), fan_commands.end(), pwm(100)) != fan_commands.end());
 }
+
+TEST_CASE("Part cooling fan tower pins every fan to the block's speed", "[Cooling][Calib][Regression]")
+{
+    DynamicPrintConfig config = Slic3r::DynamicPrintConfig::full_print_config();
+    config.set_deserialize_strict({
+        {"layer_height", "0.2"},
+        {"initial_layer_print_height", "0.2"},
+        {"enable_overhang_bridge_fan", "1"},
+        {"overhang_fan_speed", "65"},
+        {"fan_min_speed", "15"},
+        {"fan_max_speed", "95"},
+        {"close_fan_the_first_x_layers", "1"},
+        {"full_fan_speed_layer", "0"},
+        // Short layers, so the layer-time ramp would ask for fan_max_speed on every layer.
+        {"slow_down_layer_time", "1000"},
+        {"fan_cooling_layer_time", "1000"},
+    });
+    config.set_key_value("overhang_fan_threshold", new ConfigOptionEnumsGeneric{Overhang_threshold_none});
+
+    Print print;
+    Model model;
+    init_print({make_cube(10., 10., 30.)}, print, model, config);
+    Calib_Params params;
+    params.mode  = CalibMode::Calib_Fan_Tower;
+    params.start = 0.;
+    params.end   = 100.;
+    params.step  = 10.;
+    print.set_calib_params(params);
+    const std::string output = gcode(print);
+
+    std::vector<int> tagged;
+    std::vector<int> fan_commands;
+    std::istringstream lines(output);
+    for (std::string line; std::getline(lines, line);) {
+        if (line.rfind(CoolingBuffer::calib_fan_tag, 0) == 0)
+            tagged.push_back(std::stoi(line.substr(strlen(CoolingBuffer::calib_fan_tag))));
+        else if (line.rfind("M106 S", 0) == 0)
+            fan_commands.push_back(std::stoi(line.substr(6)));
+    }
+    REQUIRE_FALSE(tagged.empty());
+    CHECK(std::is_sorted(tagged.begin(), tagged.end()));
+    for (int band = 0; band <= 100; band += 10)
+        CHECK(std::find(tagged.begin(), tagged.end(), band) != tagged.end());
+    // No overhang marker switch and no layer-time ramp: the profile's own speeds never reach the printer.
+    const auto pwm = [](int percent) { return int(percent * 255. / 100.); };
+    for (int percent : {15, 65, 95})
+        CHECK(std::find(fan_commands.begin(), fan_commands.end(), pwm(percent)) == fan_commands.end());
+    for (int band = 10; band <= 100; band += 10)
+        CHECK(std::find(fan_commands.begin(), fan_commands.end(), pwm(band)) != fan_commands.end());
+}

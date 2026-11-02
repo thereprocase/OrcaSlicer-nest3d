@@ -17447,25 +17447,36 @@ void Plater::calib_temp(const Calib_Params& params) {
     p->background_process.fff_print()->set_calib_params(params);
 }
 
-void Plater::calib_overhang_fan(const Calib_Params& params) {
-    // A belt printer cannot print the upright tower, and the sectioned belt variant only varies temperature.
+void Plater::calib_fan_tower(const Calib_Params& params) {
+    // A belt printer cannot print the upright towers, and the sectioned belt variant only varies temperature.
     const auto &belt_config = wxGetApp().preset_bundle->printers.get_edited_preset().config;
     if (belt_config.has("belt_printer") && belt_config.opt_bool("belt_printer")) {
-        MessageDialog dlg(static_cast<wxWindow *>(wxGetApp().mainframe), _L("The overhang fan tower is not available on belt printers."),
-                          _L("Overhang fan tower"), wxICON_ERROR | wxOK);
+        MessageDialog dlg(static_cast<wxWindow *>(wxGetApp().mainframe), _L("The fan speed towers are not available on belt printers."),
+                          _L("Fan speed tower"), wxICON_ERROR | wxOK);
         dlg.ShowModal();
         return;
     }
 
-    new_project(false, false, _L("Overhang fan speed test"));
+    // Each model has one 10 mm block per 10% of fan speed, from 0% at its base, so percent and height coincide.
+    // The overhang and part cooling towers share a block so their results compare directly.
+    std::string asset;
+    wxString    title;
+    switch (params.mode) {
+    case CalibMode::Calib_Overhang_Fan_Tower:      asset = "fan_tower/fan_tower.drc";               title = _L("Overhang fan speed test"); break;
+    case CalibMode::Calib_Fan_Tower:               asset = "fan_tower/fan_tower.drc";               title = _L("Part cooling fan speed test"); break;
+    case CalibMode::Calib_Bridge_Fan_Tower:        asset = "fan_tower/bridge_fan_tower.drc";        title = _L("Bridge fan speed test"); break;
+    case CalibMode::Calib_Small_Feature_Fan_Tower: asset = "fan_tower/small_feature_fan_tower.drc"; title = _L("Small feature fan speed test"); break;
+    default: assert(false); return;
+    }
+    new_project(false, false, title);
     wxGetApp().mainframe->select_tab(TAB_ID_PREPARE);
-    // The model has one 10 mm block per 10% of fan speed, from 0% at its base, so percent and height coincide.
-    if (!_add_tower_blocks("overhang_fan_tower/overhang_fan_tower.drc", params.start, params.end + 10.0, params))
+    if (!_add_tower_blocks(asset, params.start, params.end + 10.0, params))
         return;
 
     // Overhang markers only reach the cooling pass while this is on.
     auto filament_config = &wxGetApp().preset_bundle->filaments.get_edited_preset().config;
-    set_config_values<bool, ConfigOptionBools>(filament_config, "enable_overhang_bridge_fan", true);
+    if (fan_tower_steps_overhang_fan(params.mode))
+        set_config_values<bool, ConfigOptionBools>(filament_config, "enable_overhang_bridge_fan", true);
 
     changed_objects({ 0 });
     wxGetApp().get_tab(Preset::TYPE_PRINT)->update_dirty();

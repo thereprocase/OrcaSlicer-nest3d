@@ -131,15 +131,17 @@ protected:
     Plater* m_plater;
 };
 
-class Overhang_Fan_Test_Dlg : public DPIDialog
+// One dialog serves the four fan speed towers; the mode picks the title, the note and the model.
+class Fan_Tower_Test_Dlg : public DPIDialog
 {
 public:
-    Overhang_Fan_Test_Dlg(wxWindow* parent, wxWindowID id, Plater* plater);
+    Fan_Tower_Test_Dlg(wxWindow* parent, wxWindowID id, Plater* plater, CalibMode mode);
     void on_dpi_changed(const wxRect& suggested_rect) override;
 
 protected:
     void on_start(wxCommandEvent& event);
     Calib_Params m_params;
+    CalibMode    m_mode;
 
     TextInput* m_tiStart;
     TextInput* m_tiEnd;
