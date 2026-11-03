@@ -33,8 +33,19 @@ enum class CalibMode : int {
     Calib_Retraction_tower,
     Calib_Input_shaping_freq,
     Calib_Input_shaping_damp,
-    Calib_Cornering
+    Calib_Cornering,
+    Calib_Overhang_Fan_Tower,
+    Calib_Part_Fan_Tower,
+    Calib_Bridge_Fan_Tower,
+    Calib_Small_Feature_Fan_Tower
 };
+
+// Fan towers change a fan speed per block (see CoolingBuffer::apply_layer_cooldown): the overhang and bridge towers
+// step the overhang fan over a pinned base fan, the part cooling and small feature towers pin every fan to the block's speed.
+inline bool fan_tower_steps_overhang_fan(CalibMode mode)
+{
+    return mode == CalibMode::Calib_Overhang_Fan_Tower || mode == CalibMode::Calib_Bridge_Fan_Tower;
+}
 
 enum class CalibState { Start = 0, Preset, Calibration, CoarseSave, FineCalibration, Save, Finish };
 

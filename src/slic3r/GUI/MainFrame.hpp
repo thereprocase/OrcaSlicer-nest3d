@@ -140,7 +140,11 @@ enum class CalibKind : int
     Cornering, 
     InputShapingFreq, 
     InputShapingDamp,
-    VFA
+    VFA,
+    OverhangFan,
+    PartFan,
+    BridgeFan,
+    SmallFeatureFan
 };
 
 class MainFrame : public DPIFrame

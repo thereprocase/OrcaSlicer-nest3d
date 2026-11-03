@@ -1151,6 +1151,124 @@ void Retraction_Test_Dlg::on_dpi_changed(const wxRect& suggested_rect) {
 
 }
 
+// Fan_Tower_Test_Dlg
+//
+
+static wxString fan_tower_title(CalibMode mode)
+{
+    switch (mode) {
+    case CalibMode::Calib_Part_Fan_Tower:               return _L("Part cooling fan speed");
+    case CalibMode::Calib_Bridge_Fan_Tower:        return _L("Bridge fan speed");
+    case CalibMode::Calib_Small_Feature_Fan_Tower: return _L("Small feature fan speed");
+    default:                                       return _L("Overhang fan speed");
+    }
+}
+
+static wxString fan_tower_note(CalibMode mode)
+{
+    switch (mode) {
+    case CalibMode::Calib_Part_Fan_Tower:
+        return _L("The part, overhang and bridge fans all run at the block's speed, with the layer time fan ramp off; "
+                  "the auxiliary fan keeps its profile value.\n"
+                  "Read the overhang slope and the strings between the body and the pillars.\n"
+                  "Enter the best block's speed as the filament's minimum and maximum fan speed, and as its overhang fan "
+                  "speed when the slope decided it.\n"
+                  "Each block is labelled with its speed.");
+    case CalibMode::Calib_Bridge_Fan_Tower:
+        return _L("The part fan stays at the filament's minimum fan speed; the fan over each block's bridge rises 10% per block.\n"
+                  "Read the bridge underside. The strings stay the same on every block, since travel moves run at the part fan.\n"
+                  "Enter the best block's speed as the filament's overhang fan speed, which also covers external bridges. "
+                  "Speeds below the minimum fan speed have no effect in normal prints.\n"
+                  "Each block is labelled with its speed.");
+    case CalibMode::Calib_Small_Feature_Fan_Tower:
+        return _L("The part, overhang and bridge fans all run at the block's speed; the filament's slow-down for short "
+                  "layers stays on and the auxiliary fan keeps its profile value.\n"
+                  "Read the fin edge, the pillar surfaces and the strings between them.\n"
+                  "Enter the best block's speed as the filament's maximum fan speed and keep the minimum fan speed at or below it.\n"
+                  "Each block is labelled with its speed.");
+    default:
+        return _L("The part fan stays at the filament's minimum fan speed; the overhang fan rises 10% per block.\n"
+                  "Read the overhang slope. The strings stay the same on every block, since travel moves run at the part fan.\n"
+                  "Enter the best block's speed as the filament's overhang fan speed. "
+                  "Speeds below the minimum fan speed have no effect in normal prints.\n"
+                  "Each block is labelled with its speed.");
+    }
+}
+
+Fan_Tower_Test_Dlg::Fan_Tower_Test_Dlg(wxWindow* parent, wxWindowID id, Plater* plater, CalibMode mode)
+    : DPIDialog(parent, id, fan_tower_title(mode), wxDefaultPosition, wxDefaultSize, wxDEFAULT_DIALOG_STYLE), m_mode(mode), m_plater(plater)
+{
+    SetBackgroundColour(*wxWHITE); // make sure background color set for dialog
+    SetForegroundColour(wxColour("#363636"));
+    SetFont(Label::Body_14);
+
+    wxBoxSizer* v_sizer = new wxBoxSizer(wxVERTICAL);
+
+    wxString start_str = _L("Start fan speed: ");
+    wxString end_str   = _L("End fan speed: ");
+    const auto st_size = wxSize(GetTextMax(this, std::vector<wxString>{start_str, end_str}), -1);
+    const auto ti_size = FromDIP(wxSize(120, -1));
+
+    LabeledStaticBox* stb = new LabeledStaticBox(this, _L("Settings"));
+    wxStaticBoxSizer* settings_sizer = new wxStaticBoxSizer(stb, wxVERTICAL);
+    settings_sizer->AddSpacer(FromDIP(5));
+
+    auto add_row = [&](const wxString& label, int value) {
+        auto row  = new wxBoxSizer(wxHORIZONTAL);
+        auto text = new wxStaticText(this, wxID_ANY, label, wxDefaultPosition, st_size, wxALIGN_LEFT);
+        auto input = new TextInput(this, std::to_string(value), "%", "", wxDefaultPosition, ti_size);
+        input->GetTextCtrl()->SetValidator(wxTextValidator(wxFILTER_NUMERIC));
+        row->Add(text, 0, wxALL | wxALIGN_CENTER_VERTICAL, FromDIP(2));
+        row->Add(input, 0, wxALL | wxALIGN_CENTER_VERTICAL, FromDIP(2));
+        settings_sizer->Add(row, 0, wxLEFT, FromDIP(3));
+        return input;
+    };
+    // Below the filament's minimum fan speed the overhang fan has no effect in normal prints, so the stepped
+    // towers start there by default. The dialog is built per use, so the default follows the selected filament.
+    int start = 0;
+    if (fan_tower_steps_overhang_fan(m_mode)) {
+        const int fan_min = wxGetApp().preset_bundle->filaments.get_edited_preset().config.opt_int("fan_min_speed", 0);
+        start = std::clamp((fan_min + 9) / 10 * 10, 0, 90);
+    }
+    m_tiStart = add_row(start_str, start);
+    m_tiEnd   = add_row(end_str, 100);
+
+    auto note = new wxStaticText(this, wxID_ANY, fan_tower_note(m_mode));
+    settings_sizer->Add(note, 0, wxALL, FromDIP(5));
+
+    v_sizer->Add(settings_sizer, 0, wxTOP | wxRIGHT | wxLEFT | wxEXPAND, FromDIP(10));
+    v_sizer->AddSpacer(FromDIP(5));
+
+    auto dlg_btns = new DialogButtons(this, {"OK"});
+    v_sizer->Add(dlg_btns, 0, wxEXPAND);
+    dlg_btns->GetOK()->Bind(wxEVT_BUTTON, &Fan_Tower_Test_Dlg::on_start, this);
+
+    wxGetApp().UpdateDlgDarkUI(this);
+    SetSizerAndFit(v_sizer);
+}
+
+void Fan_Tower_Test_Dlg::on_start(wxCommandEvent& event) {
+    unsigned long start = 0, end = 0;
+    const bool valid = m_tiStart->GetTextCtrl()->GetValue().ToULong(&start) && m_tiEnd->GetTextCtrl()->GetValue().ToULong(&end);
+    if (!valid || end > 100 || start >= end || start % 10 != 0 || end % 10 != 0) {
+        MessageDialog msg_dlg(nullptr, _L("Please input valid values:\nMultiples of 10 from 0 to 100\nStart fan speed below end fan speed"), wxEmptyString, wxICON_WARNING | wxOK);
+        msg_dlg.ShowModal();
+        return;
+    }
+    m_params.start = start;
+    m_params.end   = end;
+    m_params.step  = 10;
+    m_params.nozzle_based_resize = true;
+    m_params.mode  = m_mode;
+    m_plater->calib_fan_tower(m_params);
+    EndModal(wxID_OK);
+}
+
+void Fan_Tower_Test_Dlg::on_dpi_changed(const wxRect& suggested_rect) {
+    this->Refresh();
+    Fit();
+}
+
 // Input_Shaping_Freq_Test_Dlg
 //
 

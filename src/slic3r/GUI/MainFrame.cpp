@@ -3625,6 +3625,22 @@ void MainFrame::init_menubar_as_editor()
         [this](wxCommandEvent&) { run_calibration(CalibKind::Retraction); }, "", nullptr,
         [this]() {return m_plater->is_view3D_shown();; }, this);
 
+    // Fan speed (with submenu)
+    auto fan_menu = new wxMenu();
+    append_menu_item(fan_menu, wxID_ANY, _L("Part cooling fan"), _L("Part cooling fan speed tower"),
+        [this](wxCommandEvent&) { run_calibration(CalibKind::PartFan); }, "", nullptr,
+        [this]() {return m_plater->is_view3D_shown(); }, this);
+    append_menu_item(fan_menu, wxID_ANY, _L("Overhang fan"), _L("Overhang fan speed tower"),
+        [this](wxCommandEvent&) { run_calibration(CalibKind::OverhangFan); }, "", nullptr,
+        [this]() {return m_plater->is_view3D_shown(); }, this);
+    append_menu_item(fan_menu, wxID_ANY, _L("Bridge fan"), _L("Bridge fan speed tower"),
+        [this](wxCommandEvent&) { run_calibration(CalibKind::BridgeFan); }, "", nullptr,
+        [this]() {return m_plater->is_view3D_shown(); }, this);
+    append_menu_item(fan_menu, wxID_ANY, _L("Small feature fan"), _L("Small feature fan speed tower"),
+        [this](wxCommandEvent&) { run_calibration(CalibKind::SmallFeatureFan); }, "", nullptr,
+        [this]() {return m_plater->is_view3D_shown(); }, this);
+    m_topbar->GetCalibMenu()->AppendSubMenu(fan_menu, _L("Fan speed"));
+
     // Cornering
     append_menu_item(m_topbar->GetCalibMenu(), wxID_ANY, _L("Cornering"), _L("Cornering calibration"),
         [this](wxCommandEvent&) { run_calibration(CalibKind::Cornering); }, "", nullptr,
@@ -3730,6 +3746,22 @@ void MainFrame::init_menubar_as_editor()
     append_menu_item(calib_menu, wxID_ANY, _L("Retraction"), _L("Retraction"),
         [this](wxCommandEvent&) { run_calibration(CalibKind::Retraction); }, "", nullptr,
         [this]() {return m_plater->is_view3D_shown();; }, this);
+
+    // Fan speed (with submenu)
+    auto fan_menu = new wxMenu();
+    append_menu_item(fan_menu, wxID_ANY, _L("Part cooling fan"), _L("Part cooling fan speed tower"),
+        [this](wxCommandEvent&) { run_calibration(CalibKind::PartFan); }, "", nullptr,
+        [this]() {return m_plater->is_view3D_shown(); }, this);
+    append_menu_item(fan_menu, wxID_ANY, _L("Overhang fan"), _L("Overhang fan speed tower"),
+        [this](wxCommandEvent&) { run_calibration(CalibKind::OverhangFan); }, "", nullptr,
+        [this]() {return m_plater->is_view3D_shown(); }, this);
+    append_menu_item(fan_menu, wxID_ANY, _L("Bridge fan"), _L("Bridge fan speed tower"),
+        [this](wxCommandEvent&) { run_calibration(CalibKind::BridgeFan); }, "", nullptr,
+        [this]() {return m_plater->is_view3D_shown(); }, this);
+    append_menu_item(fan_menu, wxID_ANY, _L("Small feature fan"), _L("Small feature fan speed tower"),
+        [this](wxCommandEvent&) { run_calibration(CalibKind::SmallFeatureFan); }, "", nullptr,
+        [this]() {return m_plater->is_view3D_shown(); }, this);
+    calib_menu->AppendSubMenu(fan_menu, _L("Fan speed"));
 
     // Cornering
     append_menu_item(calib_menu, wxID_ANY, _L("Cornering"), _L("Cornering calibration"),
@@ -4654,6 +4686,22 @@ void MainFrame::run_calibration(CalibKind calib_kind)
         if (!m_retraction_calib_dlg)
             m_retraction_calib_dlg = new Retraction_Test_Dlg((wxWindow*) this, wxID_ANY, m_plater);
         m_retraction_calib_dlg->ShowModal();
+        break;
+    }
+    case CalibKind::OverhangFan:
+    case CalibKind::PartFan:
+    case CalibKind::BridgeFan:
+    case CalibKind::SmallFeatureFan: {
+        CalibMode mode = CalibMode::Calib_Overhang_Fan_Tower;
+        switch (calib_kind) {
+        case CalibKind::PartFan:         mode = CalibMode::Calib_Part_Fan_Tower; break;
+        case CalibKind::BridgeFan:       mode = CalibMode::Calib_Bridge_Fan_Tower; break;
+        case CalibKind::SmallFeatureFan: mode = CalibMode::Calib_Small_Feature_Fan_Tower; break;
+        default: break;
+        }
+        auto dlg = new Fan_Tower_Test_Dlg((wxWindow*) this, wxID_ANY, m_plater, mode);
+        dlg->ShowModal();
+        dlg->Destroy();
         break;
     }
     case CalibKind::Cornering: {
