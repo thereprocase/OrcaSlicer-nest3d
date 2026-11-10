@@ -219,8 +219,8 @@ Model make_pressure_advance_pattern_seed()
     Model model;
     auto *cube = model.add_object("Cube", "", make_cube(20., 20., 20.));
     cube->config.set_key_value("extruder", new ConfigOptionInt(1));
-    cube->translate(-cube->raw_bounding_box().center());
     cube->add_instance();
+    cube->translate(-cube->raw_bounding_box().center());
     cube->ensure_on_bed();
     return model;
 }

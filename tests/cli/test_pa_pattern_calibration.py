@@ -27,7 +27,7 @@ def main():
                    '--calibration-accelerations', '1000,2000', '--printable-area', '0x0,80x0,80x80,0x80',
                    '--bed-exclude-area', '', '--slice', '0', '--outputdir', str(output), '--export-3mf', 'pattern.3mf']
         result = subprocess.run(command, capture_output=True, text=True, timeout=300)
-        assert result.returncode == 0, result.stdout[-5000:] + result.stderr[-5000:]
+        assert result.returncode == 0, (result.returncode, result.stdout[-5000:], result.stderr[-5000:])
         with zipfile.ZipFile(output / 'pattern.3mf') as archive:
             settings = ET.fromstring(archive.read('Metadata/model_settings.config'))
             objects = settings.findall('object')
