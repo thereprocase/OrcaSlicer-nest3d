@@ -14,6 +14,11 @@
 #include <algorithm>
 #include <cmath>
 #include <cstddef>
+#include <istream>
+#include <locale>
+#include <sstream>
+#include <string>
+#include <utility>
 #include <stdexcept>
 
 namespace Slic3r {
@@ -26,7 +31,7 @@ const std::vector<CalibrationRecipe> &calibration_recipes()
         {"flow-ratio-yolo", CalibrationGenerator::FlowRatio, true, true, 1},
         {"flow-ratio-yolo-fine", CalibrationGenerator::FlowRatio, true, true, 2},
         {"pressure-advance-line", CalibrationGenerator::PressureAdvance, true, false, 1, CalibMode::Calib_PA_Line},
-        {"pressure-advance-pattern", CalibrationGenerator::PressureAdvance, false},
+        {"pressure-advance-pattern", CalibrationGenerator::PressureAdvance, true, false, 1, CalibMode::Calib_PA_Pattern},
         {"pressure-advance-tower", CalibrationGenerator::PressureAdvance, true, false, 1, CalibMode::Calib_PA_Tower},
         {"temperature", CalibrationGenerator::Temperature, true, false, 1, CalibMode::Calib_Temp_Tower},
         {"max-volumetric-speed", CalibrationGenerator::MaxVolumetricSpeed, true, false, 1, CalibMode::Calib_Vol_speed_Tower},
@@ -56,6 +61,8 @@ std::string calibration_recipe_asset(const CalibrationRecipe &recipe, const Cali
 {
     if (recipe.cli_supported && recipe.generator == CalibrationGenerator::FlowRatio)
         return flow_ratio_calibration_asset(recipe.linear, recipe.pass);
+    if (recipe.cli_supported && recipe.mode == CalibMode::Calib_PA_Pattern)
+        return {}; // The shared pattern generator builds its anchor geometry natively.
     if (recipe.cli_supported && recipe.generator == CalibrationGenerator::PressureAdvance)
         return pressure_advance_calibration_asset(recipe.mode);
     if (recipe.cli_supported && recipe.mode != CalibMode::Calib_None)
@@ -63,7 +70,27 @@ std::string calibration_recipe_asset(const CalibrationRecipe &recipe, const Cali
     throw std::invalid_argument("Native CLI calibration generation is unavailable for " + recipe.name);
 }
 
-Calib_Params apply_calibration_recipe(Model &model, DynamicPrintConfig &config, const CalibrationRecipe &recipe,
+std::vector<double> parse_calibration_values(const std::string &text)
+{
+    std::vector<double> values;
+    if (text.empty())
+        return values;
+    if (text.back() == ',')
+        throw std::invalid_argument("Calibration values must be comma-separated finite numbers");
+    std::istringstream list(text);
+    std::string token;
+    while (std::getline(list, token, ',')) {
+        std::istringstream number(token);
+        number.imbue(std::locale::classic());
+        double value = 0.;
+        if (!(number >> value) || !(number >> std::ws).eof() || !std::isfinite(value))
+            throw std::invalid_argument("Calibration values must be comma-separated finite numbers");
+        values.push_back(value);
+    }
+    return values;
+}
+
+CalibrationResult apply_calibration_recipe(Model &model, DynamicPrintConfig &config, const CalibrationRecipe &recipe,
                                      const std::string &surface_pattern, const Calib_Params &params)
 {
     // Keep dispatch explicit: adding an advertised recipe must also implement its real generator.
@@ -91,7 +118,7 @@ Calib_Params apply_calibration_recipe(Model &model, DynamicPrintConfig &config, 
         if (recipe.generator == CalibrationGenerator::FanTower &&
             (params.end > 100. || params.step != 10. || std::fmod(params.start, 10.) != 0. || std::fmod(params.end, 10.) != 0.))
             throw std::invalid_argument("Fan calibration requires multiples of 10 from 0 to 100 and step 10");
-        if (model.objects.size() != 1 || model.objects.front()->instances.empty())
+        if (recipe.mode != CalibMode::Calib_PA_Pattern && (model.objects.size() != 1 || model.objects.front()->instances.empty()))
             throw std::invalid_argument("Tower calibration requires exactly one stock model with an instance");
         if (params.extruder_id != 0 || !std::isfinite(params.vfa_layer_height) || params.vfa_layer_height < 0.)
             throw std::invalid_argument("CLI tower calibration requires extruder 0 and a nonnegative layer height");
@@ -143,26 +170,37 @@ Calib_Params apply_calibration_recipe(Model &model, DynamicPrintConfig &config, 
         };
         switch (recipe.generator) {
         case CalibrationGenerator::PressureAdvance:
+            if (runtime.mode == CalibMode::Calib_PA_Pattern) {
+                for (const auto *values : {&params.speeds, &params.accelerations})
+                    if (std::any_of(values->begin(), values->end(), [](double value) { return !std::isfinite(value) || value <= 0.; }))
+                        throw std::invalid_argument("PA pattern speeds and accelerations must be positive finite values");
+                configure_pressure_advance_calibration(config, config);
+                const auto plan = configure_pressure_advance_pattern(config, config, config, [&config] { return config; }, runtime);
+                const bool is_bbl = config.opt_string("printer_model").compare(0, 9, "Bambu Lab") == 0;
+                auto layout = build_pressure_advance_pattern(plan, config, runtime, is_bbl);
+                model = std::move(layout.model);
+                return {runtime, std::move(layout.object_plates)};
+            }
             configure_pressure_advance_calibration(config, config);
             if (runtime.mode == CalibMode::Calib_PA_Tower)
-                return apply_pressure_advance_tower_calibration(model, config, config, config, config, runtime, cut);
-            return runtime;
+                return {apply_pressure_advance_tower_calibration(model, config, config, config, config, runtime, cut), {}};
+            return {runtime, {}};
         case CalibrationGenerator::MaxVolumetricSpeed:
-            return apply_max_volumetric_speed_calibration(model, config, config, config, runtime, cut);
+            return {apply_max_volumetric_speed_calibration(model, config, config, config, runtime, cut), {}};
         case CalibrationGenerator::Retraction:
-            return apply_retraction_calibration(model, config, config, config, runtime, cut);
+            return {apply_retraction_calibration(model, config, config, config, runtime, cut), {}};
         case CalibrationGenerator::VFA:
-            return apply_vfa_calibration(model, config, config, config, runtime, cut);
+            return {apply_vfa_calibration(model, config, config, config, runtime, cut), {}};
         case CalibrationGenerator::Temperature:
-            return apply_temperature_calibration(model, config, config, config, runtime, cut);
+            return {apply_temperature_calibration(model, config, config, config, runtime, cut), {}};
         case CalibrationGenerator::FanTower:
-            return apply_fan_tower_calibration(model, config, config, config, runtime, cut);
+            return {apply_fan_tower_calibration(model, config, config, config, runtime, cut), {}};
         case CalibrationGenerator::InputShapingFrequency:
-            return apply_input_shaping_frequency_calibration(model, config, config, config, runtime);
+            return {apply_input_shaping_frequency_calibration(model, config, config, config, runtime), {}};
         case CalibrationGenerator::InputShapingDamping:
-            return apply_input_shaping_damping_calibration(model, config, config, config, runtime);
+            return {apply_input_shaping_damping_calibration(model, config, config, config, runtime), {}};
         case CalibrationGenerator::Cornering:
-            return apply_cornering_calibration(model, config, config, config, runtime);
+            return {apply_cornering_calibration(model, config, config, config, runtime), {}};
         default: throw std::invalid_argument("Native CLI calibration generation is unavailable for " + recipe.name);
         }
     }

@@ -17178,241 +17178,60 @@ void Plater::calib_pa(const Calib_Params& params)
 
 void Plater::_calib_pa_pattern(const Calib_Params& params)
 {
-    std::vector<double> speeds{params.speeds};
-    std::vector<double> accels{params.accelerations};
-    std::vector<size_t> object_idxs{};
-    /* Set common parameters */
-    auto printer_config = &wxGetApp().preset_bundle->printers.get_edited_preset().config;
-    DynamicPrintConfig& print_config = wxGetApp().preset_bundle->prints.get_edited_preset().config;
-    auto filament_config = &wxGetApp().preset_bundle->filaments.get_edited_preset().config;
-    double nozzle_diameter = printer_config->option<ConfigOptionFloats>("nozzle_diameter")->get_at(0);
-    set_config_values<bool, ConfigOptionBoolsNullable>(filament_config, "filament_retract_when_changing_layer", false);
-    set_config_values<bool, ConfigOptionBoolsNullable>(filament_config, "filament_wipe", false);
-    set_config_values<bool, ConfigOptionBools>(printer_config, "wipe", false);
-    set_config_values<bool, ConfigOptionBools>(printer_config, "retract_when_changing_layer", false);
-    printer_config->set_key_value("resonance_avoidance", new ConfigOptionBool(false));
-
-    //Orca: find acceleration to use in the test
-    auto accel = print_config.get_abs_value_at("outer_wall_acceleration", params.extruder_id); // get the outer wall acceleration
-    if (accel == 0) // if outer wall accel isnt defined, fall back to inner wall accel
-        accel = print_config.get_abs_value_at("inner_wall_acceleration", params.extruder_id);
-    if (accel == 0) // if inner wall accel is not defined fall back to default accel
-        accel = print_config.get_abs_value_at("default_acceleration", params.extruder_id);
-    // Orca: Set all accelerations except first layer, as the first layer accel doesnt affect the PA test since accel
-    // is set to the travel accel before printing the pattern.
-    if (accels.empty()) {
-        accels.assign({accel});
-        const auto msg{_L("INFO:") + "\n" +
-                       format_wxstr(_L("No accelerations provided for calibration. Use default acceleration value %1%mm/s²"), long(accel))};
-        get_notification_manager()->push_notification(msg.utf8_string());
-    } else {
-        // set max acceleration in case of batch mode to get correct test pattern size
-        accel = *std::max_element(accels.begin(), accels.end());
-    }
-    set_config_values<double, ConfigOptionFloatsNullable>(&print_config, "outer_wall_acceleration", accel);
-    print_config.set_key_value( "print_sequence", new ConfigOptionEnum(PrintSequence::ByLayer));
-    
-    //Orca: find jerk value to use in the test
-    if(!has_junction_deviation(printer_config) && print_config.get_abs_value_at("default_jerk", params.extruder_id) > 0){ // we have set a jerk value
-        auto jerk = print_config.get_abs_value_at("outer_wall_jerk", params.extruder_id); // get outer wall jerk
-        if (jerk == 0) // if outer wall jerk is not defined, get inner wall jerk
-            jerk = print_config.get_abs_value_at("inner_wall_jerk", params.extruder_id);
-        if (jerk == 0) // if inner wall jerk is not defined, get the default jerk
-            jerk = print_config.get_abs_value_at("default_jerk", params.extruder_id);
-        
-        //Orca: Set jerk values. Again first layer jerk should not matter as it is reset to the travel jerk before the
-        // first PA pattern is printed.
-        set_config_values<double, ConfigOptionFloatsNullable>(&print_config, "default_jerk", jerk);
-        set_config_values<double, ConfigOptionFloatsNullable>(&print_config, "outer_wall_jerk", jerk);
-        set_config_values<double, ConfigOptionFloatsNullable>(&print_config, "inner_wall_jerk", jerk);
-        set_config_values<double, ConfigOptionFloatsNullable>(&print_config, "top_surface_jerk", jerk);
-        set_config_values<double, ConfigOptionFloatsNullable>(&print_config, "infill_jerk", jerk);
-        set_config_values<double, ConfigOptionFloatsNullable>(&print_config, "travel_jerk", jerk);
-    }
-
-    if (has_junction_deviation(printer_config)){
-        set_config_values<double, ConfigOptionFloatsNullable>(&print_config, "default_junction_deviation", 0);
-    }
-    
-    for (const auto& opt : SuggestedConfigCalibPAPattern().floats_pairs) {
-        set_config_values<double, ConfigOptionFloatsNullable>(&print_config, opt.first, opt.second[0]);
-    }
-
-    for (const auto& opt : SuggestedConfigCalibPAPattern().nozzle_ratio_pairs) {
-        print_config.set_key_value(
-            opt.first,
-            new ConfigOptionFloatOrPercent(nozzle_diameter * opt.second / 100, false)
-        );
-    }
-
-    for (const auto& opt : SuggestedConfigCalibPAPattern().int_pairs) {
-        print_config.set_key_value(
-            opt.first,
-            new ConfigOptionInt(opt.second)
-        );
-    }
-
-    print_config.set_key_value(SuggestedConfigCalibPAPattern().brim_pair.first,
-        new ConfigOptionEnum<BrimType>(SuggestedConfigCalibPAPattern().brim_pair.second));
-
-    print_config.set_key_value("enable_wrapping_detection", new ConfigOptionBool(false));
-
-    // Orca: Set the outer wall speed to the optimal speed for the test, cap it with max volumetric speed
-    if (speeds.empty()) {
-        // TODO: per-variant cap
-        double speed = CalibPressureAdvance::find_optimal_PA_speed(
-            wxGetApp().preset_bundle->full_config(),
-            print_config.get_abs_value("line_width", nozzle_diameter),
-            print_config.get_abs_value("layer_height"), 0, 0);
-        set_config_values<double, ConfigOptionFloatsNullable>(&print_config, "outer_wall_speed", speed);
-
-        speeds.assign({speed});
-        const auto msg{_L("INFO:") + "\n" +
-                       format_wxstr(_L("No speeds provided for calibration. Use default optimal speed %1%mm/s"), long(speed))};
-        get_notification_manager()->push_notification(msg.utf8_string());
-    } else if (speeds.size() == 1) {
-        // If we have single value provided, set speed using global configuration.
-        // per-object config is not set in this case
-        set_config_values<double, ConfigOptionFloatsNullable>(&print_config, "outer_wall_speed", speeds.front());
-    }
-
-    wxGetApp().get_tab(Preset::TYPE_PRINT)->update_dirty();
-    wxGetApp().get_tab(Preset::TYPE_FILAMENT)->update_dirty();
-    wxGetApp().get_tab(Preset::TYPE_PRINTER)->update_dirty();
-    wxGetApp().get_tab(Preset::TYPE_PRINT)->reload_config();
-    wxGetApp().get_tab(Preset::TYPE_FILAMENT)->reload_config();
-    wxGetApp().get_tab(Preset::TYPE_PRINTER)->reload_config();
-
-    const DynamicPrintConfig full_config = wxGetApp().preset_bundle->full_config();
-    PresetBundle* preset_bundle = wxGetApp().preset_bundle;
-    const bool is_bbl_machine = preset_bundle->is_bbl_vendor();
-    auto cur_plate = get_partplate_list().get_plate(0);
-
-    // add "handle" cube
-    sidebar().obj_list()->load_generic_subobject("Cube", ModelVolumeType::INVALID, false);
-    auto *cube = model().objects[0];
-
-    CalibPressureAdvancePattern pa_pattern(
-        params,
-        full_config,
-        is_bbl_machine,
-        *cube,
-        cur_plate->get_origin()
-    );
-
-    /* Having PA pattern configured, we could make a set of polygons resembling N test patterns.
-     * We'll arrange this set of polygons, so we would know position of each test pattern and
-     * could position test cubes later on
-     *
-     * We'll take advantage of already existing cube: scale it up to test pattern size to use
-     * as a reference for objects arrangement. Polygon is slightly oversized to add spaces between patterns.
-     * That arrangement will be used to place 'handle cubes' for each test. */
-    auto cube_bb = cube->raw_bounding_box();
-    cube->scale((pa_pattern.print_size_x() + 4) / cube_bb.size().x(),
-                (pa_pattern.print_size_y() + 4) / cube_bb.size().y(),
-                pa_pattern.max_layer_z() / cube_bb.size().z());
-
-    arrangement::ArrangePolygons arranged_items;
-    {
-        arrangement::ArrangeParams ap;
-        Points bedpts = arrangement::get_shrink_bedpts(&full_config, ap);
-
-        for(size_t i = 0; i < speeds.size() * accels.size(); i++) {
-            arrangement::ArrangePolygon p;
-            cube->instances[0]->get_arrange_polygon(&p);
-            p.bed_idx = 0;
-            arranged_items.emplace_back(p);
+    try {
+        auto &bundle = *wxGetApp().preset_bundle;
+        const auto plan = configure_pressure_advance_pattern(bundle.prints.get_edited_preset().config,
+            bundle.filaments.get_edited_preset().config, bundle.printers.get_edited_preset().config,
+            [&bundle] { return bundle.full_config(); }, params);
+        if (plan.default_acceleration_used) {
+            const auto msg{_L("INFO:") + "\n" + format_wxstr(
+                _L("No accelerations provided for calibration. Use default acceleration value %1%mm/s²"), long(plan.accelerations.front()))};
+            get_notification_manager()->push_notification(msg.utf8_string());
         }
-
-        arrangement::arrange(arranged_items, bedpts, ap);
-    }
-
-    /* scale cube back to the size of test pattern 'handle' */
-    cube_bb = cube->raw_bounding_box();
-    cube->scale(pa_pattern.handle_xy_size() / cube_bb.size().x(),
-                pa_pattern.handle_xy_size() / cube_bb.size().y(),
-                pa_pattern.max_layer_z() / cube_bb.size().z());
-
-    /* Set speed and acceleration on per-object basis and arrange anchor object on the plates.
-     * Test gcode will be genecated during plate slicing */
-    for(size_t test_idx = 0; test_idx < arranged_items.size(); test_idx++) {
-        const auto &ai = arranged_items[test_idx];
-        size_t plate_idx = arranged_items[test_idx].bed_idx;
-        auto tspd = speeds[test_idx % speeds.size()];
-        auto tacc = accels[test_idx / speeds.size()];
-
-        /* make an own copy of anchor cube for each test */
-        auto obj = test_idx == 0 ? cube : model().add_object(*cube);
-        auto obj_idx = std::distance(model().objects.begin(), std::find(model().objects.begin(), model().objects.end(), obj));
-        obj->name.assign(std::string("pa_pattern_") + std::to_string(int(tspd)) + std::string("_") + std::to_string(int(tacc)));
-
-        auto &obj_config = obj->config;
-        if (speeds.size() > 1)
-            obj_config.set_key_value("outer_wall_speed", new ConfigOptionFloatsNullable(1, tspd));
-        if (accels.size() > 1)
-            obj_config.set_key_value("outer_wall_acceleration", new ConfigOptionFloatsNullable(1, tacc));
-
-        auto cur_plate = get_partplate_list().get_plate(plate_idx);
-        if (!cur_plate) {
-            plate_idx = get_partplate_list().create_plate();
-            cur_plate = get_partplate_list().get_plate(plate_idx);
+        if (plan.default_speed_used) {
+            const auto msg{_L("INFO:") + "\n" + format_wxstr(
+                _L("No speeds provided for calibration. Use default optimal speed %1%mm/s"), long(plan.speeds.front()))};
+            get_notification_manager()->push_notification(msg.utf8_string());
         }
-
-        object_idxs.emplace_back(obj_idx);
-        get_partplate_list().add_to_plate(obj_idx, 0, plate_idx);
-        const Vec3d obj_offset{unscale<double>(ai.translation(X)),
-                               unscale<double>(ai.translation(Y)),
-                               0};
-        obj->instances[0]->set_offset(cur_plate->get_origin() + obj_offset + pa_pattern.handle_pos_offset());
-        obj->ensure_on_bed();
-
-        if (obj_idx == 0)
-            sidebar().obj_list()->update_name_for_items();
-        else
-            sidebar().obj_list()->add_object_to_list(obj_idx);
+        wxGetApp().get_tab(Preset::TYPE_PRINT)->update_dirty();
+        wxGetApp().get_tab(Preset::TYPE_FILAMENT)->update_dirty();
+        wxGetApp().get_tab(Preset::TYPE_PRINTER)->update_dirty();
+        wxGetApp().get_tab(Preset::TYPE_PRINT)->reload_config();
+        wxGetApp().get_tab(Preset::TYPE_FILAMENT)->reload_config();
+        wxGetApp().get_tab(Preset::TYPE_PRINTER)->reload_config();
+    
+        Plater::TakeSnapshot snapshot(this, _u8L("Add Primitive"));
+        auto layout = build_pressure_advance_pattern(plan, bundle.full_config(), params, bundle.is_bbl_vendor());
+        const size_t plates = *std::max_element(layout.object_plates.begin(), layout.object_plates.end()) + 1;
+        while (get_partplate_list().get_plate_count() < plates) {
+            if (get_partplate_list().create_plate(false) < 0)
+                throw std::invalid_argument(_u8L("Pressure-advance pattern exceeds the supported plate count"));
+        }
+        for (size_t i = 0; i < layout.model.objects.size(); ++i) {
+            auto *object = layout.model.objects[i];
+            object->translate_instances(get_partplate_list().get_plate(layout.object_plates[i])->get_origin());
+        }
+        const auto object_idxs = p->load_model_objects(layout.model.objects, false, false);
+        model().calib_pa_pattern = std::move(layout.model.calib_pa_pattern);
+        get_partplate_list().reload_all_objects();
+        changed_objects(object_idxs);
+    } catch (const std::exception &error) {
+        MessageDialog dialog(this, wxString::FromUTF8(error.what()), _L("Pressure Advance Test"), wxICON_ERROR | wxOK);
+        dialog.ShowModal();
     }
-
-    model().calib_pa_pattern = std::make_unique<CalibPressureAdvancePattern>(pa_pattern);
-    changed_objects(object_idxs);
 }
 
 void Plater::_calib_pa_pattern_gen_gcode()
 {
     if (!model().calib_pa_pattern)
         return;
-
-    auto cur_plate = get_partplate_list().get_curr_plate();
-    if (cur_plate->empty())
+    auto *plate = get_partplate_list().get_curr_plate();
+    if (plate->empty())
         return;
-
-    /* Container to store custom g-codes genereted by the test generator.
-     * We'll store gcode for all tests on a single plate here. Once the plate handling is done,
-     * all the g-codes will be merged into a single one on per-layer basis */
-    std::vector<CustomGCode::Info> mgc;
-    PresetBundle *preset_bundle = wxGetApp().preset_bundle;
-
-    /* iterate over all cubes on current plate and generate gcode for them */
-    for (auto obj : cur_plate->get_objects_on_this_plate()) {
-        auto gcode = model().calib_pa_pattern->generate_custom_gcodes(
-                                preset_bundle->full_config(),
-                                preset_bundle->is_bbl_vendor(),
-                                *obj,
-                                cur_plate->get_origin()
-        );
-        mgc.emplace_back(gcode);
-    }
-
-    // move first item into model custom gcode
-    auto &pcgc = model().plates_custom_gcodes[get_partplate_list().get_curr_plate_index()];
-    pcgc = std::move(mgc[0]);
-    mgc.erase(mgc.begin());
-
-    // concat layer gcodes for each test
-    for (size_t i = 0; i < pcgc.gcodes.size(); i++) {
-        for (auto &gc : mgc) {
-            pcgc.gcodes[i].extra += gc.gcodes[i].extra;
-        }
-    }
+    auto &bundle = *wxGetApp().preset_bundle;
+    model().plates_custom_gcodes[get_partplate_list().get_curr_plate_index()] =
+        generate_pressure_advance_pattern_gcode(*model().calib_pa_pattern, plate->get_objects_on_this_plate(),
+                                               bundle.full_config(), bundle.is_bbl_vendor(), plate->get_origin());
 }
 
 void Plater::cut_horizontal(size_t obj_idx, size_t instance_idx, double z, ModelObjectCutAttributes attributes)

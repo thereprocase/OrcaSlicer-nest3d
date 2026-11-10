@@ -24,6 +24,7 @@
 #include <vector>
 #include "libslic3r/PrintBase.hpp"
 #include "libslic3r/CalibrationRecipe.hpp"
+#include "libslic3r/PressureAdvanceCalibration.hpp"
 #include "libslic3r/calib.hpp"
 #include <boost/date_time/posix_time/posix_time_duration.hpp>
 #include <cerrno>
@@ -50,8 +51,9 @@
 #include "libslic3r/CustomGCode.hpp"
 #include <memory>
 #include <sstream>
-#include <locale>
-#include <istream>
+#include <exception>
+#include <stdexcept>
+#include <cstddef>
 #include <iomanip>
 #include <iterator>
 #include "libslic3r/ClipperUtils.hpp"
@@ -1562,6 +1564,8 @@ int CLI::run(int argc, char **argv)
     }
     const CalibrationRecipe *calibration_recipe = find_calibration_recipe(calibration);
     Calib_Params calibration_params;
+    std::vector<size_t> calibration_object_plates;
+    const bool pa_pattern_calibration = calibration_recipe != nullptr && calibration_recipe->mode == CalibMode::Calib_PA_Pattern;
     if (!calibration.empty()) {
         if (calibration_recipe == nullptr || !calibration_recipe->cli_supported) {
             boost::nowide::cerr << "Unsupported --calibration recipe: " << calibration;
@@ -1599,41 +1603,41 @@ int CLI::run(int argc, char **argv)
             calibration_params.vfa_layer_height = m_config.opt_float("calibration_layer_height");
             calibration_params.test_model = m_config.opt_int("calibration_test_model");
             calibration_params.shaper_type = m_config.opt_string("calibration_shaper");
-            calibration_params.print_numbers = calibration_recipe->mode == CalibMode::Calib_PA_Line &&
-                m_config.opt_int("calibration_print_numbers") != 0;
-            if (frequency || damping) {
-                const std::string text = m_config.opt_string("calibration_frequencies");
-                std::vector<double> values;
-                std::istringstream list(text);
-                std::string token;
-                bool valid = !text.empty() && text.back() != ',';
-                while (std::getline(list, token, ',')) {
-                    std::istringstream number(token);
-                    number.imbue(std::locale::classic());
-                    double value = 0.;
-                    if (!(number >> value) || !(number >> std::ws).eof()) {
-                        valid = false;
-                        break;
+            calibration_params.print_numbers = pa_pattern_calibration || (calibration_recipe->mode == CalibMode::Calib_PA_Line &&
+                m_config.opt_int("calibration_print_numbers") != 0);
+            try {
+                calibration_params.speeds = parse_calibration_values(m_config.opt_string("calibration_speeds"));
+                calibration_params.accelerations = parse_calibration_values(m_config.opt_string("calibration_accelerations"));
+                if (frequency || damping) {
+                    const auto values = parse_calibration_values(m_config.opt_string("calibration_frequencies"));
+                    if ((frequency && values.size() != 2 && values.size() != 4) || (damping && values.size() != 2)) {
+                        boost::nowide::cerr << "Input-shaping frequency requires --calibration-frequencies X_START,X_END[,Y_START,Y_END]; damping requires X,Y" << std::endl;
+                        record_exit_reson(outfile_dir, CLI_INVALID_PARAMS, 0, cli_errors[CLI_INVALID_PARAMS], sliced_info);
+                        flush_and_exit(CLI_INVALID_PARAMS);
                     }
-                    values.push_back(value);
+                    calibration_params.freqStartX = values[0];
+                    if (frequency) {
+                        calibration_params.freqEndX = values[1];
+                        calibration_params.freqStartY = values.size() == 4 ? values[2] : values[0];
+                        calibration_params.freqEndY = values.size() == 4 ? values[3] : values[1];
+                    } else {
+                        calibration_params.freqStartY = values[1];
+                    }
                 }
-                if (!valid || (frequency && values.size() != 2 && values.size() != 4) || (damping && values.size() != 2)) {
-                    boost::nowide::cerr << "Input-shaping frequency requires --calibration-frequencies X_START,X_END[,Y_START,Y_END]; damping requires X,Y" << std::endl;
-                    record_exit_reson(outfile_dir, CLI_INVALID_PARAMS, 0, cli_errors[CLI_INVALID_PARAMS], sliced_info);
-                    flush_and_exit(CLI_INVALID_PARAMS);
-                }
-                calibration_params.freqStartX = values[0];
-                if (frequency) {
-                    calibration_params.freqEndX = values[1];
-                    calibration_params.freqStartY = values.size() == 4 ? values[2] : values[0];
-                    calibration_params.freqEndY = values.size() == 4 ? values[3] : values[1];
-                } else {
-                    calibration_params.freqStartY = values[1];
-                }
+            } catch (const std::exception &error) {
+                boost::nowide::cerr << "Cannot parse calibration values: " << error.what() << std::endl;
+                record_exit_reson(outfile_dir, CLI_INVALID_PARAMS, 0, cli_errors[CLI_INVALID_PARAMS], sliced_info);
+                flush_and_exit(CLI_INVALID_PARAMS);
             }
         }
-        m_input_files.push_back((boost::filesystem::path(resources_dir()) / "calib" /
-                                calibration_recipe_asset(*calibration_recipe, calibration_params)).string());
+        const std::string asset = calibration_recipe_asset(*calibration_recipe, calibration_params);
+        if (!asset.empty())
+            m_input_files.push_back((boost::filesystem::path(resources_dir()) / "calib" / asset).string());
+        if (pa_pattern_calibration && !m_config.opt_string("load_custom_gcodes").empty()) {
+            boost::nowide::cerr << "PA pattern generates its own per-plate custom G-code; --load-custom-gcodes cannot be combined with this recipe" << std::endl;
+            record_exit_reson(outfile_dir, CLI_INVALID_PARAMS, 0, cli_errors[CLI_INVALID_PARAMS], sliced_info);
+            flush_and_exit(CLI_INVALID_PARAMS);
+        }
     }
     bool start_gui = m_actions.empty() && !downward_check;
     if (start_gui) {
@@ -2280,7 +2284,10 @@ int CLI::run(int argc, char **argv)
         m_models.push_back(std::move(model));
     }
 
-    if (!is_bbl_3mf && plate_to_slice > 0)
+    if (pa_pattern_calibration)
+        m_models.emplace_back(make_pressure_advance_pattern_seed());
+
+    if (!is_bbl_3mf && plate_to_slice > 0 && !pa_pattern_calibration)
     {
         BOOST_LOG_TRIVIAL(warning) << boost::format("%1%: not support to slice plate %2%, reset to 0")%__LINE__ %plate_to_slice;
         plate_to_slice = 0;
@@ -4442,9 +4449,12 @@ int CLI::run(int argc, char **argv)
             DynamicPrintConfig effective = DynamicPrintConfig::full_print_config();
             effective.apply(m_print_config);
             const DynamicPrintConfig before_recipe = effective;
-            for (Model &model : m_models)
-                calibration_params = apply_calibration_recipe(model, effective, *calibration_recipe,
+            for (Model &model : m_models) {
+                auto result = apply_calibration_recipe(model, effective, *calibration_recipe,
                     m_config.opt_string("calibration_pattern"), calibration_params);
+                calibration_params = std::move(result.params);
+                calibration_object_plates = std::move(result.object_plates);
+            }
             // Record recipe changes through the existing preset-override metadata too. Otherwise
             // reopening a project can restore the system preset's cooling, temperatures or speeds.
             for (const std::string &key : effective.keys()) {
@@ -5028,6 +5038,30 @@ int CLI::run(int argc, char **argv)
             const Vec3d &instance_offset = model_instance->get_offset();
             BOOST_LOG_TRIVIAL(info) << boost::format("instance %1% transform {%2%,%3%,%4%} at %5%:%6%")% model_object->name % instance_offset.x() % instance_offset.y() %instance_offset.z() % __FUNCTION__ % __LINE__<< std::endl;
         }*/
+
+    if (pa_pattern_calibration) {
+        try {
+            if (calibration_object_plates.size() != m_models.front().objects.size() || calibration_object_plates.empty())
+                throw std::invalid_argument("PA pattern has no valid native plate layout");
+            const size_t plate_count = *std::max_element(calibration_object_plates.begin(), calibration_object_plates.end()) + 1;
+            partplate_list.reset_size(current_printable_width, current_printable_depth, current_printable_height, false);
+            partplate_list.set_filament_count(filament_count);
+            while (size_t(partplate_list.get_plate_count()) < plate_count)
+                if (partplate_list.create_plate(false) < 0)
+                    throw std::invalid_argument("PA pattern exceeds the supported plate count");
+            for (size_t i = 0; i < calibration_object_plates.size(); ++i)
+                m_models.front().objects[i]->translate_instances(partplate_list.get_plate(calibration_object_plates[i])->get_origin());
+            partplate_list.reload_all_objects();
+            plate_obj_size_infos.resize(plate_count, plate_obj_size_info_t());
+            for (size_t i = 0; i < plate_count; ++i)
+                check_plate_wipe_tower(partplate_list.get_plate(i), i, m_print_config, plate_obj_size_infos[i]);
+            need_arrange = false; // The shared generator arranged full pattern footprints, rather than the small anchor cubes.
+        } catch (const std::exception &error) {
+            boost::nowide::cerr << "Cannot place PA pattern: " << error.what() << std::endl;
+            record_exit_reson(outfile_dir, CLI_INVALID_PARAMS, 0, cli_errors[CLI_INVALID_PARAMS], sliced_info);
+            flush_and_exit(CLI_INVALID_PARAMS);
+        }
+    }
 
     //doing downward_check
     std::vector<printer_plate_info_t> downward_check_printers;
@@ -5664,7 +5698,7 @@ int CLI::run(int argc, char **argv)
     oriented_or_arranged |= need_arrange;
 
     BOOST_LOG_TRIVIAL(info) << boost::format("before arrange, need_arrange=%1%, duplicate_count %2%, filament_color_changed %3%")%need_arrange %duplicate_count %filament_color_changed;
-    if (need_arrange || filament_color_changed)
+    if ((need_arrange || filament_color_changed) && !pa_pattern_calibration)
     {
         for (int index = 0; index < partplate_list.get_plate_count(); index ++)
         {
@@ -7374,12 +7408,6 @@ int CLI::run(int argc, char **argv)
                             ConfigOptionEnumsGeneric* final_nozzle_volume_type_opt = new_print_config.option<ConfigOptionEnumsGeneric>("nozzle_volume_type", true);
                             final_nozzle_volume_type_opt->values.resize(new_extruder_count, nvtStandard);
                         }
-                        print->apply(model, new_print_config);
-                        if (!calibration.empty())
-                            print_fff->set_calib_params(calibration_params);
-                        BOOST_LOG_TRIVIAL(info) << boost::format("set no_check to %1%:")%no_check;
-                        print->set_no_check_flag(no_check);//BBS
-
                         // Set is_BBL_printer flag before validation as the validation depends on it.
                         std::string& printer_model_string = new_print_config.opt_string("printer_model", true);
                         bool is_bbl_vendor_preset = false;
@@ -7395,6 +7423,25 @@ int CLI::run(int argc, char **argv)
                                 is_bbl_vendor_preset = (current_printer_system_name.compare(0, 9, "Bambu Lab") == 0);
                             BOOST_LOG_TRIVIAL(info) << boost::format("new_printer_name: %1%, current_printer_system_name %2%, is_bbl_vendor_preset %3%")%new_printer_name %current_printer_system_name %is_bbl_vendor_preset;
                         }
+                        if (pa_pattern_calibration) {
+                            try {
+                                if (!model.calib_pa_pattern)
+                                    throw std::invalid_argument("PA pattern generator is missing");
+                                model.plates_custom_gcodes[index] = generate_pressure_advance_pattern_gcode(
+                                    *model.calib_pa_pattern, part_plate->get_objects_on_this_plate(),
+                                    new_print_config, is_bbl_vendor_preset, part_plate->get_origin());
+                            } catch (const std::exception &error) {
+                                boost::nowide::cerr << "Cannot generate PA pattern G-code: " << error.what() << std::endl;
+                                record_exit_reson(outfile_dir, CLI_INVALID_PARAMS, index + 1, cli_errors[CLI_INVALID_PARAMS], sliced_info);
+                                flush_and_exit(CLI_INVALID_PARAMS);
+                            }
+                        }
+                        print->apply(model, new_print_config);
+                        if (!calibration.empty())
+                            print_fff->set_calib_params(calibration_params);
+                        BOOST_LOG_TRIVIAL(info) << boost::format("set no_check to %1%:")%no_check;
+                        print->set_no_check_flag(no_check);//BBS
+
                         (dynamic_cast<Print*>(print))->is_BBL_printer() = is_bbl_vendor_preset;
 
                         std::vector<StringObjectException> warnings;

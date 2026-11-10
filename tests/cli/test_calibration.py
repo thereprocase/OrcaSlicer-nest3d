@@ -58,6 +58,12 @@ def main():
         return 77
     with tempfile.TemporaryDirectory(prefix='orca-cli-calibration-') as directory:
         root = Path(directory)
+        listing = subprocess.run([str(args.binary), '--datadir', str(root / 'list-data'), '--calibration', 'list'],
+                                 capture_output=True, text=True, timeout=30)
+        assert listing.returncode == 0, listing.stdout[-2000:] + listing.stderr[-2000:]
+        catalogue = json.loads(listing.stdout)
+        assert len(catalogue) == 18, catalogue
+        assert all(recipe['cli_supported'] for recipe in catalogue), catalogue
         for recipe in ('flow-ratio', 'flow-ratio-fine', 'flow-ratio-yolo', 'flow-ratio-yolo-fine'):
             output = root / recipe
             output.mkdir()

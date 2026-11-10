@@ -3,6 +3,7 @@
 #include "calib.hpp"
 
 #include <string>
+#include <cstddef>
 #include <vector>
 
 namespace Slic3r {
@@ -29,8 +30,13 @@ struct CalibrationRecipe {
 const std::vector<CalibrationRecipe> &calibration_recipes();
 const CalibrationRecipe *find_calibration_recipe(const std::string &name);
 std::string calibration_recipe_asset(const CalibrationRecipe &recipe, const Calib_Params &params = Calib_Params{});
-Calib_Params apply_calibration_recipe(Model &model, DynamicPrintConfig &config, const CalibrationRecipe &recipe,
-                                     const std::string &surface_pattern = "archimedeanchords",
-                                     const Calib_Params &params = Calib_Params{});
+struct CalibrationResult {
+    Calib_Params params;
+    std::vector<std::size_t> object_plates;
+};
+std::vector<double> parse_calibration_values(const std::string &text);
+CalibrationResult apply_calibration_recipe(Model &model, DynamicPrintConfig &config, const CalibrationRecipe &recipe,
+                                          const std::string &surface_pattern = "archimedeanchords",
+                                          const Calib_Params &params = Calib_Params{});
 
 } // namespace Slic3r

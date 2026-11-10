@@ -1,5 +1,6 @@
 #include "libslic3r/FlowRatioCalibration.hpp"
 #include "libslic3r/CalibrationRecipe.hpp"
+#include "libslic3r/calib.hpp"
 #include <set>
 #include "libslic3r/Flow.hpp"
 #include "libslic3r/Model.hpp"
@@ -94,20 +95,22 @@ TEST_CASE("Flow calibration rejects invalid names and ranges before changing the
     CHECK_THROWS_AS(plan_flow_ratio_calibration(config, false, 1), std::invalid_argument);
 }
 
-TEST_CASE("The calibration catalogue reports GUI-only recipes without substituting flow tests", "[FlowRatioCalibration]")
+TEST_CASE("The calibration catalogue selects a native generator for every menu recipe", "[FlowRatioCalibration]")
 {
     std::set<std::string> names;
     size_t supported = 0;
     for (const auto &recipe : calibration_recipes()) {
         CHECK(names.insert(recipe.name).second);
+        CHECK(recipe.cli_supported);
         if (recipe.cli_supported) {
             ++supported;
-            CHECK_FALSE(calibration_recipe_asset(recipe).empty());
+            if (recipe.mode == CalibMode::Calib_PA_Pattern)
+                CHECK(calibration_recipe_asset(recipe).empty());
+            else
+                CHECK_FALSE(calibration_recipe_asset(recipe).empty());
         }
     }
-    CHECK(supported == 17);
-    REQUIRE(find_calibration_recipe("pressure-advance-pattern") != nullptr);
-    CHECK_FALSE(find_calibration_recipe("pressure-advance-pattern")->cli_supported);
+    CHECK(supported == 18);
     CHECK(find_calibration_recipe("not-a-calibration") == nullptr);
 }
 

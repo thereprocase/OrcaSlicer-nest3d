@@ -13179,6 +13179,16 @@ CLIMiscConfigDef::CLIMiscConfigDef()
     def->min = 0.;
     def->set_default_value(new ConfigOptionFloat(0.));
 
+    def = this->add("calibration_speeds", coString);
+    def->label = L("Calibration pattern speeds");
+    def->tooltip = L("Comma-separated PA pattern speeds in mm/s. Empty uses the GUI optimal-speed calculation.");
+    def->set_default_value(new ConfigOptionString(""));
+
+    def = this->add("calibration_accelerations", coString);
+    def->label = L("Calibration pattern accelerations");
+    def->tooltip = L("Comma-separated PA pattern accelerations in mm/s². Empty uses the GUI acceleration fallback.");
+    def->set_default_value(new ConfigOptionString(""));
+
     def = this->add("calibration_print_numbers", coInt);
     def->label = L("Calibration line numbers");
     def->tooltip = L("Print pressure-advance values beside the PA line test (1), or omit the labels (0).");

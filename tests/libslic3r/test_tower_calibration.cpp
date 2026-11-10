@@ -52,7 +52,7 @@ TEST_CASE("Retraction calibration cuts its ramp and chooses nozzle dependent lay
     request.start = 0.2;
     request.end = 1.2;
     request.step = 0.2;
-    const auto runtime = apply_calibration_recipe(model, config, *find_calibration_recipe("retraction"), "archimedeanchords", request);
+    const auto runtime = apply_calibration_recipe(model, config, *find_calibration_recipe("retraction"), "archimedeanchords", request).params;
     const double height = nozzle <= 0.1 ? 0.05 : nozzle <= 0.2 ? 0.1 : 0.2;
     REQUIRE(model.objects.size() == 1);
     const auto &object = *model.objects.front();
@@ -78,7 +78,7 @@ TEST_CASE("Volumetric calibration converts the requested ramp using its actual t
     request.start = 4.;
     request.end = 8.;
     request.step = 1.;
-    const auto runtime = apply_calibration_recipe(model, config, *find_calibration_recipe("max-volumetric-speed"), "archimedeanchords", request);
+    const auto runtime = apply_calibration_recipe(model, config, *find_calibration_recipe("max-volumetric-speed"), "archimedeanchords", request).params;
     REQUIRE(model.objects.size() == 1);
     const auto &object = *model.objects.front();
     CHECK_THAT(object.bounding_box_exact().size().x(), WithinAbs(25., 1e-5));
@@ -106,7 +106,7 @@ TEST_CASE("VFA calibration preserves the layer count of each speed block when re
     request.step = 30.;
     request.vfa_layer_height = 0.25;
     request.nozzle_based_resize = resize;
-    const auto runtime = apply_calibration_recipe(model, config, *find_calibration_recipe("vfa"), "archimedeanchords", request);
+    const auto runtime = apply_calibration_recipe(model, config, *find_calibration_recipe("vfa"), "archimedeanchords", request).params;
     REQUIRE(model.objects.size() == 1);
     const auto &object = *model.objects.front();
     CHECK_THAT(object.bounding_box_exact().size().x(), WithinAbs(resize ? 60. : 40., 1e-5));
@@ -136,7 +136,7 @@ TEST_CASE("The CLI tower dispatcher and GUI shared routine produce identical ret
     request.step = 0.25;
     const auto gui_runtime = apply_retraction_calibration(gui_model, print, filament, printer, request,
         [&gui_model](double z, ModelObjectCutAttributes attributes) { cut_calibration_model(gui_model, z, attributes); });
-    const auto cli_runtime = apply_calibration_recipe(cli_model, cli_config, *find_calibration_recipe("retraction"), "archimedeanchords", request);
+    const auto cli_runtime = apply_calibration_recipe(cli_model, cli_config, *find_calibration_recipe("retraction"), "archimedeanchords", request).params;
     CHECK(gui_runtime.mode == cli_runtime.mode);
     CHECK_THAT(gui_runtime.step, WithinAbs(cli_runtime.step, 1e-8));
     CHECK_THAT(gui_model.objects.front()->bounding_box_exact().size().z(), WithinAbs(cli_model.objects.front()->bounding_box_exact().size().z(), 1e-8));
@@ -171,7 +171,7 @@ TEST_CASE("Temperature calibration cuts the labelled blocks and initializes the 
     request.start = 260.;
     request.end = 250.;
     request.step = 5.;
-    const auto runtime = apply_calibration_recipe(model, config, *find_calibration_recipe("temperature"), "archimedeanchords", request);
+    const auto runtime = apply_calibration_recipe(model, config, *find_calibration_recipe("temperature"), "archimedeanchords", request).params;
     REQUIRE(model.objects.size() == 1);
     const auto &object = *model.objects.front();
     CHECK_THAT(object.bounding_box_exact().size().z(), WithinAbs((30. - 2 * EPSILON) * 1.5, 1e-4));
@@ -197,7 +197,7 @@ TEST_CASE("Fan calibration preserves each fan mode and enables its required over
     request.step = 10.;
     const auto *entry = find_calibration_recipe(recipe);
     REQUIRE(entry != nullptr);
-    const auto runtime = apply_calibration_recipe(model, config, *entry, "archimedeanchords", request);
+    const auto runtime = apply_calibration_recipe(model, config, *entry, "archimedeanchords", request).params;
     REQUIRE(model.objects.size() == 1);
     const auto &object = *model.objects.front();
     CHECK_THAT(object.bounding_box_exact().size().z(), WithinAbs(30. - 2 * EPSILON, 1e-5));
@@ -227,7 +227,7 @@ TEST_CASE("Motion calibration shares the GUI cooling and pressure advance setup 
     request.freqStartY = 50.;
     request.freqEndX = 60.;
     request.freqEndY = 70.;
-    const auto runtime = apply_calibration_recipe(model, config, *find_calibration_recipe(recipe), "archimedeanchords", request);
+    const auto runtime = apply_calibration_recipe(model, config, *find_calibration_recipe(recipe), "archimedeanchords", request).params;
     CHECK(runtime.mode == find_calibration_recipe(recipe)->mode);
     CHECK_FALSE(config.opt_bool("resonance_avoidance"));
     CHECK_THAT(config.option<ConfigOptionFloats>("slow_down_layer_time")->get_at(0), WithinAbs(0., 1e-8));
