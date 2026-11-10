@@ -268,3 +268,132 @@ python3 tests/cli-agent/test_agent_cli.py -k bridge
 The connection is verified: a bridge with a self-signed certificate is refused unless that
 certificate (or its CA) is passed with `--bridge-ca-file PATH`. `--bridge-insecure` skips the checks;
 anyone able to intercept the connection could then read the token.
+
+## Calibration recipes
+
+`--calibration` invokes the same native generation and settings recipes used by the GUI Calibration
+menu. Flow and tower tests load their shipped models; PA pattern builds its anchors and toolpaths natively. It accepts `flow-ratio` (classic pass 1), `flow-ratio-fine` (classic pass 2),
+`flow-ratio-yolo`, and `flow-ratio-yolo-fine`. Supply printer, process and filament profiles as usual;
+exactly one filament profile is required, and no input mesh is accepted. Exporting a project is required, and slicing is optional:
+
+```bash
+orca-slicer --datadir DATA \
+  --load-settings 'machine.json;process.json' --load-filaments filament.json \
+  --calibration flow-ratio --slice 0 --export-3mf flow.3mf --outputdir OUT
+```
+
+The flow dialog defaults to YOLO; choose `flow-ratio-yolo` to match that selection.
+`--calibration-pattern archimedeanchords` (default) or `monotonic` reproduces the dialog's two surface choices.
+
+The selected recipe overrides the same process/object fields as the GUI: Archimedean-chords top
+surfaces, calibration-specific fill order, per-surface centering, shell and infill setup, widths,
+no ironing or scarf seams, and common flow-limited top/solid speeds. Object names select the patch
+modifiers. Classic modifiers multiply the current filament flow ratio; YOLO modifiers add to it.
+The material temperatures, pressure advance and base flow ratio remain those of the loaded profile.
+No cloud profiles or printer settings are changed.
+
+Nozzle scaling uses the same ten-layer target as the GUI. Arrangement may be requested, but rotation,
+other geometry transforms, and extra input models are rejected. CLI-only retraction guards are not
+implicitly enabled on calibration jobs; explicit guard flags remain available.
+
+The flat-bed tower recipes `temperature`, `max-volumetric-speed`, `retraction`, `vfa`,
+`overhang-fan`, `part-fan`, `bridge-fan`, `small-feature-fan`, `cornering`,
+`input-shaping-frequency` and `input-shaping-damping` use the same native tower
+functions as their GUI menu entries. Those functions own model cutting, nozzle scaling,
+recipe settings and conversion of user values to the slicer's runtime `Calib_Params`.
+Both frontends select stock assets through `tower_calibration_asset`; the GUI retains its
+scene updates and belt handling around these shared routines. The GUI resolves its edited preset
+variants after recipe changes; the CLI supplies its current merged effective configuration. A future change to a shared
+routine therefore reaches both callers. This does not guarantee compatibility with an
+arbitrary upstream merge: the runtime G-code tests and caller wiring still need review.
+
+Tower jobs require `--slice`, `--export-3mf` and one filament profile. Discrete towers require explicit
+`--calibration-start`, `--calibration-end` and `--calibration-step`. For example:
+
+```sh
+orca-slicer --load-settings 'MACHINE.json;PROCESS.json' --load-filaments FILAMENT.json \
+  --calibration retraction --calibration-start 0.2 --calibration-end 1.0 \
+  --calibration-step 0.2 --slice 0 --export-3mf retraction.3mf --outputdir OUT
+```
+
+| Recipe | Range units and constraints |
+|---|---|
+| `temperature` | Descending temperatures in °C, multiples of 5 from 155 to 500; step 5 |
+| `max-volumetric-speed` | Increasing flow in mm³/s; positive step |
+| `retraction` | Increasing retraction length in mm; positive step |
+| `vfa` | Increasing wall speed in mm/s; positive step |
+| Four fan recipes | Increasing percentages from 0 to 100, multiples of 10; step 10 |
+
+`--calibration-resize 1` (default) scales temperature, fan and VFA towers for the nozzle.
+`--calibration-resize 0` retains the reference geometry and preset layer height, as the
+underlying GUI tower helper does when resizing is disabled. VFA additionally accepts
+`--calibration-layer-height MM` (zero defaults to nozzle diameter / 2). With resizing enabled, VFA model
+blocks retain 25 layers per speed block. Other towers retain the GUI's
+existing height/ramp formulas, including their end-band behavior.
+
+`pressure-advance-line` and `pressure-advance-tower` share the GUI's common PA settings and stock
+model selection. The tower also shares its wall-speed calculation, shell/brim setup and height cut.
+Both require an increasing PA start/end range and positive step. The slicer's existing PA line and
+per-layer tower generators emit the actual pressure-advance commands. `--calibration-print-numbers 1`
+(default) includes the PA line labels; `0` omits them. The line generator retains the GUI's bed-height
+limit on the number of printed lines.
+
+`pressure-advance-pattern` uses the same native batch recipe as the GUI. Optional
+`--calibration-speeds 30,60` and `--calibration-accelerations 1000,2000` generate the Cartesian product
+of speeds and accelerations. Empty lists use the GUI's optimal-speed calculation and acceleration
+fallback. Values must be positive finite numbers. The shared arranger reserves the complete pattern
+footprint, creates as many plates as needed and places a small anchor cube for each test. Generic CLI
+arrangement is skipped for this recipe so it cannot pack the anchors closer than their patterns.
+The CLI regenerates the same custom G-code as the GUI from the actual objects on each plate, with that
+plate's origin. The exported project includes the resulting per-layer custom events. An additional
+`--load-custom-gcodes` file is rejected because this generator owns those events.
+
+Cornering and input shaping support the same Klipper, Marlin 2 and RepRapFirmware writers as the GUI.
+They continuously interpolate across layers; `--calibration-step` is unused. Cornering requires start/end
+values (jerk/square-corner velocity, or Marlin junction deviation when configured). Input-shaping damping
+requires start/end damping ratios in [0, 1] and `--calibration-frequencies X,Y` for fixed frequencies in Hz.
+Input-shaping frequency accepts `--calibration-frequencies X_START,X_END,Y_START,Y_END`, or two values
+for equal X/Y ramps; `--calibration-start` sets its fixed damping ratio. Frequencies must lie in [0, 500].
+RepRapFirmware requires equal X/Y frequencies. `--calibration-shaper NAME` selects from the GUI's
+shared firmware-specific shaper list; omission selects the first GUI choice.
+
+`--calibration-test-model 0` selects the ringing tower and `1` the fast tower for these three motion tests.
+Cornering also accepts `2` for its SCV model. Firmware, shaper and model combinations are checked before
+recipe mutation. For example:
+
+```sh
+orca-slicer --load-settings 'KLIPPER_MACHINE.json;PROCESS.json' --load-filaments FILAMENT.json \
+  --calibration input-shaping-frequency --calibration-start 0.1 \
+  --calibration-frequencies 30,60,40,80 --calibration-shaper MZV \
+  --calibration-test-model 1 --slice 0 --export-3mf shaping.3mf --outputdir OUT
+```
+
+Runtime calibration modes belong to `Print`, and upstream project serialization does not
+preserve them for reslicing a reopened project. The exported sliced 3MF contains the actual
+calibration G-code; rerun the calibration command to regenerate it. Reopening the project and
+slicing it as an ordinary project does not reproduce the calibration mode. Recipe setting changes use the existing preset override metadata so their values survive reopening.
+No profile or project-format keys are added for the runtime requests.
+
+Belt counterrotation/support wedges and belt sectioned temperature tests remain GUI-only generators. Unsupported recipe names fail without
+exporting a substitute test. Hardware-driven automatic calibrations are separate from model generation.
+
+`--calibration list` emits a JSON catalogue of the GUI recipes and whether this CLI can generate each
+one. The shared dispatcher rejects a known but unimplemented generator explicitly. The current GUI
+entrypoint map is:
+
+| Recipes | GUI generator | Additional inputs / behavior beyond loading an asset |
+|---|---|---|
+| Four flow-ratio recipes | `adjust_settings_for_flowrate_calib` | Shared native recipe, nozzle scaling, labelled percentage/additive patch factors |
+| PA line and tower | `Plater::calib_pa` | Shared common settings and stock assets; shared tower speed/cut recipe; native PA G-code and line labels |
+| PA pattern | `Plater::_calib_pa_pattern` | Shared batch speed/acceleration settings, full-footprint native layout and per-plate custom G-code regeneration |
+| Temperature | `Plater::calib_temp` | Shared flat-bed tower blocks and runtime parameters; belt uses sectioned objects/events |
+| Maximum volumetric speed | `Plater::calib_max_vol_speed` | Shared thick-line/spiral setup, bed-aware scaling, tower cut and volume-to-speed conversion |
+| Retraction | `Plater::calib_retraction` | Shared nozzle-dependent layers, firmware-retraction disable and tower cut |
+| VFA | `Plater::calib_VFA` | Shared layer-height resolution, nozzle scaling, layer-count blocks and slowdown/spiral setup |
+| Cornering | `Plater::Calib_Cornering` | Shared model choice and firmware-specific motion setup, continuous runtime ramp |
+| Input-shaping frequency/damping | `Plater::calib_input_shaping_freq` / `calib_input_shaping_damp` | Shared model choice, motion setup and firmware-specific shaper choices, per-axis runtime ramps |
+| Four fan towers | `Plater::calib_fan_tower` | Shared tower cutting/nozzle resize, overhang classification overrides and runtime cooling parameters |
+
+The menu dispatch lives in `MainFrame::run_calibration`; recipe geometry/configuration lives in
+`Plater.cpp`, `FlowRatioCalibration.cpp` and `TowerCalibration.cpp`. Tower `Calib_Params` also drive the G-code writer and cooling buffer. Loading the model
+or storing only visible settings does not reproduce those runtime modes.

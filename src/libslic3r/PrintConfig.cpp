@@ -13141,6 +13141,78 @@ CLIMiscConfigDef::CLIMiscConfigDef()
 {
     ConfigOptionDef* def;
 
+    def = this->add("calibration", coString);
+    def->label = L("Calibration recipe");
+    def->tooltip = L("Generate a stock calibration model with the same settings recipe as the GUI. Use list to show GUI recipes and native CLI support. Use loaded printer, process and filament presets with --export-3mf. Tower recipes also require --slice and explicit calibration range options. Extra input models are not accepted.");
+    def->set_default_value(new ConfigOptionString(""));
+
+    def = this->add("calibration_pattern", coString);
+    def->label = L("Calibration surface pattern");
+    def->tooltip = L("Top surface pattern for flow-ratio calibration: archimedeanchords (GUI default) or monotonic.");
+    def->set_default_value(new ConfigOptionString("archimedeanchords"));
+
+    def = this->add("calibration_start", coFloat);
+    def->label = L("Calibration start");
+    def->tooltip = L("Starting value for the calibration tower, in the units of the selected test.");
+    def->set_default_value(new ConfigOptionFloat(0.));
+
+    def = this->add("calibration_end", coFloat);
+    def->label = L("Calibration end");
+    def->tooltip = L("Ending value for the calibration tower, in the units of the selected test.");
+    def->set_default_value(new ConfigOptionFloat(1.));
+
+    def = this->add("calibration_step", coFloat);
+    def->label = L("Calibration step");
+    def->tooltip = L("Positive increment for the calibration tower, in the units of the selected test.");
+    def->set_default_value(new ConfigOptionFloat(0.1));
+
+    def = this->add("calibration_resize", coInt);
+    def->label = L("Calibration nozzle resize");
+    def->tooltip = L("Scale VFA, temperature and fan towers to the nozzle diameter (1), or retain the reference model and preset layer height (0).");
+    def->min = 0;
+    def->max = 1;
+    def->set_default_value(new ConfigOptionInt(1));
+
+    def = this->add("calibration_layer_height", coFloat);
+    def->label = L("Calibration layer height");
+    def->tooltip = L("VFA layer height in millimeters when resizing is enabled. Zero uses half the nozzle diameter.");
+    def->min = 0.;
+    def->set_default_value(new ConfigOptionFloat(0.));
+
+    def = this->add("calibration_speeds", coString);
+    def->label = L("Calibration pattern speeds");
+    def->tooltip = L("Comma-separated PA pattern speeds in mm/s. Empty uses the GUI optimal-speed calculation.");
+    def->set_default_value(new ConfigOptionString(""));
+
+    def = this->add("calibration_accelerations", coString);
+    def->label = L("Calibration pattern accelerations");
+    def->tooltip = L("Comma-separated PA pattern accelerations in mm/s². Empty uses the GUI acceleration fallback.");
+    def->set_default_value(new ConfigOptionString(""));
+
+    def = this->add("calibration_print_numbers", coInt);
+    def->label = L("Calibration line numbers");
+    def->tooltip = L("Print pressure-advance values beside the PA line test (1), or omit the labels (0).");
+    def->min = 0;
+    def->max = 1;
+    def->set_default_value(new ConfigOptionInt(1));
+
+    def = this->add("calibration_test_model", coInt);
+    def->label = L("Calibration model variant");
+    def->tooltip = L("Input shaping: ringing tower (0) or fast tower (1). Cornering also accepts the SCV model (2).");
+    def->min = 0;
+    def->max = 2;
+    def->set_default_value(new ConfigOptionInt(0));
+
+    def = this->add("calibration_shaper", coString);
+    def->label = L("Calibration input shaper");
+    def->tooltip = L("Input shaper name from the firmware-specific GUI choices. Empty uses the first GUI choice.");
+    def->set_default_value(new ConfigOptionString(""));
+
+    def = this->add("calibration_frequencies", coString);
+    def->label = L("Calibration frequencies");
+    def->tooltip = L("Frequency test: X start, X end, optionally Y start and Y end, in Hz. Damping test: fixed X and Y frequencies. Separate values with commas.");
+    def->set_default_value(new ConfigOptionString(""));
+
     def = this->add("retraction_guard", coInt);
     def->label = L("CLI retraction guard");
     def->tooltip = L("Enable local CLI defaults for travel retraction protection (1), or use the supplied profiles without those defaults (0). Explicit retraction flags override individual defaults. GUI defaults are unchanged.");

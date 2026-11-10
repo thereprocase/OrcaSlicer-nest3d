@@ -1134,7 +1134,6 @@ private:
     void _calib_pa_tower(const Calib_Params& params);
     void _calib_pa_select_added_objects();
     void _calib_apply_belt_mode();
-    bool _add_tower_blocks(const std::string& asset, double bottom_z, double top_z, const Calib_Params& params);
     void _calib_temp_belt_sectioned(const Calib_Params& params, double belt_angle_rad);
 
     void cut_horizontal(size_t obj_idx, size_t instance_idx, double z, ModelObjectCutAttributes attributes);
