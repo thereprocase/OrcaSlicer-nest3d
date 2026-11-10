@@ -3,9 +3,13 @@ add_executable(${_TEST_NAME}_tests
 	${_TEST_NAME}_tests.cpp
 	test_helpers.cpp
 	test_helpers.hpp
+	test_adaptive_pressure_advance.cpp
+	test_calib.cpp
 	test_cooling.cpp
 	test_extrusion_entity.cpp
 	test_extrusion_processor.cpp
+	test_exclusion_volumes.cpp
+	test_fan_mover.cpp
 	test_fill.cpp
 	test_morphing_spiral.cpp
 	test_flow.cpp
@@ -22,6 +26,7 @@ add_executable(${_TEST_NAME}_tests
 	test_multifilament.cpp
 	test_nest3d_support.cpp
 	test_start_gcode_extrusion.cpp
+	test_multimaterial_segmentation.cpp
 	test_perimeters.cpp
 	test_staggered_perimeters.cpp
 	# Seam geometry and pipeline regressions share the existing Print fixtures.
@@ -33,6 +38,7 @@ add_executable(${_TEST_NAME}_tests
 	test_skirt_brim.cpp
 	test_slicing_pipeline_hook.cpp
 	test_support_interface_batch.cpp
+	test_spiral_vase.cpp
 	test_support_material.cpp
 	test_texture_displacement.cpp
 	test_tree_support.cpp
@@ -41,6 +47,10 @@ add_executable(${_TEST_NAME}_tests
 	test_wipe_tower.cpp
 	)
 target_link_libraries(${_TEST_NAME}_tests test_common libslic3r Catch2::Catch2WithMain)
+if (SLIC3R_PCH AND NOT SLIC3R_SYNTAXONLY)
+    add_precompiled_header(${_TEST_NAME}_tests ${CMAKE_SOURCE_DIR}/src/libslic3r/pchheader.hpp FORCEINCLUDE)
+endif ()
+
 set_property(TARGET ${_TEST_NAME}_tests PROPERTY FOLDER "tests")
 
 orcaslicer_copy_test_dlls()

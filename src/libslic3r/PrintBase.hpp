@@ -70,6 +70,7 @@ public:
         SlicingNeedSupportOn,
         SlicingEmptyGcodeLayers,
         SlicingGcodeOverlap,
+        SlicingExclusionVolumeToolpath,
         SlicingPreciseSeamWarning,
         // Orca: islands where the morphing spiral fell back to Spiral Inset. A dedicated id keeps one
         // updatable warning per object and lets the CLI record it (it skips default notifications).
@@ -624,6 +625,10 @@ protected:
         { return m_state.invalidate_multiple(il.begin(), il.end(), this->cancel_callback()); }
     bool            invalidate_all_steps()
         { return m_state.invalidate_all(this->cancel_callback()); }
+    // invalidate_step() for the background processing thread, about a step it finished itself. It skips the
+    // cancel callback, which stops the background processing and so would wait for this very thread.
+    bool            invalidate_step_from_worker(PrintStepEnum step)
+        { std::scoped_lock<std::mutex> lock(this->state_mutex()); return m_state.invalidate(step, []() {}); }
 
 	bool            is_step_started_unguarded(PrintStepEnum step) const { return m_state.is_started_unguarded(step); }
 	bool            is_step_done_unguarded(PrintStepEnum step) const { return m_state.is_done_unguarded(step); }
