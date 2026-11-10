@@ -1180,11 +1180,13 @@ struct CliArrangeOptions
     bool                  allow_stacking    = false;
     bool                  generate_supports = false;
     std::optional<double> gap_mm;
+    // What kept a part off the plate or moved it on, gathered over every arrange of the run.
+    std::vector<nest3d::Issue> issues;
 };
 
 // Nest3D runs for layer-by-layer printing only, as in the GUI; otherwise the stock arranger runs.
 static void cli_arrange(arrangement::ArrangePolygons &selected, const arrangement::ArrangePolygons &unselected, const Points &beds,
-                        const arrangement::ArrangeParams &params, const DynamicPrintConfig &config, const CliArrangeOptions &options)
+                        const arrangement::ArrangeParams &params, const DynamicPrintConfig &config, CliArrangeOptions &options)
 {
     if (options.nest3d && !params.is_seq_print) {
         nest3d::ArrangeSettings settings;
@@ -1193,7 +1195,7 @@ static void cli_arrange(arrangement::ArrangePolygons &selected, const arrangemen
         settings.generate_supports = options.generate_supports;
         BOOST_LOG_TRIVIAL(info) << "arrange: Nest3D (stacking " << settings.allow_stacking
                                << ", generated supports " << settings.generate_supports << ")";
-        nest3d::arrange_polygons(selected, unselected, beds, params, settings, config, MAX_NUM_PLATES);
+        nest3d::arrange_polygons(selected, unselected, beds, params, settings, config, MAX_NUM_PLATES, &options.issues);
     } else {
         arrangement::arrange(selected, unselected, beds, params);
     }
@@ -6531,6 +6533,15 @@ int CLI::run(int argc, char **argv)
         report["generated_supports"] = arrange_options.generate_supports;
         report["gap_mm"]       = arrange_options.gap_mm ? nlohmann::json(*arrange_options.gap_mm) : nlohmann::json(nullptr);
         report["plate_count"]  = partplate_list.get_plate_count();
+        // Why a part is unplaced or on a later plate, in English.
+        nlohmann::json messages = nlohmann::json::array();
+        for (const nest3d::Issue &issue : arrange_options.issues) {
+            static const char *kinds[]  = {"unplaced", "moved", "skirt"};
+            static const char *limits[] = {"bed", "excluded_area", "purge_strip", "other_parts", "plates"};
+            messages.push_back({{"kind", kinds[int(issue.kind)]}, {"limit", limits[int(issue.limit)]}, {"part", issue.part},
+                                {"text", nest3d::issue_text(issue)}});
+        }
+        report["messages"] = std::move(messages);
         boost::nowide::ofstream out(cli_output_path(report_file));
         out << report.dump(1, '\t') << std::endl;
         if (!out) {

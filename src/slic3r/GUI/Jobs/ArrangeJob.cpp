@@ -782,7 +782,8 @@ void ArrangeJob::process(Ctl &ctl)
     if (m_nest3d.enabled && !params.is_seq_print && !params.is_belt && !imex.active()) {
         if (m_nest3d.generate_supports)
             ctl.update_status(0, _u8L("Generating supports before arranging"));
-        nest3d::arrange_polygons(m_selected, m_unselected, bedpts, params, m_nest3d, global_config, MAX_NUM_PLATES);
+        m_issues.clear();
+        nest3d::arrange_polygons(m_selected, m_unselected, bedpts, params, m_nest3d, global_config, MAX_NUM_PLATES, &m_issues);
     } else
         arrangement::arrange(m_selected, m_unselected, bedpts, params);
     if (!ctl.was_canceled())
@@ -951,6 +952,23 @@ void ArrangeJob::finalize(bool canceled, std::exception_ptr &eptr) {
         m_plater->get_notification_manager()->push_notification(GUI::format(
             _L("Arrangement ignored the following objects which can't fit into a single bed:\n%s"),
             concat_strings(names, "\n")));
+    }
+    if (!m_issues.empty()) {
+        // The first few say what stopped a part; the rest are in the log.
+        constexpr size_t listed = 5;
+        std::string      text;
+        for (size_t i = 0; i < m_issues.size() && i < listed; ++i) {
+            const std::string line = nest3d::issue_text(m_issues[i], [](const char *msgid) { return _u8L(msgid); });
+            BOOST_LOG_TRIVIAL(warning) << "arrange: " << line;
+            text += (i ? "\n" : "") + line;
+        }
+        for (size_t i = listed; i < m_issues.size(); ++i)
+            BOOST_LOG_TRIVIAL(warning) << "arrange: " << nest3d::issue_text(m_issues[i]);
+        if (m_issues.size() > listed)
+            text += "\n" + _u8L("Further problems are in the log.");
+        m_plater->get_notification_manager()->push_notification(NotificationType::BBLPlateInfo,
+            NotificationManager::NotificationLevel::WarningNotificationLevel, text);
+        m_issues.clear();
     }
     m_plater->get_notification_manager()->close_notification_of_type(NotificationType::ArrangeOngoing);
 

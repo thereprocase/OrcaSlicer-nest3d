@@ -25,14 +25,15 @@ them filled; the model only ever over-estimates the space a part takes.
 - **Cells.** 0.5 mm, or the longest bed side over 720 on larger beds, which bounds the cost of a
   scan. Cells of 0.5 mm divide whole and half millimetres, so an axis-parallel edge at such a size
   and spacing falls on a cell boundary and keeps its spacing exactly.
-- **Spacing.** Every map is grown in XY by the item's inflation, the same value the polygon
-  arranger uses (the user's spacing, or the brim and support allowance when spacing is automatic).
-  Growth claims every cell that comes closer than the inflation to the part, so two parts whose
-  maps share no cell keep at least the sum of their inflations apart. Distances are measured from
-  the extent of the geometry inside each occupied cell along the axes and the diagonals, which is
-  exact for edges in those directions, so the clearance is not rounded up to whole cells. A cell
-  whose eight neighbours are filled and hold its interval claims nothing they do not, and is
-  skipped, which keeps the 12 mm growth of tree supports near the cost of the outline.
+- **Spacing.** Every map is grown in XY by the item's inflation: the user's spacing halved, or with
+  automatic spacing one millimetre for a part whose brim is in its footprint (see Brim and skirt), and
+  the caller's allowance for brim and support otherwise. Growth claims every cell that comes closer than
+  the inflation to the part, so two parts whose maps share no cell keep at least the sum of their
+  inflations apart. Distances are measured from the extent of the geometry inside each occupied cell
+  along the axes and the diagonals, which is exact for edges in those directions, so the clearance is not
+  rounded up to whole cells. A cell whose eight neighbours are filled and hold its interval claims
+  nothing they do not, and is skipped, which keeps the 12 mm growth of tree supports near the cost of the
+  outline.
 - **Support.** By default a part that prints with support (`enable_support`) has every column
   filled down to the bed. With "Generate supports before arranging", the adapter instead combines
   native sliced model geometry with support extrusion envelopes, including their widths and actual
@@ -46,6 +47,14 @@ them filled; the model only ever over-estimates the space a part takes.
   The wipe tower and exclusion areas are full-height columns over their polygons. On a bed that is
   not a rectangle, the cells whose centre lies outside its outline are a full-height obstacle on
   every plate.
+- **Bed edge.** The printable area is the bed: callers hand over that area pulled in by a bed
+  shrink, and the adapter takes the shrink back, since the half spacing every part is grown by already
+  keeps parts apart and would count a second time against the edge. A part's footprint may reach the
+  boundary. What prints beyond the footprint stays inside: with one skirt for the whole plate, its distance
+  and the width of its loops. The bed moves by the least of (inflation - that extent) over the selected
+  parts. A part whose brim could not be shaped keeps the caller's allowance (its brim width, the skirt's
+  distance and loops) in that sum instead. A bed that does not match the printable area less the
+  shrink, as one the caller reshaped, is used as it comes.
 - **Reserved plate area.** Two more full-height obstacles on every plate keep the spacing of the
   excluded regions (1 mm, or half an explicit gap). The first is `bed_exclude_area` read as the one
   polygon the plate draws: the plate hands the arrangers the bounding box of every four points, which
@@ -65,6 +74,50 @@ Two parts may share a cell only when their intervals are at least the vertical c
 With "Nest under overhangs" off, any occupied cell blocks its whole column, which still lets parts
 interlock in plan view (one part in another's hole or notch) but never stack. One collision test,
 `Board::fits`, decides every placement, pocket, lattice no-fit set and recentring.
+
+## Brim and skirt
+
+An object's footprint includes what it prints on the first layer around its geometry, as the slicer will
+generate it.
+
+- **Brim.** The adapter slices a copy of the object in its arrange pose, with its own settings over the
+  print's (brim type, width, ears and their angle, gap to the object, auto widths, painted ears), and
+  runs the slicer's own brim generator (`make_brim`) on the first layer. Only the slice and the brim run:
+  no perimeters, infill or support. The brim's areas join the object's triangles as caps from the bed to
+  the first layer's height, so they enter every candidate angle's height map like the geometry does. The
+  brim is made once per object and pose and shared by every instance posed alike, fixed parts
+  included, whatever the number of angles. An object without a brim costs nothing. With generated
+  supports the slice of each candidate already carries the brim, so only the skirt is added.
+- **Spacing against brims.** With the brim in the footprint, automatic spacing leaves one millimetre
+  around it, so two brims keep two millimetres apart and never overlap; an explicit gap applies outside
+  the brims. Tree supports keep the caller's branch-sized allowance.
+- **Skirt per object.** The skirt that goes around each object is the ring from the skirt distance to
+  the last loop around the convex hull of the object and its brim, from the bed to the skirt's height.
+  It joins the footprint like the brim. The ring leaves the hull's inside free, so small parts can still
+  go into the object's pockets.
+- **One skirt for the plate.** A combined skirt encircles everything on the plate, which no single
+  footprint can see. The bed margin keeps it on the printable area, and once the parts are placed the ring
+  around the hull of every part on the plate (fixed parts with their brim) is checked against the excluded
+  area and the start G-code purge strip. If it crosses one, the parts are packed again with the skirt's
+  width added to the room they keep from those areas. A skirt that still crosses a limit after that, or
+  leaves the bed, is reported.
+
+The hull of a skirt is that of the whole object, not only of the layers up to the skirt height, which
+over-reserves a little for an object that widens above the skirt.
+
+## Messages
+
+When a part gets no place, or goes to a later plate while others of its filament group sit on an earlier
+one, the adapter returns an `Issue` for it: the part's name, the size of its footprint with brim and
+per-object skirt at the angle that gives the smallest box, the limit it hit, and a hint. The limit comes
+from placing the part alone on an empty plate and adding the limits one at a time: the bed outline, the
+excluded area, the start G-code purge strip. Each reports the largest free rectangle that limit leaves.
+A part that fits an empty plate is told that the others leave it no room, or that every plate is full.
+A skirt around the plate that still crosses a limit is an issue of its own.
+
+Every sentence is one translatable msgid with placeholders; `issue_text` fills them in after the caller
+translates, so no translated fragments are concatenated. The arrange job shows the first five issues in
+a notification and logs the rest. The command line writes them to the arrange report under `messages`.
 
 ## Physical rules for stacking
 
@@ -178,8 +231,9 @@ pass), `N` parts, `L` open plates, `C` candidates per part and `P` grid position
 search costs `O(O * N * L * C * P)` run lookups in the worst case, and far fewer where the
 envelope bound ends a side; a position that survives costs a collision and a contact test, 64
 cells at a time. Keeping the plate's summed-area table current costs `O(P)` per placed part, and
-labelling its pockets `O(P + R)` for `R` free runs in the pile's bounding box. Rasterizing
-costs `O(C * (T + K))` per shape of `T` triangles crossing `K` cells, plus `O(B * g)` cells per
+labelling its pockets `O(P + R)` for `R` free runs in the pile's bounding box. A brim costs one slice
+of the first layers and one run of the brim generator per object and pose, and a skirt the convex hull of its
+object. Rasterizing costs `O(C * (T + K))` per shape of `T` triangles crossing `K` cells, plus `O(B * g)` cells per
 growth of `g` cells for `B` cells near the outline. A shape with copies costs a bounded number of
 raster no-fit sets and lattice searches over its units' cells; the lattice search tries the 2048
 shortest touching offsets, and phase counting reads each bed cell once per unit and lattice.
@@ -208,7 +262,12 @@ check outcomes on the arranged model's exact printed geometry, leaving the engin
 - the result never uses more plates or leaves more parts unplaced than the polygon arranger;
 - small parts fill the hole of a ring, and copies pack at least as densely as a grid of their boxes;
 - the result is centred on the anchor, does not depend on input order or threading, and a cancelled
-  arrange leaves only valid placements.
+  arrange leaves only valid placements;
+- the brim shape is the slicer's for each brim type and per-object override, neighbouring brims stay apart,
+  a per-object skirt is reserved around each object and a combined one around the plate and clear of the
+  excluded area;
+- an unplaceable part and a part moved to a later plate are explained with the part's name, its footprint
+  and the limit that stopped it.
 
 The `[Nest3DSupport]` pipeline tests in `tests/fff_print/test_nest3d_support.cpp` check generated
 support and raft footprints, bead clearance for rotated copies, object overrides and painted
