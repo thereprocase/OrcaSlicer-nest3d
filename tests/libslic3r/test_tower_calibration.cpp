@@ -153,11 +153,12 @@ TEST_CASE("Tower calibration rejects invalid ranges before mutating the model", 
     const double step = GENERATE(0., -1., std::numeric_limits<double>::infinity(), std::numeric_limits<double>::quiet_NaN());
     auto config = tower_profile();
     auto model = tower_model();
+    const auto before_object = model.objects.front()->config.get();
     Calib_Params request;
     request.step = step;
     CHECK_THROWS_AS(apply_calibration_recipe(model, config, *find_calibration_recipe(recipe), "archimedeanchords", request), std::invalid_argument);
     CHECK_THAT(model.objects.front()->bounding_box_exact().size().z(), WithinAbs(40., 1e-8));
-    CHECK(model.objects.front()->config.empty());
+    CHECK(model.objects.front()->config.get() == before_object);
     CHECK(config == tower_profile());
 }
 
@@ -286,11 +287,12 @@ TEST_CASE("Input shaping rejects unsupported firmware before changing the model 
     config.set_deserialize_strict({{"gcode_flavor", "marlin"}});
     const auto before = config;
     auto model = tower_model();
+    const auto before_object = model.objects.front()->config.get();
     Calib_Params request;
     request.start = 0.1;
     request.freqStartX = request.freqStartY = 30.;
     request.freqEndX = request.freqEndY = 60.;
     CHECK_THROWS_AS(apply_calibration_recipe(model, config, *find_calibration_recipe("input-shaping-frequency"), "archimedeanchords", request), std::invalid_argument);
     CHECK(config == before);
-    CHECK(model.objects.front()->config.empty());
+    CHECK(model.objects.front()->config.get() == before_object);
 }

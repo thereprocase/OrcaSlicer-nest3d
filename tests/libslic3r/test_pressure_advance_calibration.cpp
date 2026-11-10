@@ -97,11 +97,12 @@ TEST_CASE("PA calibration rejects an empty range before changing the model or pr
     auto config = pa_profile();
     const auto before = config;
     auto model = pa_model();
+    const auto before_object = model.objects.front()->config.get();
     Calib_Params request;
     request.start = request.end = 0.;
     CHECK_THROWS_AS(apply_calibration_recipe(model, config, *find_calibration_recipe(recipe), "archimedeanchords", request), std::invalid_argument);
     CHECK(config == before);
-    CHECK(model.objects.front()->config.empty());
+    CHECK(model.objects.front()->config.get() == before_object);
 }
 
 TEST_CASE("PA pattern batches retain every requested speed and acceleration across native plates", "[PressureAdvanceCalibration]")
