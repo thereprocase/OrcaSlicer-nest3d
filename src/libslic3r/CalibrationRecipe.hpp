@@ -26,6 +26,7 @@ struct CalibrationRecipe {
 const std::vector<CalibrationRecipe> &calibration_recipes();
 const CalibrationRecipe *find_calibration_recipe(const std::string &name);
 std::string calibration_recipe_asset(const CalibrationRecipe &recipe);
-void apply_calibration_recipe(Model &model, DynamicPrintConfig &config, const CalibrationRecipe &recipe);
+void apply_calibration_recipe(Model &model, DynamicPrintConfig &config, const CalibrationRecipe &recipe,
+                              const std::string &surface_pattern = "archimedeanchords");
 
 } // namespace Slic3r

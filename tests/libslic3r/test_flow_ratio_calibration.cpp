@@ -9,6 +9,7 @@
 #include <catch2/catch_test_macros.hpp>
 #include <catch2/matchers/catch_matchers_floating_point.hpp>
 #include <cmath>
+#include <cstddef>
 #include <stdexcept>
 #include <string>
 
@@ -39,7 +40,7 @@ TEST_CASE("Flow calibration replaces a profile's surface strategy with the GUI r
     model.add_object("flowrate_20", "", make_cube(40, 30, 2))->add_instance();
     apply_flow_ratio_calibration(model.objects, config, plan, false, 1);
 
-    const auto &low = model.objects.front()->config;
+    const auto &low = model.objects.front()->config.get();
     CHECK(low.opt_enum<InfillPattern>("top_surface_pattern") == ipArchimedeanChords);
     CHECK(low.opt_enum<SurfaceFillOrder>("top_surface_fill_order") == SurfaceFillOrder::Default);
     CHECK(low.opt_bool("calib_flowrate_topinfill_special_order"));
@@ -60,6 +61,8 @@ TEST_CASE("Flow calibration shares a speed ceiling that accommodates its largest
     const auto fine = plan_flow_ratio_calibration(config, false, 2);
     const Flow flow(0.48, 0.2, 0.4);
     CHECK(coarse.top_surface_speeds.front() * flow.mm3_per_mm() * 1.2 <= 6.);
+    CHECK(coarse.top_surface_speeds.front() == 57.);
+    CHECK(coarse.internal_solid_speeds.front() == 57.);
     CHECK(fine.top_surface_speeds.front() > coarse.top_surface_speeds.front());
     CHECK_THAT(coarse.layer_height, WithinAbs(0.2, 1e-6));
     CHECK_THAT(coarse.scale.z(), WithinAbs(1., 1e-6));
@@ -106,4 +109,20 @@ TEST_CASE("The calibration catalogue reports GUI-only recipes without substituti
     REQUIRE(find_calibration_recipe("temperature") != nullptr);
     CHECK_FALSE(find_calibration_recipe("temperature")->cli_supported);
     CHECK(find_calibration_recipe("not-a-calibration") == nullptr);
+}
+
+TEST_CASE("The shared dispatcher accepts both patterns offered by the flow calibration dialog", "[FlowRatioCalibration]")
+{
+    const auto *recipe = find_calibration_recipe("flow-ratio");
+    REQUIRE(recipe != nullptr);
+    for (const std::string pattern : {"archimedeanchords", "monotonic"}) {
+        auto config = calibration_profile();
+        Model model;
+        model.add_object("flowrate_0", "", make_cube(40, 30, 2))->add_instance();
+        apply_calibration_recipe(model, config, *recipe, pattern);
+        CHECK(model.objects.front()->config.opt_serialize("top_surface_pattern") == pattern);
+        CHECK_FALSE(config.opt_bool("resonance_avoidance"));
+    }
+    DynamicPrintConfig missing;
+    CHECK_THROWS_AS(plan_flow_ratio_calibration(missing, false, 1), std::invalid_argument);
 }

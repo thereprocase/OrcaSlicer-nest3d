@@ -1,4 +1,3 @@
-#include "libslic3r/CalibrationRecipe.hpp"
 #ifdef WIN32
     // Why?
     #define _WIN32_WINNT 0x0502
@@ -24,6 +23,7 @@
 #include <map>
 #include <vector>
 #include "libslic3r/PrintBase.hpp"
+#include "libslic3r/CalibrationRecipe.hpp"
 #include <boost/date_time/posix_time/posix_time_duration.hpp>
 #include <cerrno>
 #include <utility>
@@ -32,7 +32,6 @@
 #include "libslic3r/LocalesUtils.hpp"
 #include <fstream>
 #include <exception>
-#include <stdexcept>
 #include <set>
 #include "libslic3r/Color.hpp"
 #include "libslic3r/TriangleSelector.hpp"
@@ -1568,12 +1567,12 @@ int CLI::run(int argc, char **argv)
             record_exit_reson(outfile_dir, CLI_INVALID_PARAMS, 0, cli_errors[CLI_INVALID_PARAMS], sliced_info);
             flush_and_exit(CLI_INVALID_PARAMS);
         }
-        if (!m_input_files.empty() || !m_config.opt_string("load_assemble_list").empty() ||
+        if (!m_input_files.empty() || load_filaments.size() != 1 || !m_config.opt_string("load_assemble_list").empty() ||
             m_given_option_keys.count("export_3mf") == 0 ||
             std::any_of(m_transforms.begin(), m_transforms.end(), [this](const std::string &transform) {
                 return transform != "arrange" && !(transform == "orient" && m_config.opt_int("orient") == 0);
             })) {
-            boost::nowide::cerr << "--calibration requires --export-3mf, no input models, and no geometry transforms except arrangement" << std::endl;
+            boost::nowide::cerr << "--calibration requires --export-3mf, one filament profile, no input models, and no geometry transforms except arrangement" << std::endl;
             record_exit_reson(outfile_dir, CLI_INVALID_PARAMS, 0, cli_errors[CLI_INVALID_PARAMS], sliced_info);
             flush_and_exit(CLI_INVALID_PARAMS);
         }
@@ -4385,7 +4384,7 @@ int CLI::run(int argc, char **argv)
     if (!calibration.empty()) {
         try {
             for (Model &model : m_models)
-                apply_calibration_recipe(model, m_print_config, *calibration_recipe);
+                apply_calibration_recipe(model, m_print_config, *calibration_recipe, m_config.opt_string("calibration_pattern"));
         } catch (const std::exception &error) {
             boost::nowide::cerr << "Cannot generate calibration: " << error.what() << std::endl;
             record_exit_reson(outfile_dir, CLI_INVALID_PARAMS, 0, cli_errors[CLI_INVALID_PARAMS], sliced_info);

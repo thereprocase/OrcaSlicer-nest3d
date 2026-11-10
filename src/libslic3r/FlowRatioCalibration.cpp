@@ -47,6 +47,11 @@ std::string flow_ratio_calibration_asset(bool linear, int pass)
 FlowRatioCalibrationPlan plan_flow_ratio_calibration(const DynamicPrintConfig &config, bool linear, int pass)
 {
     validate_pass(pass);
+    for (const char *key : {"nozzle_diameter", "extruder_type", "nozzle_volume_type", "initial_layer_print_height",
+                            "filament_flow_ratio", "filament_max_volumetric_speed", "top_surface_speed", "internal_solid_infill_speed"}) {
+        if (config.option(key) == nullptr)
+            throw std::invalid_argument(std::string("Missing calibration profile setting: ") + key);
+    }
     const auto &nozzles = config.option<ConfigOptionFloats>("nozzle_diameter")->values;
     const auto &extruders = config.option<ConfigOptionEnumsGeneric>("extruder_type")->values;
     const auto &volumes = config.option<ConfigOptionEnumsGeneric>("nozzle_volume_type")->values;

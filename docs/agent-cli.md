@@ -274,13 +274,16 @@ anyone able to intercept the connection could then read the token.
 `--calibration` loads the shipped calibration model and invokes the same native settings recipe used
 by the GUI Calibration menu. It accepts `flow-ratio` (classic pass 1), `flow-ratio-fine` (classic pass 2),
 `flow-ratio-yolo`, and `flow-ratio-yolo-fine`. Supply printer, process and filament profiles as usual;
-no input mesh is needed or accepted. Exporting a project is required, and slicing is optional:
+exactly one filament profile is required, and no input mesh is accepted. Exporting a project is required, and slicing is optional:
 
 ```bash
 orca-slicer --datadir DATA \
   --load-settings 'machine.json;process.json' --load-filaments filament.json \
   --calibration flow-ratio --slice 0 --export-3mf flow.3mf --outputdir OUT
 ```
+
+The flow dialog defaults to YOLO; choose `flow-ratio-yolo` to match that selection.
+`--calibration-pattern archimedeanchords` (default) or `monotonic` reproduces the dialog's two surface choices.
 
 The selected recipe overrides the same process/object fields as the GUI: Archimedean-chords top
 surfaces, calibration-specific fill order, per-surface centering, shell and infill setup, widths,

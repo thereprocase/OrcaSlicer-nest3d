@@ -49,15 +49,19 @@ std::string calibration_recipe_asset(const CalibrationRecipe &recipe)
     throw std::invalid_argument("Native CLI calibration generation is unavailable for " + recipe.name);
 }
 
-void apply_calibration_recipe(Model &model, DynamicPrintConfig &config, const CalibrationRecipe &recipe)
+void apply_calibration_recipe(Model &model, DynamicPrintConfig &config, const CalibrationRecipe &recipe,
+                              const std::string &surface_pattern)
 {
     // Keep dispatch explicit: adding an advertised recipe must also implement its real generator.
     if (!recipe.cli_supported || recipe.generator != CalibrationGenerator::FlowRatio)
         throw std::invalid_argument("Native CLI calibration generation is unavailable for " + recipe.name);
     if (config.opt_bool("belt_printer"))
         throw std::invalid_argument("CLI flow-ratio calibration currently requires a flat-bed printer");
+    if (surface_pattern != "archimedeanchords" && surface_pattern != "monotonic")
+        throw std::invalid_argument("Flow-ratio calibration pattern must be archimedeanchords or monotonic");
+    const InfillPattern pattern = surface_pattern == "monotonic" ? ipMonotonic : ipArchimedeanChords;
     const FlowRatioCalibrationPlan plan = plan_flow_ratio_calibration(config, recipe.linear, recipe.pass);
-    apply_flow_ratio_calibration(model.objects, config, plan, recipe.linear, recipe.pass);
+    apply_flow_ratio_calibration(model.objects, config, plan, recipe.linear, recipe.pass, pattern);
     for (ModelObject *object : model.objects) {
         object->scale(plan.scale);
         object->ensure_on_bed();
