@@ -13143,13 +13143,41 @@ CLIMiscConfigDef::CLIMiscConfigDef()
 
     def = this->add("calibration", coString);
     def->label = L("Calibration recipe");
-    def->tooltip = L("Generate a stock calibration model with the same settings recipe as the GUI. Use list to show GUI recipes and native CLI support. Supported recipes: flow-ratio, flow-ratio-fine, flow-ratio-yolo, flow-ratio-yolo-fine. Use loaded printer, process and filament presets, with --export-3mf and optionally --slice. Extra input models are not accepted.");
+    def->tooltip = L("Generate a stock calibration model with the same settings recipe as the GUI. Use list to show GUI recipes and native CLI support. Use loaded printer, process and filament presets with --export-3mf. Tower recipes also require --slice and explicit calibration range options. Extra input models are not accepted.");
     def->set_default_value(new ConfigOptionString(""));
 
     def = this->add("calibration_pattern", coString);
     def->label = L("Calibration surface pattern");
     def->tooltip = L("Top surface pattern for flow-ratio calibration: archimedeanchords (GUI default) or monotonic.");
     def->set_default_value(new ConfigOptionString("archimedeanchords"));
+
+    def = this->add("calibration_start", coFloat);
+    def->label = L("Calibration start");
+    def->tooltip = L("Starting value for the calibration tower, in the units of the selected test.");
+    def->set_default_value(new ConfigOptionFloat(0.));
+
+    def = this->add("calibration_end", coFloat);
+    def->label = L("Calibration end");
+    def->tooltip = L("Ending value for the calibration tower, in the units of the selected test.");
+    def->set_default_value(new ConfigOptionFloat(1.));
+
+    def = this->add("calibration_step", coFloat);
+    def->label = L("Calibration step");
+    def->tooltip = L("Positive increment for the calibration tower, in the units of the selected test.");
+    def->set_default_value(new ConfigOptionFloat(0.1));
+
+    def = this->add("calibration_resize", coInt);
+    def->label = L("Calibration nozzle resize");
+    def->tooltip = L("Scale VFA, temperature and fan towers to the nozzle diameter (1), or retain the reference model and preset layer height (0).");
+    def->min = 0;
+    def->max = 1;
+    def->set_default_value(new ConfigOptionInt(1));
+
+    def = this->add("calibration_layer_height", coFloat);
+    def->label = L("Calibration layer height");
+    def->tooltip = L("VFA layer height in millimeters when resizing is enabled. Zero uses half the nozzle diameter.");
+    def->min = 0.;
+    def->set_default_value(new ConfigOptionFloat(0.));
 
     def = this->add("retraction_guard", coInt);
     def->label = L("CLI retraction guard");

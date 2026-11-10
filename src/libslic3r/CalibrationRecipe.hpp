@@ -1,5 +1,7 @@
 #pragma once
 
+#include "calib.hpp"
+
 #include <string>
 #include <vector>
 
@@ -19,6 +21,7 @@ struct CalibrationRecipe {
     bool cli_supported;
     bool linear = false;
     int pass = 1;
+    CalibMode mode = CalibMode::Calib_None;
 };
 
 // Catalogue of the GUI's model-generating calibration entrypoints. Unsupported CLI recipes are
@@ -26,7 +29,8 @@ struct CalibrationRecipe {
 const std::vector<CalibrationRecipe> &calibration_recipes();
 const CalibrationRecipe *find_calibration_recipe(const std::string &name);
 std::string calibration_recipe_asset(const CalibrationRecipe &recipe);
-void apply_calibration_recipe(Model &model, DynamicPrintConfig &config, const CalibrationRecipe &recipe,
-                              const std::string &surface_pattern = "archimedeanchords");
+Calib_Params apply_calibration_recipe(Model &model, DynamicPrintConfig &config, const CalibrationRecipe &recipe,
+                                     const std::string &surface_pattern = "archimedeanchords",
+                                     const Calib_Params &params = Calib_Params{});
 
 } // namespace Slic3r

@@ -105,6 +105,8 @@ set(lisbslic3r_sources
     calib.hpp
     CalibrationRecipe.cpp
     CalibrationRecipe.hpp
+    TowerCalibration.cpp
+    TowerCalibration.hpp
     FlowRatioCalibration.cpp
     FlowRatioCalibration.hpp
     Circle.cpp

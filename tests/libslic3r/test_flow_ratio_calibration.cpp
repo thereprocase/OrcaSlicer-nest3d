@@ -102,12 +102,12 @@ TEST_CASE("The calibration catalogue reports GUI-only recipes without substituti
         CHECK(names.insert(recipe.name).second);
         if (recipe.cli_supported) {
             ++supported;
-            CHECK(recipe.generator == CalibrationGenerator::FlowRatio);
+            CHECK_FALSE(calibration_recipe_asset(recipe).empty());
         }
     }
-    CHECK(supported == 4);
-    REQUIRE(find_calibration_recipe("temperature") != nullptr);
-    CHECK_FALSE(find_calibration_recipe("temperature")->cli_supported);
+    CHECK(supported == 12);
+    REQUIRE(find_calibration_recipe("cornering") != nullptr);
+    CHECK_FALSE(find_calibration_recipe("cornering")->cli_supported);
     CHECK(find_calibration_recipe("not-a-calibration") == nullptr);
 }
 

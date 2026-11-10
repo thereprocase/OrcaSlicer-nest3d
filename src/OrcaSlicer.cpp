@@ -24,6 +24,7 @@
 #include <vector>
 #include "libslic3r/PrintBase.hpp"
 #include "libslic3r/CalibrationRecipe.hpp"
+#include "libslic3r/calib.hpp"
 #include <boost/date_time/posix_time/posix_time_duration.hpp>
 #include <cerrno>
 #include <utility>
@@ -1558,6 +1559,7 @@ int CLI::run(int argc, char **argv)
         return 0;
     }
     const CalibrationRecipe *calibration_recipe = find_calibration_recipe(calibration);
+    Calib_Params calibration_params;
     if (!calibration.empty()) {
         if (calibration_recipe == nullptr || !calibration_recipe->cli_supported) {
             boost::nowide::cerr << "Unsupported --calibration recipe: " << calibration;
@@ -1575,6 +1577,20 @@ int CLI::run(int argc, char **argv)
             boost::nowide::cerr << "--calibration requires --export-3mf, one filament profile, no input models, and no geometry transforms except arrangement" << std::endl;
             record_exit_reson(outfile_dir, CLI_INVALID_PARAMS, 0, cli_errors[CLI_INVALID_PARAMS], sliced_info);
             flush_and_exit(CLI_INVALID_PARAMS);
+        }
+        if (calibration_recipe->generator != CalibrationGenerator::FlowRatio) {
+            // Runtime modes live on Print, just as in the GUI. An unsliced project would lose them on reopen.
+            if (m_given_option_keys.count("slice") == 0 || m_given_option_keys.count("calibration_start") == 0 ||
+                m_given_option_keys.count("calibration_end") == 0 || m_given_option_keys.count("calibration_step") == 0) {
+                boost::nowide::cerr << "Tower calibration requires --slice and explicit --calibration-start, --calibration-end and --calibration-step" << std::endl;
+                record_exit_reson(outfile_dir, CLI_INVALID_PARAMS, 0, cli_errors[CLI_INVALID_PARAMS], sliced_info);
+                flush_and_exit(CLI_INVALID_PARAMS);
+            }
+            calibration_params.start = m_config.opt_float("calibration_start");
+            calibration_params.end = m_config.opt_float("calibration_end");
+            calibration_params.step = m_config.opt_float("calibration_step");
+            calibration_params.nozzle_based_resize = m_config.opt_int("calibration_resize") != 0;
+            calibration_params.vfa_layer_height = m_config.opt_float("calibration_layer_height");
         }
         m_input_files.push_back((boost::filesystem::path(resources_dir()) / "calib" /
                                 calibration_recipe_asset(*calibration_recipe)).string());
@@ -4383,8 +4399,24 @@ int CLI::run(int argc, char **argv)
 
     if (!calibration.empty()) {
         try {
+            DynamicPrintConfig effective = DynamicPrintConfig::full_print_config();
+            effective.apply(m_print_config);
+            const DynamicPrintConfig before_recipe = effective;
             for (Model &model : m_models)
-                apply_calibration_recipe(model, m_print_config, *calibration_recipe, m_config.opt_string("calibration_pattern"));
+                calibration_params = apply_calibration_recipe(model, effective, *calibration_recipe,
+                    m_config.opt_string("calibration_pattern"), calibration_params);
+            // Record recipe changes through the existing preset-override metadata too. Otherwise
+            // reopening a project can restore the system preset's cooling, temperatures or speeds.
+            for (const std::string &key : effective.keys()) {
+                const ConfigOption *before = before_recipe.option(key);
+                const ConfigOption *after = effective.option(key);
+                if (before == nullptr || before->serialize() != after->serialize()) {
+                    const ConfigOption *loaded = m_print_config.option(key);
+                    if (cli_override_before.count(key) == 0)
+                        cli_override_before[key].reset(loaded != nullptr ? loaded->clone() : nullptr);
+                }
+            }
+            m_print_config = std::move(effective);
         } catch (const std::exception &error) {
             boost::nowide::cerr << "Cannot generate calibration: " << error.what() << std::endl;
             record_exit_reson(outfile_dir, CLI_INVALID_PARAMS, 0, cli_errors[CLI_INVALID_PARAMS], sliced_info);
@@ -7303,6 +7335,8 @@ int CLI::run(int argc, char **argv)
                             final_nozzle_volume_type_opt->values.resize(new_extruder_count, nvtStandard);
                         }
                         print->apply(model, new_print_config);
+                        if (!calibration.empty())
+                            print_fff->set_calib_params(calibration_params);
                         BOOST_LOG_TRIVIAL(info) << boost::format("set no_check to %1%:")%no_check;
                         print->set_no_check_flag(no_check);//BBS
 
