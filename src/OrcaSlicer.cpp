@@ -7427,9 +7427,12 @@ int CLI::run(int argc, char **argv)
                             try {
                                 if (!model.calib_pa_pattern)
                                     throw std::invalid_argument("PA pattern generator is missing");
-                                model.plates_custom_gcodes[index] = generate_pressure_advance_pattern_gcode(
+                                // Preserve generated layer commands for the later project export as well as this slice.
+                                model_in.plates_custom_gcodes[index] = generate_pressure_advance_pattern_gcode(
                                     *model.calib_pa_pattern, part_plate->get_objects_on_this_plate(),
                                     new_print_config, is_bbl_vendor_preset, part_plate->get_origin());
+                                if (make_copy)
+                                    model.plates_custom_gcodes[index] = model_in.plates_custom_gcodes[index];
                             } catch (const std::exception &error) {
                                 boost::nowide::cerr << "Cannot generate PA pattern G-code: " << error.what() << std::endl;
                                 record_exit_reson(outfile_dir, CLI_INVALID_PARAMS, index + 1, cli_errors[CLI_INVALID_PARAMS], sliced_info);
