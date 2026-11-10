@@ -991,8 +991,6 @@ TEST_CASE("Changing interface batching keeps the slices and support and regenera
     CHECK_FALSE(print.is_step_done(psWipeTower));
 }
 
-}
-
 TEST_CASE("Print::validate refuses a used filament with a flow ratio of 0", "[Print][validate][Regression]")
 {
     DynamicPrintConfig config = DynamicPrintConfig::full_print_config();

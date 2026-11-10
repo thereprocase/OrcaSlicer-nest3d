@@ -444,7 +444,6 @@ TEST_CASE("normalize_fdm_2 keeps independent support layer height only on plates
     CAPTURE(used_filaments, tower);
     CHECK(normalized.opt_bool("independent_support_layer_height") == !prime_tower_is_printed(config, used_filaments, 1, false));
 }
-}
 
 
 // A size x size mm footprint anchored at its lower-left corner, on a plate whose anchors may

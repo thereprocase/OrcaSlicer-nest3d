@@ -754,7 +754,6 @@ TEST_CASE("A layer change closes a batched interface block that has no end tag",
         }
     }
 }
-}
 
 
 namespace {
