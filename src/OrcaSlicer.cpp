@@ -1,3 +1,4 @@
+#include "libslic3r/CalibrationRecipe.hpp"
 #ifdef WIN32
     // Why?
     #define _WIN32_WINNT 0x0502
@@ -31,6 +32,7 @@
 #include "libslic3r/LocalesUtils.hpp"
 #include <fstream>
 #include <exception>
+#include <stdexcept>
 #include <set>
 #include "libslic3r/Color.hpp"
 #include "libslic3r/TriangleSelector.hpp"
@@ -1548,6 +1550,36 @@ int CLI::run(int argc, char **argv)
         }
     }
 
+    const std::string calibration = m_config.opt_string("calibration");
+    if (calibration == "list") {
+        json recipes = json::array();
+        for (const CalibrationRecipe &recipe : calibration_recipes())
+            recipes.push_back({{"name", recipe.name}, {"cli_supported", recipe.cli_supported}});
+        boost::nowide::cout << recipes.dump(2) << std::endl;
+        return 0;
+    }
+    const CalibrationRecipe *calibration_recipe = find_calibration_recipe(calibration);
+    if (!calibration.empty()) {
+        if (calibration_recipe == nullptr || !calibration_recipe->cli_supported) {
+            boost::nowide::cerr << "Unsupported --calibration recipe: " << calibration;
+            if (calibration_recipe != nullptr)
+                boost::nowide::cerr << " (GUI generator exists; native CLI parity is not implemented)";
+            boost::nowide::cerr << ". Use --calibration list to inspect supported recipes." << std::endl;
+            record_exit_reson(outfile_dir, CLI_INVALID_PARAMS, 0, cli_errors[CLI_INVALID_PARAMS], sliced_info);
+            flush_and_exit(CLI_INVALID_PARAMS);
+        }
+        if (!m_input_files.empty() || !m_config.opt_string("load_assemble_list").empty() ||
+            m_given_option_keys.count("export_3mf") == 0 ||
+            std::any_of(m_transforms.begin(), m_transforms.end(), [this](const std::string &transform) {
+                return transform != "arrange" && !(transform == "orient" && m_config.opt_int("orient") == 0);
+            })) {
+            boost::nowide::cerr << "--calibration requires --export-3mf, no input models, and no geometry transforms except arrangement" << std::endl;
+            record_exit_reson(outfile_dir, CLI_INVALID_PARAMS, 0, cli_errors[CLI_INVALID_PARAMS], sliced_info);
+            flush_and_exit(CLI_INVALID_PARAMS);
+        }
+        m_input_files.push_back((boost::filesystem::path(resources_dir()) / "calib" /
+                                calibration_recipe_asset(*calibration_recipe)).string());
+    }
     bool start_gui = m_actions.empty() && !downward_check;
     if (start_gui) {
         BOOST_LOG_TRIVIAL(info) << "no action, start gui directly" << std::endl;
@@ -4349,6 +4381,18 @@ int CLI::run(int argc, char **argv)
     // Apply command line options to a more specific DynamicPrintConfig which provides normalize()
     // (command line options override --load files)
     m_print_config.apply(m_extra_config, true);
+
+    if (!calibration.empty()) {
+        try {
+            for (Model &model : m_models)
+                apply_calibration_recipe(model, m_print_config, *calibration_recipe);
+        } catch (const std::exception &error) {
+            boost::nowide::cerr << "Cannot generate calibration: " << error.what() << std::endl;
+            record_exit_reson(outfile_dir, CLI_INVALID_PARAMS, 0, cli_errors[CLI_INVALID_PARAMS], sliced_info);
+            flush_and_exit(CLI_INVALID_PARAMS);
+        }
+    }
+
 
     if (!cli_override_before.empty()) {
         std::vector<std::string> &columns = m_print_config.option<ConfigOptionStrings>("different_settings_to_system", true)->values;
@@ -8611,7 +8655,8 @@ bool CLI::setup(int argc, char **argv)
     // Local headless policy only. GUI/profile defaults remain disabled, while
     // typed flags keep their usual precedence and are recorded in exported projects.
     if (std::find(m_actions.begin(), m_actions.end(), "slice") != m_actions.end() &&
-        m_config.opt_int("retraction_guard") != 0) {
+        m_config.opt_int("retraction_guard") != 0 &&
+        (m_config.opt_string("calibration").empty() || m_given_option_keys.count("retraction_guard") != 0)) {
         if (!m_config.has("retraction_count_max"))
             m_config.set_deserialize_strict({{"retraction_count_max", "3"}});
         if (!m_config.has("retraction_extrusion_window"))

@@ -98,3 +98,11 @@ set_tests_properties(cli_local_agent_api_transport PROPERTIES LABELS "CLI;LocalA
 add_test(NAME cli_agent_gui
     COMMAND ${ORCA_CLI_TEST_PYTHON} ${CMAKE_CURRENT_SOURCE_DIR}/test_agent_gui.py)
 set_tests_properties(cli_agent_gui PROPERTIES LABELS "CLI;LocalAgentApi" TIMEOUT 45)
+
+add_test(NAME cli_calibration
+    COMMAND ${ORCA_CLI_TEST_PYTHON} ${CMAKE_CURRENT_SOURCE_DIR}/test_calibration.py
+        $<TARGET_FILE:OrcaSlicer> ${CMAKE_SOURCE_DIR}/resources/profiles/BBL)
+set_tests_properties(cli_calibration PROPERTIES
+    LABELS "CLI;RequiresApp;FlowRatioCalibration"
+    SKIP_RETURN_CODE 77
+    TIMEOUT 900)

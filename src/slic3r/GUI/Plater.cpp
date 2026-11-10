@@ -1,3 +1,4 @@
+#include "libslic3r/FlowRatioCalibration.hpp"
 #include "Plater.hpp"
 #include "../Utils/NetworkAgent.hpp"
 #include "IPrinterAgent.hpp"
@@ -17558,117 +17559,22 @@ void Plater::_calib_pa_select_added_objects() {
 // ORCA: Add pattern parameter
 void adjust_settings_for_flowrate_calib(ModelObjectPtrs& objects, bool linear, int pass, InfillPattern pattern)
 {
-    auto print_config = &wxGetApp().preset_bundle->prints.get_edited_preset().config;
-    auto printer_config  = &wxGetApp().preset_bundle->printers.get_edited_preset().config;
-    auto filament_config = &wxGetApp().preset_bundle->filaments.get_edited_preset().config;
+    auto &bundle = *wxGetApp().preset_bundle;
+    auto &print_config = bundle.prints.get_edited_preset().config;
+    DynamicPrintConfig effective = print_config;
+    effective.apply(bundle.printers.get_edited_preset().config);
+    effective.apply(bundle.filaments.get_edited_preset().config);
+    effective.apply(bundle.project_config);
+    const FlowRatioCalibrationPlan plan = plan_flow_ratio_calibration(effective, linear, pass);
 
-    /// -- scale --
-    // model is created for a 0.4 nozzle, scale z with nozzle size.
-    const ConfigOptionFloats* nozzle_diameter_config = printer_config->option<ConfigOptionFloats>("nozzle_diameter");
-    std::vector<int> extruder_types         = printer_config->option<ConfigOptionEnumsGeneric>("extruder_type")->values;
-    std::vector<int> nozzle_volume_types    = wxGetApp().preset_bundle->project_config.option<ConfigOptionEnumsGeneric>("nozzle_volume_type")->values;
-
-    assert(nozzle_diameter_config->values.size() > 0);
-    float nozzle_diameter = nozzle_diameter_config->values[0];
-    float xyScale = nozzle_diameter / 0.6;
-    //scale z to have 10 layers
-    // 2 bottom, 5 top, 3 sparse infill
-    double first_layer_height = print_config->option<ConfigOptionFloat>("initial_layer_print_height")->value;
-    double layer_height = nozzle_diameter / 2.0; // prefer 0.2 layer height for 0.4 nozzle
-    first_layer_height = std::max(first_layer_height, layer_height);
-
-    const auto canvas    = wxGetApp().plater()->canvas3D();
-    auto&      selection = canvas->get_selection();
+    const auto canvas = wxGetApp().plater()->canvas3D();
+    auto &selection = canvas->get_selection();
     selection.setup_cache();
     TransformationType transformation_type;
     transformation_type.set_relative();
-    float zscale = (first_layer_height + 9 * layer_height) / 2;
-    // only enlarge
-    if (xyScale > 1.2) {
-        selection.scale({xyScale, xyScale, zscale}, transformation_type);
-    } else {
-        selection.scale({1, 1, zscale}, transformation_type);
-    }
+    selection.scale(plan.scale, transformation_type);
     canvas->do_scale("");
-
-    auto cur_flowrate = filament_config->option<ConfigOptionFloats>("filament_flow_ratio")->get_at(0); // TODO: per-filament param
-    // Cap the speeds for the extrusion the test prints, not the profile's line width and layer height
-    const float infill_line_width = nozzle_diameter * 1.2f;
-    std::vector<double> internal_solid_speeds = generate_max_speed_parameter_value("internal_solid_infill_speed", infill_line_width, layer_height, linear, pass);
-    std::vector<double> top_surface_speeds = generate_max_speed_parameter_value("top_surface_speed", infill_line_width, layer_height, linear, pass);
-
-    // adjust parameters
-    for (auto _obj : objects) {
-        _obj->ensure_on_bed();
-        _obj->config.set_key_value("wall_loops", new ConfigOptionInt(1));
-        _obj->config.set_key_value("only_one_wall_top", new ConfigOptionBool(true));
-        _obj->config.set_key_value("thick_internal_bridges", new ConfigOptionBool(false));
-        _obj->config.set_key_value("enable_extra_bridge_layer", new ConfigOptionEnum<EnableExtraBridgeLayer>(eblDisabled));
-        _obj->config.set_key_value("internal_bridge_density", new ConfigOptionPercent(100));
-        _obj->config.set_key_value("sparse_infill_density", new ConfigOptionPercent(35));
-        _obj->config.set_key_value("min_width_top_surface", new ConfigOptionFloatOrPercent(100,true));
-        _obj->config.set_key_value("bottom_shell_layers", new ConfigOptionInt(2));
-        _obj->config.set_key_value("top_shell_layers", new ConfigOptionInt(5));
-        _obj->config.set_key_value("top_shell_thickness", new ConfigOptionFloat(0));
-        _obj->config.set_key_value("bottom_shell_thickness", new ConfigOptionFloat(0));
-        _obj->config.set_key_value("detect_thin_wall", new ConfigOptionBool(true));
-        _obj->config.set_key_value("filter_out_gap_fill", new ConfigOptionFloat(0));
-        _obj->config.set_key_value("sparse_infill_pattern", new ConfigOptionEnum<InfillPattern>(ipRectilinear));
-        _obj->config.set_key_value("top_surface_line_width", new ConfigOptionFloatOrPercent(infill_line_width, false));
-        _obj->config.set_key_value("internal_solid_infill_line_width", new ConfigOptionFloatOrPercent(infill_line_width, false));
-        // ORCA: use the pattern parameter
-        _obj->config.set_key_value("top_surface_pattern", new ConfigOptionEnum<InfillPattern>(pattern));
-        const auto *top_solid_flow = dynamic_cast<const ConfigOptionFloatsNullable *>(_obj->config.option("top_solid_infill_flow_ratio"));
-        _obj->config.set_key_value("top_solid_infill_flow_ratio",
-                                   new ConfigOptionFloatsNullable(top_solid_flow ? top_solid_flow->size() : 1, 1.0f));
-        _obj->config.set_key_value("infill_direction", new ConfigOptionFloat(45));
-        _obj->config.set_key_value("solid_infill_direction", new ConfigOptionFloat(135));
-        _obj->config.set_key_value("center_of_surface_pattern", new ConfigOptionEnum<CenterOfSurfacePattern>(CenterOfSurfacePattern::Each_Surface));
-        _obj->config.set_key_value("separated_infills", new ConfigOptionBool(false));
-        _obj->config.set_key_value("align_infill_direction_to_model", new ConfigOptionBool(true));
-        _obj->config.set_key_value("ironing_type", new ConfigOptionEnum<IroningType>(IroningType::NoIroning));
-        _obj->config.set_key_value("internal_solid_infill_speed", new ConfigOptionFloatsNullable(internal_solid_speeds));
-        _obj->config.set_key_value("top_surface_speed", new ConfigOptionFloatsNullable(top_surface_speeds));
-        _obj->config.set_key_value("seam_slope_type", new ConfigOptionEnum<SeamScarfType>(SeamScarfType::None));
-        _obj->config.set_key_value("gap_fill_target", new ConfigOptionEnum<GapFillTarget>(GapFillTarget::gftNowhere));
-        print_config->set_key_value("max_volumetric_extrusion_rate_slope", new ConfigOptionFloat(0));
-        // ORCA: request the calibration's special toolpath order (chords first, center spiral
-        // last and inside-out) so opposing directions collide into the tactile lip the test
-        // reads. The special order only applies while the fill order is Default, so reset the
-        // profile's fill order on the calibration objects; changing the setting on the object
-        // afterwards deliberately overrides the special order.
-        _obj->config.set_key_value("calib_flowrate_topinfill_special_order", new ConfigOptionBool(true));
-        _obj->config.set_key_value("top_surface_fill_order", new ConfigOptionEnum<SurfaceFillOrder>(SurfaceFillOrder::Default));
-
-        // extract flowrate from name, filename format: flowrate_xxx
-        std::string obj_name = _obj->name;
-        assert(obj_name.length() > 9);
-        obj_name = obj_name.substr(9);
-        if (obj_name[0] == 'm')
-            obj_name[0] = '-';
-        // Orca: force set locale to C to avoid parsing error
-        const std::string _loc = std::setlocale(LC_NUMERIC, nullptr);
-        std::setlocale(LC_NUMERIC,"C");
-        auto              modifier  = 1.0f;
-        try {
-            modifier = stof(obj_name);
-        } catch (...) {
-        }
-        // restore locale
-        std::setlocale(LC_NUMERIC, _loc.c_str());
-
-        if(linear)
-            _obj->config.set_key_value("print_flow_ratio", new ConfigOptionFloat((cur_flowrate + modifier)/cur_flowrate));
-        else
-            _obj->config.set_key_value("print_flow_ratio", new ConfigOptionFloat(1.0f + modifier/100.f));
-
-    }
-
-    print_config->set_key_value("layer_height", new ConfigOptionFloat(layer_height));
-    print_config->set_key_value("alternate_extra_wall", new ConfigOptionBool(false));
-    print_config->set_key_value("initial_layer_print_height", new ConfigOptionFloat(first_layer_height));
-    print_config->set_key_value("reduce_crossing_wall", new ConfigOptionBool(true));
-    print_config->set_key_value("enable_wrapping_detection", new ConfigOptionBool(false));
+    apply_flow_ratio_calibration(objects, print_config, plan, linear, pass, pattern);
 
     wxGetApp().get_tab(Preset::TYPE_PRINT)->update_dirty();
     wxGetApp().get_tab(Preset::TYPE_FILAMENT)->update_dirty();
@@ -17693,21 +17599,8 @@ void Plater::calib_flowrate(bool is_linear, int pass, InfillPattern pattern) {
 
     wxGetApp().mainframe->select_tab(TAB_ID_PREPARE);
 
-    if (is_linear) {
-        if (pass == 1)
-            add_model(false,
-                      (boost::filesystem::path(Slic3r::resources_dir()) / "calib" / "filament_flow" / "Orca-LinearFlow.3mf").string());
-        else
-            add_model(false,
-                      (boost::filesystem::path(Slic3r::resources_dir()) / "calib" / "filament_flow" / "Orca-LinearFlow_fine.3mf").string());
-    } else {
-        if (pass == 1)
-            add_model(false,
-                      (boost::filesystem::path(Slic3r::resources_dir()) / "calib" / "filament_flow" / "flowrate-test-pass1.3mf").string());
-        else
-            add_model(false,
-                      (boost::filesystem::path(Slic3r::resources_dir()) / "calib" / "filament_flow" / "flowrate-test-pass2.3mf").string());
-    }
+    add_model(false, (boost::filesystem::path(Slic3r::resources_dir()) / "calib" /
+                      flow_ratio_calibration_asset(is_linear, pass)).string());
 
     // ORCA: pass the pattern
     adjust_settings_for_flowrate_calib(model().objects, is_linear, pass, pattern);

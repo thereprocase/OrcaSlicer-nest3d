@@ -13141,6 +13141,11 @@ CLIMiscConfigDef::CLIMiscConfigDef()
 {
     ConfigOptionDef* def;
 
+    def = this->add("calibration", coString);
+    def->label = L("Calibration recipe");
+    def->tooltip = L("Generate a stock calibration model with the same settings recipe as the GUI. Use list to show GUI recipes and native CLI support. Supported recipes: flow-ratio, flow-ratio-fine, flow-ratio-yolo, flow-ratio-yolo-fine. Use loaded printer, process and filament presets, with --export-3mf and optionally --slice. Extra input models are not accepted.");
+    def->set_default_value(new ConfigOptionString(""));
+
     def = this->add("retraction_guard", coInt);
     def->label = L("CLI retraction guard");
     def->tooltip = L("Enable local CLI defaults for travel retraction protection (1), or use the supplied profiles without those defaults (0). Explicit retraction flags override individual defaults. GUI defaults are unchanged.");

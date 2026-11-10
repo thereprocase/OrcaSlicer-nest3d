@@ -268,3 +268,52 @@ python3 tests/cli-agent/test_agent_cli.py -k bridge
 The connection is verified: a bridge with a self-signed certificate is refused unless that
 certificate (or its CA) is passed with `--bridge-ca-file PATH`. `--bridge-insecure` skips the checks;
 anyone able to intercept the connection could then read the token.
+
+## Flow-ratio calibration
+
+`--calibration` loads the shipped calibration model and invokes the same native settings recipe used
+by the GUI Calibration menu. It accepts `flow-ratio` (classic pass 1), `flow-ratio-fine` (classic pass 2),
+`flow-ratio-yolo`, and `flow-ratio-yolo-fine`. Supply printer, process and filament profiles as usual;
+no input mesh is needed or accepted. Exporting a project is required, and slicing is optional:
+
+```bash
+orca-slicer --datadir DATA \
+  --load-settings 'machine.json;process.json' --load-filaments filament.json \
+  --calibration flow-ratio --slice 0 --export-3mf flow.3mf --outputdir OUT
+```
+
+The selected recipe overrides the same process/object fields as the GUI: Archimedean-chords top
+surfaces, calibration-specific fill order, per-surface centering, shell and infill setup, widths,
+no ironing or scarf seams, and common flow-limited top/solid speeds. Object names select the patch
+modifiers. Classic modifiers multiply the current filament flow ratio; YOLO modifiers add to it.
+The material temperatures, pressure advance and base flow ratio remain those of the loaded profile.
+No cloud profiles or printer settings are changed.
+
+Nozzle scaling uses the same ten-layer target as the GUI. Arrangement may be requested, but rotation,
+other geometry transforms, and extra input models are rejected. CLI-only retraction guards are not
+implicitly enabled on calibration jobs; explicit guard flags remain available.
+
+Currently this native option supports flat-bed flow-ratio tests only. Temperature, pressure advance,
+retraction, maximum volumetric speed, VFA, cornering, input shaping, cooling-fan towers, and belt
+counterrotation/support wedges remain GUI-only generators. Unsupported recipe names fail without
+exporting a substitute test. Hardware-driven automatic calibrations are separate from model generation.
+
+`--calibration list` emits a JSON catalogue of the GUI recipes and whether this CLI can generate each
+one. The shared dispatcher rejects a known but unimplemented generator explicitly. The current GUI
+entrypoint map is:
+
+| Recipes | GUI generator | Additional inputs / behavior beyond loading an asset |
+|---|---|---|
+| Four flow-ratio recipes | `adjust_settings_for_flowrate_calib` | Shared native recipe, nozzle scaling, labelled percentage/additive patch factors |
+| PA line, pattern, tower | `Plater::calib_pa` | Start/end/step, extruder, numbered lines, model variant, PA-specific G-code generation |
+| Temperature | `Plater::calib_temp` | Temperature range, model variant, nozzle resize, block cutting, runtime `Calib_Params`; belt uses sectioned objects/events |
+| Maximum volumetric speed | `Plater::calib_max_vol_speed` | Range, thick-line/spiral setup, bed-aware scaling, tower cut, volume-to-speed conversion, runtime parameters |
+| Retraction | `Plater::calib_retraction` | Range, nozzle-dependent layers, firmware-retraction disable, tower cut, runtime parameters |
+| VFA | `Plater::calib_VFA` | Speed range, resolved layer height, optional nozzle scaling, layer-count blocks, slowdown/spiral setup |
+| Cornering | `Plater::Calib_Cornering` | Range, model selection, acceleration/speed vectors, firmware-specific runtime commands |
+| Input-shaping frequency/damping | `Plater::calib_input_shaping_freq` / `calib_input_shaping_damp` | Per-axis ranges, shaper, model selection, firmware-specific runtime commands |
+| Four fan towers | `Plater::calib_fan_tower` | Fan range, appropriate model, tower cutting/nozzle resize, overhang classification overrides, runtime cooling parameters |
+
+The menu dispatch lives in `MainFrame::run_calibration`; recipe geometry/configuration lives in
+`Plater.cpp`. Tower `Calib_Params` also drive the G-code writer and cooling buffer. Loading the model
+or storing only visible settings does not reproduce those runtime modes.
