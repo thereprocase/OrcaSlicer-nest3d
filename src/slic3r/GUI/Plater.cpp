@@ -1,6 +1,7 @@
 #include "Plater.hpp"
 #include "libslic3r/FlowRatioCalibration.hpp"
 #include "libslic3r/TowerCalibration.hpp"
+#include "libslic3r/PressureAdvanceCalibration.hpp"
 #include "libslic3r/ParameterUtils.hpp"
 #include "../Utils/NetworkAgent.hpp"
 #include "IPrinterAgent.hpp"
@@ -17159,13 +17160,10 @@ void Plater::calib_pa(const Calib_Params& params)
     wxGetApp().mainframe->select_tab(TAB_ID_PREPARE);
     auto print_config = &wxGetApp().preset_bundle->prints.get_edited_preset().config;
     auto printer_config = &wxGetApp().preset_bundle->printers.get_edited_preset().config;
-    print_config->set_key_value("overhang_reverse", new ConfigOptionBool(false));
-    print_config->set_key_value("precise_z_height", new ConfigOptionBool(false));
-    print_config->set_key_value("wipe_inward", new ConfigOptionBool(false));
-    printer_config->set_key_value("resonance_avoidance", new ConfigOptionBool{false});
+    configure_pressure_advance_calibration(*print_config, *printer_config);
     switch (params.mode) {
         case CalibMode::Calib_PA_Line:
-            add_model(false, Slic3r::resources_dir() + "/calib/pressure_advance/pressure_advance_test.drc");
+            add_model(false, Slic3r::resources_dir() + "/calib/" + pressure_advance_calibration_asset(params.mode));
             break;
         case CalibMode::Calib_PA_Pattern:
             _calib_pa_pattern(params);
@@ -17437,36 +17435,14 @@ void Plater::cut_horizontal(size_t obj_idx, size_t instance_idx, double z, Model
 }
 
 void Plater::_calib_pa_tower(const Calib_Params& params) {
-    if (!add_model(false, Slic3r::resources_dir() + "/calib/pressure_advance/tower_with_seam.drc"))
+    if (!add_model(false, Slic3r::resources_dir() + "/calib/" + pressure_advance_calibration_asset(params.mode)))
         return;
 
-    auto& print_config = wxGetApp().preset_bundle->prints.get_edited_preset().config;
-    auto printer_config = &wxGetApp().preset_bundle->printers.get_edited_preset().config;
-    auto filament_config = &wxGetApp().preset_bundle->filaments.get_edited_preset().config;
-
-    const double nozzle_diameter = printer_config->option<ConfigOptionFloats>("nozzle_diameter")->get_at(0);
-
-    print_config.set_key_value("enable_wrapping_detection", new ConfigOptionBool(false));
-    filament_config->set_key_value("slow_down_layer_time", new ConfigOptionFloats{ 1.0f });
-
-
-    auto& obj_cfg = model().objects[0]->config;
-
-    obj_cfg.set_key_value("alternate_extra_wall", new ConfigOptionBool(false));
-    auto full_config = wxGetApp().preset_bundle->full_config();
-    update_speed_parameter("outer_wall_speed");
-    update_speed_parameter("inner_wall_speed");
-    obj_cfg.set_key_value("seam_position", new ConfigOptionEnum<SeamPosition>(spRear));
-    obj_cfg.set_key_value("wall_loops", new ConfigOptionInt(2));
-    obj_cfg.set_key_value("top_shell_layers", new ConfigOptionInt(0));
-    obj_cfg.set_key_value("bottom_shell_layers", new ConfigOptionInt(0));
-    obj_cfg.set_key_value("sparse_infill_density", new ConfigOptionPercent(0));
-    obj_cfg.set_key_value("brim_type", new ConfigOptionEnum<BrimType>(btEar));
-    obj_cfg.set_key_value("brim_object_gap", new ConfigOptionFloat(.0f));
-    obj_cfg.set_key_value("brim_ears_max_angle", new ConfigOptionFloat(135.f));
-    obj_cfg.set_key_value("brim_width", new ConfigOptionFloat(6.f));
-    obj_cfg.set_key_value("seam_slope_type", new ConfigOptionEnum<SeamScarfType>(SeamScarfType::None));
-    print_config.set_key_value("max_volumetric_extrusion_rate_slope", new ConfigOptionFloat(0));
+    auto &bundle = *wxGetApp().preset_bundle;
+    apply_pressure_advance_tower_calibration(model(), bundle.prints.get_edited_preset().config,
+        bundle.filaments.get_edited_preset().config, bundle.printers.get_edited_preset().config,
+        bundle.project_config, params,
+        [this](double z, ModelObjectCutAttributes attributes) { cut_horizontal(0, 0, z, attributes); });
 
     changed_objects({ 0 });
     wxGetApp().get_tab(Preset::TYPE_PRINT)->update_dirty();
@@ -17475,12 +17451,6 @@ void Plater::_calib_pa_tower(const Calib_Params& params) {
     wxGetApp().get_tab(Preset::TYPE_PRINT)->reload_config();
     wxGetApp().get_tab(Preset::TYPE_FILAMENT)->reload_config();
     wxGetApp().get_tab(Preset::TYPE_PRINTER)->reload_config();
-
-    auto new_height = std::ceil((params.end - params.start) / params.step) + 1;
-    auto obj_bb = model().objects[0]->bounding_box_exact();
-    if (new_height < obj_bb.size().z()) {
-        cut_horizontal(0, 0, new_height, ModelObjectCutAttribute::KeepLower);
-    }
 
     _calib_apply_belt_mode();
     _calib_pa_select_added_objects();

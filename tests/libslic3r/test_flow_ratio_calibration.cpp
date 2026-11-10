@@ -105,7 +105,7 @@ TEST_CASE("The calibration catalogue reports GUI-only recipes without substituti
             CHECK_FALSE(calibration_recipe_asset(recipe).empty());
         }
     }
-    CHECK(supported == 15);
+    CHECK(supported == 17);
     REQUIRE(find_calibration_recipe("pressure-advance-pattern") != nullptr);
     CHECK_FALSE(find_calibration_recipe("pressure-advance-pattern")->cli_supported);
     CHECK(find_calibration_recipe("not-a-calibration") == nullptr);

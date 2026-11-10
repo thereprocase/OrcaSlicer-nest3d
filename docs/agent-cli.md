@@ -330,6 +330,13 @@ underlying GUI tower helper does when resizing is disabled. VFA additionally acc
 blocks and runtime stepping retain 25 layers per speed block. Other towers retain the GUI's
 existing height/ramp formulas, including their end-band behavior.
 
+`pressure-advance-line` and `pressure-advance-tower` share the GUI's common PA settings and stock
+model selection. The tower also shares its wall-speed calculation, shell/brim setup and height cut.
+Both require an increasing PA start/end range and positive step. The slicer's existing PA line and
+per-layer tower generators emit the actual pressure-advance commands. `--calibration-print-numbers 1`
+(default) includes the PA line labels; `0` omits them. The line generator retains the GUI's bed-height
+limit on the number of printed lines.
+
 Cornering and input shaping support the same Klipper, Marlin 2 and RepRapFirmware writers as the GUI.
 They continuously interpolate across layers; `--calibration-step` is unused. Cornering requires start/end
 values (jerk/square-corner velocity, or Marlin junction deviation when configured). Input-shaping damping
@@ -356,7 +363,7 @@ calibration G-code; rerun the calibration command to regenerate it. Reopening th
 slicing it as an ordinary project does not reproduce the calibration mode. Recipe setting changes use the existing preset override metadata so their values survive reopening.
 No profile or project-format keys are added for the runtime requests.
 
-Pressure advance, belt counterrotation/support wedges and belt sectioned temperature tests
+PA pattern, belt counterrotation/support wedges and belt sectioned temperature tests
 remain GUI-only generators. Unsupported recipe names fail without
 exporting a substitute test. Hardware-driven automatic calibrations are separate from model generation.
 
@@ -367,7 +374,8 @@ entrypoint map is:
 | Recipes | GUI generator | Additional inputs / behavior beyond loading an asset |
 |---|---|---|
 | Four flow-ratio recipes | `adjust_settings_for_flowrate_calib` | Shared native recipe, nozzle scaling, labelled percentage/additive patch factors |
-| PA line, pattern, tower | `Plater::calib_pa` | Start/end/step, extruder, numbered lines, model variant, PA-specific G-code generation |
+| PA line and tower | `Plater::calib_pa` | Shared common settings and stock assets; shared tower speed/cut recipe; native PA G-code and line labels |
+| PA pattern | `Plater::_calib_pa_pattern` | Batch speed/acceleration layout, per-plate custom G-code regeneration; CLI unsupported |
 | Temperature | `Plater::calib_temp` | Shared flat-bed tower blocks and runtime parameters; belt uses sectioned objects/events |
 | Maximum volumetric speed | `Plater::calib_max_vol_speed` | Shared thick-line/spiral setup, bed-aware scaling, tower cut and volume-to-speed conversion |
 | Retraction | `Plater::calib_retraction` | Shared nozzle-dependent layers, firmware-retraction disable and tower cut |

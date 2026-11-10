@@ -9,6 +9,7 @@
 #include "PrintConfig.hpp"
 #include "TowerCalibration.hpp"
 #include "ParameterUtils.hpp"
+#include "PressureAdvanceCalibration.hpp"
 
 #include <algorithm>
 #include <cmath>
@@ -24,9 +25,9 @@ const std::vector<CalibrationRecipe> &calibration_recipes()
         {"flow-ratio-fine", CalibrationGenerator::FlowRatio, true, false, 2},
         {"flow-ratio-yolo", CalibrationGenerator::FlowRatio, true, true, 1},
         {"flow-ratio-yolo-fine", CalibrationGenerator::FlowRatio, true, true, 2},
-        {"pressure-advance-line", CalibrationGenerator::PressureAdvance, false},
+        {"pressure-advance-line", CalibrationGenerator::PressureAdvance, true, false, 1, CalibMode::Calib_PA_Line},
         {"pressure-advance-pattern", CalibrationGenerator::PressureAdvance, false},
-        {"pressure-advance-tower", CalibrationGenerator::PressureAdvance, false},
+        {"pressure-advance-tower", CalibrationGenerator::PressureAdvance, true, false, 1, CalibMode::Calib_PA_Tower},
         {"temperature", CalibrationGenerator::Temperature, true, false, 1, CalibMode::Calib_Temp_Tower},
         {"max-volumetric-speed", CalibrationGenerator::MaxVolumetricSpeed, true, false, 1, CalibMode::Calib_Vol_speed_Tower},
         {"retraction", CalibrationGenerator::Retraction, true, false, 1, CalibMode::Calib_Retraction_tower},
@@ -55,6 +56,8 @@ std::string calibration_recipe_asset(const CalibrationRecipe &recipe, const Cali
 {
     if (recipe.cli_supported && recipe.generator == CalibrationGenerator::FlowRatio)
         return flow_ratio_calibration_asset(recipe.linear, recipe.pass);
+    if (recipe.cli_supported && recipe.generator == CalibrationGenerator::PressureAdvance)
+        return pressure_advance_calibration_asset(recipe.mode);
     if (recipe.cli_supported && recipe.mode != CalibMode::Calib_None)
         return tower_calibration_asset(recipe.mode, params.test_model);
     throw std::invalid_argument("Native CLI calibration generation is unavailable for " + recipe.name);
@@ -139,6 +142,11 @@ Calib_Params apply_calibration_recipe(Model &model, DynamicPrintConfig &config, 
             cut_calibration_model(model, z, attributes);
         };
         switch (recipe.generator) {
+        case CalibrationGenerator::PressureAdvance:
+            configure_pressure_advance_calibration(config, config);
+            if (runtime.mode == CalibMode::Calib_PA_Tower)
+                return apply_pressure_advance_tower_calibration(model, config, config, config, config, runtime, cut);
+            return runtime;
         case CalibrationGenerator::MaxVolumetricSpeed:
             return apply_max_volumetric_speed_calibration(model, config, config, config, runtime, cut);
         case CalibrationGenerator::Retraction:

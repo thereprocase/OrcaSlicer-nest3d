@@ -33,7 +33,8 @@ def main():
     if not args.binary.is_file():
         print('SKIP: built slicer unavailable')
         return 77
-    ranges = {'retraction': (.2, .6, .2), 'max-volumetric-speed': (4, 8, 1), 'vfa': (40, 80, 20),
+    ranges = {'pressure-advance-line': (0, .04, .02), 'pressure-advance-tower': (0, .04, .02),
+              'retraction': (.2, .6, .2), 'max-volumetric-speed': (4, 8, 1), 'vfa': (40, 80, 20),
               'temperature': (250, 240, 5), 'overhang-fan': (20, 40, 10), 'part-fan': (20, 40, 10),
               'bridge-fan': (20, 40, 10), 'small-feature-fan': (20, 40, 10)}
     with tempfile.TemporaryDirectory(prefix='orca-cli-towers-') as directory:
@@ -55,7 +56,20 @@ def main():
                 gcode = archive.read('Metadata/plate_1.gcode').decode()
             assert config['resonance_avoidance'] == '0', recipe
             changed = config['different_settings_to_system']
-            if recipe == 'retraction':
+            if recipe.startswith('pressure-advance-'):
+                advances = {float(value) for value in re.findall(r'^M900 K([\d.]+)', gcode, re.M)}
+                assert {0, .02, .04}.issubset(advances), (recipe, advances)
+                if recipe == 'pressure-advance-line':
+                    assert '; FEATURE: Top surface' in gcode
+                    unlabelled = output / 'unlabelled'
+                    unlabelled.mkdir()
+                    without_numbers = command + ['--calibration-print-numbers', '0']
+                    without_numbers[without_numbers.index('--outputdir') + 1] = str(unlabelled)
+                    result = subprocess.run(without_numbers, capture_output=True, text=True, timeout=180)
+                    assert result.returncode == 0, result.stdout[-2000:] + result.stderr[-2000:]
+                    with zipfile.ZipFile(unlabelled / 'tower.3mf') as archive:
+                        assert '; FEATURE: Top surface' not in archive.read('Metadata/plate_1.gcode').decode()
+            elif recipe == 'retraction':
                 ramp = [(float(z), float(length)) for z, length in re.findall(
                     r'; Calib_Retraction_tower: Z_HEIGHT: ([\d.]+), length:([\d.]+)', gcode)]
                 assert len(ramp) > 5, ramp

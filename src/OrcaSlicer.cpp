@@ -1599,6 +1599,8 @@ int CLI::run(int argc, char **argv)
             calibration_params.vfa_layer_height = m_config.opt_float("calibration_layer_height");
             calibration_params.test_model = m_config.opt_int("calibration_test_model");
             calibration_params.shaper_type = m_config.opt_string("calibration_shaper");
+            calibration_params.print_numbers = calibration_recipe->mode == CalibMode::Calib_PA_Line &&
+                m_config.opt_int("calibration_print_numbers") != 0;
             if (frequency || damping) {
                 const std::string text = m_config.opt_string("calibration_frequencies");
                 std::vector<double> values;

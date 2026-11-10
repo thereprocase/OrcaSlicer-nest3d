@@ -13179,6 +13179,13 @@ CLIMiscConfigDef::CLIMiscConfigDef()
     def->min = 0.;
     def->set_default_value(new ConfigOptionFloat(0.));
 
+    def = this->add("calibration_print_numbers", coInt);
+    def->label = L("Calibration line numbers");
+    def->tooltip = L("Print pressure-advance values beside the PA line test (1), or omit the labels (0).");
+    def->min = 0;
+    def->max = 1;
+    def->set_default_value(new ConfigOptionInt(1));
+
     def = this->add("calibration_test_model", coInt);
     def->label = L("Calibration model variant");
     def->tooltip = L("Input shaping: ringing tower (0) or fast tower (1). Cornering also accepts the SCV model (2).");
