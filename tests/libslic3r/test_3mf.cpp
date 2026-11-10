@@ -25,6 +25,7 @@
 #include "test_utils.hpp"
 
 #include "libslic3r/Config.hpp"
+#include "libslic3r/CustomGCode.hpp"
 #include "libslic3r/Geometry.hpp"
 #include <cstddef>
 #include "libslic3r/Point.hpp"
@@ -304,6 +305,54 @@ SCENARIO("Export+Import geometry to/from 3mf file cycle", "[3mf]") {
             }
         }
     }
+}
+
+TEST_CASE("Per-plate custom G-code retains command line breaks through project round trips", "[3mf][PressureAdvanceCalibration][Regression]")
+{
+    Model model;
+    model.add_object("anchor", "", make_cube(5., 5., 0.8))->add_instance();
+    ScopedTemporaryDir backup_dir("orca_custom_gcode_src");
+    model.set_backup_path(backup_dir.string());
+    const std::string commands = "; start pressure advance pattern for layer\n"
+                                 "M900 K0.02\nG1 X10 Y20 E0.3 F1800\n"
+                                 "; end pressure advance pattern for layer\n";
+    for (int plate = 0; plate < 2; ++plate) {
+        auto &info = model.plates_custom_gcodes[plate];
+        info.mode = CustomGCode::Mode::SingleExtruder;
+        for (int layer = 1; layer <= 4; ++layer)
+            info.gcodes.push_back({0.2 * layer, CustomGCode::Type::Custom, 1, "", commands});
+    }
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    ScopedTemporaryFile temp(".3mf");
+    StoreParams params;
+    params.path = temp.string();
+    params.model = &model;
+    params.config = &config;
+    params.strategy = SaveStrategy::Zip64 | SaveStrategy::Silence;
+    REQUIRE(store_bbs_3mf(params));
+
+    Model restored;
+    ScopedTemporaryDir restored_backup("orca_custom_gcode_dst");
+    restored.set_backup_path(restored_backup.string());
+    DynamicPrintConfig restored_config;
+    ConfigSubstitutionContext substitutions{ForwardCompatibilitySubstitutionRule::Enable};
+    PlateDataPtrs plates;
+    std::vector<Preset *> presets;
+    bool is_bbl = false, is_orca = false;
+    Semver version;
+    REQUIRE(load_bbs_3mf(temp.string().c_str(), &restored_config, &substitutions, &restored, &plates,
+                         &presets, &is_bbl, &is_orca, &version, nullptr,
+                         LoadStrategy::LoadModel | LoadStrategy::LoadConfig));
+    REQUIRE(restored.plates_custom_gcodes.size() == model.plates_custom_gcodes.size());
+    for (const auto &[plate, expected] : model.plates_custom_gcodes) {
+        REQUIRE(restored.plates_custom_gcodes.count(plate) == 1);
+        const auto &actual = restored.plates_custom_gcodes.at(plate);
+        CHECK(actual.mode == expected.mode);
+        REQUIRE(actual.gcodes.size() == expected.gcodes.size());
+        for (size_t layer = 0; layer < actual.gcodes.size(); ++layer)
+            CHECK(actual.gcodes[layer].extra == expected.gcodes[layer].extra);
+    }
+    release_PlateData_list(plates);
 }
 
 TEST_CASE("Volumetric per-extruder exclusions survive a 3MF round-trip", "[3mf][ExclusionVolume][MultiNozzle]")
