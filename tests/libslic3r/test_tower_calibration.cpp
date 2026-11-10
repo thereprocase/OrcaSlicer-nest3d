@@ -208,3 +208,89 @@ TEST_CASE("Fan calibration preserves each fan mode and enables its required over
     CHECK(config.option<ConfigOptionEnumsGeneric>("overhang_fan_threshold")->get_at(0) ==
         (recipe == "overhang-fan" ? Overhang_threshold_2_4 : Overhang_threshold_bridge));
 }
+
+TEST_CASE("Motion calibration shares the GUI cooling and pressure advance setup for every variant", "[TowerCalibration]")
+{
+    const std::string recipe = GENERATE("input-shaping-frequency", "input-shaping-damping", "cornering");
+    auto config = tower_profile();
+    config.set_deserialize_strict({{"gcode_flavor", "klipper"}, {"machine_max_speed_x", "250"},
+        {"machine_max_speed_y", "180"}, {"machine_max_acceleration_extruding", "5000"},
+        {"machine_max_jerk_x", "8"}, {"machine_max_jerk_y", "3"}, {"default_jerk", "7"},
+        {"enable_pressure_advance", "0,1"}, {"pressure_advance", "0.064,0.089"},
+        {"adaptive_pressure_advance", "1,1"}, {"layer_height", "0.24"}, {"resonance_avoidance", "1"}});
+    auto model = tower_model();
+    Calib_Params request;
+    request.start = recipe == "cornering" ? 1. : 0.1;
+    request.end = recipe == "cornering" ? 10. : 0.3;
+    request.step = 0.; // The GUI continuously interpolates these tests across the layers.
+    request.freqStartX = 40.;
+    request.freqStartY = 50.;
+    request.freqEndX = 60.;
+    request.freqEndY = 70.;
+    const auto runtime = apply_calibration_recipe(model, config, *find_calibration_recipe(recipe), "archimedeanchords", request);
+    CHECK(runtime.mode == find_calibration_recipe(recipe)->mode);
+    CHECK_FALSE(config.opt_bool("resonance_avoidance"));
+    CHECK_THAT(config.option<ConfigOptionFloats>("slow_down_layer_time")->get_at(0), WithinAbs(0., 1e-8));
+    CHECK_THAT(config.option<ConfigOptionFloats>("outer_wall_speed")->get_at(0), WithinAbs(180., 1e-8));
+    CHECK_THAT(config.option<ConfigOptionFloats>("outer_wall_acceleration")->get_at(0), WithinAbs(5000., 1e-8));
+    CHECK(config.option<ConfigOptionBools>("enable_pressure_advance")->get_at(0));
+    CHECK(config.option<ConfigOptionBools>("enable_pressure_advance")->get_at(1));
+    CHECK_THAT(config.option<ConfigOptionFloats>("pressure_advance")->get_at(0), WithinAbs(0., 1e-8));
+    CHECK_THAT(config.option<ConfigOptionFloats>("pressure_advance")->get_at(1), WithinAbs(0.089, 1e-8));
+    CHECK_FALSE(config.option<ConfigOptionBools>("adaptive_pressure_advance")->get_at(0));
+    CHECK(config.option<ConfigOptionBools>("adaptive_pressure_advance")->get_at(1));
+    CHECK(config.opt_bool("spiral_mode"));
+    if (recipe == "cornering") {
+        CHECK(config.opt_bool("input_shaping_emit"));
+        CHECK(config.opt_enum<InputShaperType>("input_shaping_type") == InputShaperType::Disable);
+        CHECK_THAT(config.option<ConfigOptionFloats>("machine_max_jerk_y")->get_at(0), WithinAbs(request.end, 1e-8));
+    } else {
+        CHECK_FALSE(config.opt_bool("input_shaping_emit"));
+        CHECK_THAT(config.option<ConfigOptionFloats>("machine_max_jerk_y")->get_at(0), WithinAbs(5., 1e-8));
+        CHECK_THAT(config.option<ConfigOptionFloats>("default_jerk")->get_at(0), WithinAbs(0., 1e-8));
+        CHECK(runtime.shaper_type == "Default");
+    }
+    CHECK_THAT(config.opt_float("layer_height"), WithinAbs(recipe == "input-shaping-frequency" ? 0.2 : 0.24, 1e-8));
+}
+
+TEST_CASE("Cornering calibration uses the Marlin junction deviation path when configured", "[TowerCalibration]")
+{
+    auto config = tower_profile();
+    config.set_deserialize_strict({{"gcode_flavor", "marlin2"}, {"machine_max_junction_deviation", "0.2"},
+        {"default_junction_deviation", "0.1"}, {"machine_max_jerk_y", "10"}});
+    auto model = tower_model();
+    Calib_Params request;
+    request.start = 0.01;
+    request.end = 0.15;
+    request.step = 0.;
+    apply_calibration_recipe(model, config, *find_calibration_recipe("cornering"), "archimedeanchords", request);
+    CHECK_THAT(config.option<ConfigOptionFloats>("machine_max_junction_deviation")->get_at(0), WithinAbs(request.end, 1e-8));
+    CHECK_THAT(config.option<ConfigOptionFloats>("default_junction_deviation")->get_at(0), WithinAbs(0., 1e-8));
+    CHECK_THAT(config.option<ConfigOptionFloats>("machine_max_jerk_y")->get_at(0), WithinAbs(10., 1e-8));
+}
+
+TEST_CASE("Motion calibration selects the same stock model variants as the GUI", "[TowerCalibration]")
+{
+    Calib_Params request;
+    request.test_model = 0;
+    CHECK(calibration_recipe_asset(*find_calibration_recipe("cornering"), request) == "input_shaping/ringing_tower.drc");
+    request.test_model = 1;
+    CHECK(calibration_recipe_asset(*find_calibration_recipe("input-shaping-frequency"), request) == "input_shaping/fast_tower_test.drc");
+    request.test_model = 2;
+    CHECK(calibration_recipe_asset(*find_calibration_recipe("cornering"), request) == "cornering/SCV-V2.drc");
+}
+
+TEST_CASE("Input shaping rejects unsupported firmware before changing the model or profile", "[TowerCalibration]")
+{
+    auto config = tower_profile();
+    config.set_deserialize_strict({{"gcode_flavor", "marlin"}});
+    const auto before = config;
+    auto model = tower_model();
+    Calib_Params request;
+    request.start = 0.1;
+    request.freqStartX = request.freqStartY = 30.;
+    request.freqEndX = request.freqEndY = 60.;
+    CHECK_THROWS_AS(apply_calibration_recipe(model, config, *find_calibration_recipe("input-shaping-frequency"), "archimedeanchords", request), std::invalid_argument);
+    CHECK(config == before);
+    CHECK(model.objects.front()->config.empty());
+}

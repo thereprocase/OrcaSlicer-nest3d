@@ -105,9 +105,9 @@ TEST_CASE("The calibration catalogue reports GUI-only recipes without substituti
             CHECK_FALSE(calibration_recipe_asset(recipe).empty());
         }
     }
-    CHECK(supported == 12);
-    REQUIRE(find_calibration_recipe("cornering") != nullptr);
-    CHECK_FALSE(find_calibration_recipe("cornering")->cli_supported);
+    CHECK(supported == 15);
+    REQUIRE(find_calibration_recipe("pressure-advance-pattern") != nullptr);
+    CHECK_FALSE(find_calibration_recipe("pressure-advance-pattern")->cli_supported);
     CHECK(find_calibration_recipe("not-a-calibration") == nullptr);
 }
 

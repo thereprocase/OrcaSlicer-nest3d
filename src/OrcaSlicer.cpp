@@ -50,6 +50,8 @@
 #include "libslic3r/CustomGCode.hpp"
 #include <memory>
 #include <sstream>
+#include <locale>
+#include <istream>
 #include <iomanip>
 #include <iterator>
 #include "libslic3r/ClipperUtils.hpp"
@@ -1579,10 +1581,14 @@ int CLI::run(int argc, char **argv)
             flush_and_exit(CLI_INVALID_PARAMS);
         }
         if (calibration_recipe->generator != CalibrationGenerator::FlowRatio) {
+            const bool frequency = calibration_recipe->generator == CalibrationGenerator::InputShapingFrequency;
+            const bool damping = calibration_recipe->generator == CalibrationGenerator::InputShapingDamping;
+            const bool continuous = frequency || damping || calibration_recipe->generator == CalibrationGenerator::Cornering;
             // Runtime modes live on Print, just as in the GUI. An unsliced project would lose them on reopen.
-            if (m_given_option_keys.count("slice") == 0 || m_given_option_keys.count("calibration_start") == 0 ||
-                m_given_option_keys.count("calibration_end") == 0 || m_given_option_keys.count("calibration_step") == 0) {
-                boost::nowide::cerr << "Tower calibration requires --slice and explicit --calibration-start, --calibration-end and --calibration-step" << std::endl;
+            if (m_given_option_keys.count("slice") == 0 ||
+                (!frequency && (m_given_option_keys.count("calibration_start") == 0 || m_given_option_keys.count("calibration_end") == 0)) ||
+                (!continuous && m_given_option_keys.count("calibration_step") == 0)) {
+                boost::nowide::cerr << "Tower calibration requires --slice, explicit start/end for range tests, and step for discrete towers" << std::endl;
                 record_exit_reson(outfile_dir, CLI_INVALID_PARAMS, 0, cli_errors[CLI_INVALID_PARAMS], sliced_info);
                 flush_and_exit(CLI_INVALID_PARAMS);
             }
@@ -1591,9 +1597,41 @@ int CLI::run(int argc, char **argv)
             calibration_params.step = m_config.opt_float("calibration_step");
             calibration_params.nozzle_based_resize = m_config.opt_int("calibration_resize") != 0;
             calibration_params.vfa_layer_height = m_config.opt_float("calibration_layer_height");
+            calibration_params.test_model = m_config.opt_int("calibration_test_model");
+            calibration_params.shaper_type = m_config.opt_string("calibration_shaper");
+            if (frequency || damping) {
+                const std::string text = m_config.opt_string("calibration_frequencies");
+                std::vector<double> values;
+                std::istringstream list(text);
+                std::string token;
+                bool valid = !text.empty() && text.back() != ',';
+                while (std::getline(list, token, ',')) {
+                    std::istringstream number(token);
+                    number.imbue(std::locale::classic());
+                    double value = 0.;
+                    if (!(number >> value) || !(number >> std::ws).eof()) {
+                        valid = false;
+                        break;
+                    }
+                    values.push_back(value);
+                }
+                if (!valid || (frequency && values.size() != 2 && values.size() != 4) || (damping && values.size() != 2)) {
+                    boost::nowide::cerr << "Input-shaping frequency requires --calibration-frequencies X_START,X_END[,Y_START,Y_END]; damping requires X,Y" << std::endl;
+                    record_exit_reson(outfile_dir, CLI_INVALID_PARAMS, 0, cli_errors[CLI_INVALID_PARAMS], sliced_info);
+                    flush_and_exit(CLI_INVALID_PARAMS);
+                }
+                calibration_params.freqStartX = values[0];
+                if (frequency) {
+                    calibration_params.freqEndX = values[1];
+                    calibration_params.freqStartY = values.size() == 4 ? values[2] : values[0];
+                    calibration_params.freqEndY = values.size() == 4 ? values[3] : values[1];
+                } else {
+                    calibration_params.freqStartY = values[1];
+                }
+            }
         }
         m_input_files.push_back((boost::filesystem::path(resources_dir()) / "calib" /
-                                calibration_recipe_asset(*calibration_recipe)).string());
+                                calibration_recipe_asset(*calibration_recipe, calibration_params)).string());
     }
     bool start_gui = m_actions.empty() && !downward_check;
     if (start_gui) {

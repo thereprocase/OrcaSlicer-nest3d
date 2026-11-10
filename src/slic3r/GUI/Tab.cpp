@@ -6618,41 +6618,7 @@ void TabPrinter::clear_pages()
 
 std::vector<InputShaperType> input_shaper_types_for_flavor(GCodeFlavor flavor)
 {
-    switch (flavor) {
-    case GCodeFlavor::gcfKlipper:
-        return {
-            InputShaperType::Default,
-            InputShaperType::ZV,
-            InputShaperType::MZV,
-            InputShaperType::ZVD,
-            InputShaperType::EI,
-            InputShaperType::TwoHumpEI,
-            InputShaperType::ThreeHumpEI,
-            InputShaperType::Disable
-        };
-    case GCodeFlavor::gcfRepRapFirmware:
-        return {
-            InputShaperType::Default,
-            InputShaperType::MZV,
-            InputShaperType::ZVD,
-            InputShaperType::ZVDD,
-            InputShaperType::ZVDDD,
-            InputShaperType::EI2,
-            InputShaperType::EI3,
-            InputShaperType::DAA,
-            InputShaperType::Disable
-        };
-    case GCodeFlavor::gcfMarlinFirmware:
-        return {
-            InputShaperType::ZV,
-            InputShaperType::Disable
-        };
-    default:
-        return {
-            InputShaperType::Default,
-            InputShaperType::Disable
-        };
-    }
+    return Slic3r::calibration_input_shaper_types(flavor);
 }
 
 void TabPrinter::update_input_shaper_menu(GCodeFlavor flavor)

@@ -1,5 +1,6 @@
 #include "ParameterUtils.hpp"
 #include "PrintConfig.hpp"
+#include "Config.hpp"
 #include <boost/log/trivial.hpp>
 #include <cassert>
 #include <vector>
@@ -8,6 +9,60 @@
 #include <string>
 
 namespace Slic3r {
+
+std::vector<InputShaperType> calibration_input_shaper_types(GCodeFlavor flavor)
+{
+    switch (flavor) {
+    case GCodeFlavor::gcfKlipper:
+        return {
+            InputShaperType::Default,
+            InputShaperType::ZV,
+            InputShaperType::MZV,
+            InputShaperType::ZVD,
+            InputShaperType::EI,
+            InputShaperType::TwoHumpEI,
+            InputShaperType::ThreeHumpEI,
+            InputShaperType::Disable
+        };
+    case GCodeFlavor::gcfRepRapFirmware:
+        return {
+            InputShaperType::Default,
+            InputShaperType::MZV,
+            InputShaperType::ZVD,
+            InputShaperType::ZVDD,
+            InputShaperType::ZVDDD,
+            InputShaperType::EI2,
+            InputShaperType::EI3,
+            InputShaperType::DAA,
+            InputShaperType::Disable
+        };
+    case GCodeFlavor::gcfMarlinFirmware:
+        return {
+            InputShaperType::ZV,
+            InputShaperType::Disable
+        };
+    default:
+        return {
+            InputShaperType::Default,
+            InputShaperType::Disable
+        };
+    }
+}
+
+// Check if the machine supports Junction Deviation (Marlin firmware with machine_max_junction_deviation > 0)
+bool has_junction_deviation(const DynamicPrintConfig* printer_config)
+{
+    if (!printer_config) {
+        return false;
+    }
+    const auto gcode_flavor = printer_config->option<ConfigOptionEnum<GCodeFlavor>>("gcode_flavor");
+    const auto junction_dev = printer_config->option<ConfigOptionFloats>("machine_max_junction_deviation");
+    return gcode_flavor &&
+           gcode_flavor->value == GCodeFlavor::gcfMarlinFirmware &&
+           junction_dev &&
+           !junction_dev->values.empty() &&
+           junction_dev->values.front() > 0.0;
+}
 
 std::vector<LayerPrintSequence> get_other_layers_print_sequence(int sequence_nums, const std::vector<int> &sequence)
 {

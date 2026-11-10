@@ -297,7 +297,8 @@ other geometry transforms, and extra input models are rejected. CLI-only retract
 implicitly enabled on calibration jobs; explicit guard flags remain available.
 
 The flat-bed tower recipes `temperature`, `max-volumetric-speed`, `retraction`, `vfa`,
-`overhang-fan`, `part-fan`, `bridge-fan` and `small-feature-fan` use the same native tower
+`overhang-fan`, `part-fan`, `bridge-fan`, `small-feature-fan`, `cornering`,
+`input-shaping-frequency` and `input-shaping-damping` use the same native tower
 functions as their GUI menu entries. Those functions own model cutting, nozzle scaling,
 recipe settings and conversion of user values to the slicer's runtime `Calib_Params`.
 Both frontends select stock assets through `tower_calibration_asset`; the GUI retains its
@@ -305,7 +306,7 @@ scene updates and belt handling around these shared routines. A future change to
 routine therefore reaches both callers. This does not guarantee compatibility with an
 arbitrary upstream merge: the runtime G-code tests and caller wiring still need review.
 
-Tower jobs require `--slice`, `--export-3mf`, one filament profile and explicit
+Tower jobs require `--slice`, `--export-3mf` and one filament profile. Discrete towers require explicit
 `--calibration-start`, `--calibration-end` and `--calibration-step`. For example:
 
 ```sh
@@ -329,14 +330,34 @@ underlying GUI tower helper does when resizing is disabled. VFA additionally acc
 blocks and runtime stepping retain 25 layers per speed block. Other towers retain the GUI's
 existing height/ramp formulas, including their end-band behavior.
 
+Cornering and input shaping support the same Klipper, Marlin 2 and RepRapFirmware writers as the GUI.
+They continuously interpolate across layers; `--calibration-step` is unused. Cornering requires start/end
+values (jerk/square-corner velocity, or Marlin junction deviation when configured). Input-shaping damping
+requires start/end damping ratios in [0, 1] and `--calibration-frequencies X,Y` for fixed frequencies in Hz.
+Input-shaping frequency accepts `--calibration-frequencies X_START,X_END,Y_START,Y_END`, or two values
+for equal X/Y ramps; `--calibration-start` sets its fixed damping ratio. Frequencies must lie in [0, 500].
+RepRapFirmware requires equal X/Y frequencies. `--calibration-shaper NAME` selects from the GUI's
+shared firmware-specific shaper list; omission selects the first GUI choice.
+
+`--calibration-test-model 0` selects the ringing tower and `1` the fast tower for these three motion tests.
+Cornering also accepts `2` for its SCV model. Firmware, shaper and model combinations are checked before
+recipe mutation. For example:
+
+```sh
+orca-slicer --load-settings 'KLIPPER_MACHINE.json;PROCESS.json' --load-filaments FILAMENT.json \
+  --calibration input-shaping-frequency --calibration-start 0.1 \
+  --calibration-frequencies 30,60,40,80 --calibration-shaper MZV \
+  --calibration-test-model 1 --slice 0 --export-3mf shaping.3mf --outputdir OUT
+```
+
 Runtime calibration modes belong to `Print`, and upstream project serialization does not
 preserve them for reslicing a reopened project. The exported sliced 3MF contains the actual
 calibration G-code; rerun the calibration command to regenerate it. Reopening the project and
 slicing it as an ordinary project does not reproduce the calibration mode. Recipe setting changes use the existing preset override metadata so their values survive reopening.
 No profile or project-format keys are added for the runtime requests.
 
-Pressure advance, cornering, input shaping, belt counterrotation/support wedges and belt
-sectioned temperature tests remain GUI-only generators. Unsupported recipe names fail without
+Pressure advance, belt counterrotation/support wedges and belt sectioned temperature tests
+remain GUI-only generators. Unsupported recipe names fail without
 exporting a substitute test. Hardware-driven automatic calibrations are separate from model generation.
 
 `--calibration list` emits a JSON catalogue of the GUI recipes and whether this CLI can generate each
@@ -351,8 +372,8 @@ entrypoint map is:
 | Maximum volumetric speed | `Plater::calib_max_vol_speed` | Shared thick-line/spiral setup, bed-aware scaling, tower cut and volume-to-speed conversion |
 | Retraction | `Plater::calib_retraction` | Shared nozzle-dependent layers, firmware-retraction disable and tower cut |
 | VFA | `Plater::calib_VFA` | Shared layer-height resolution, nozzle scaling, layer-count blocks and slowdown/spiral setup |
-| Cornering | `Plater::Calib_Cornering` | Range, model selection, acceleration/speed vectors, firmware-specific runtime commands |
-| Input-shaping frequency/damping | `Plater::calib_input_shaping_freq` / `calib_input_shaping_damp` | Per-axis ranges, shaper, model selection, firmware-specific runtime commands |
+| Cornering | `Plater::Calib_Cornering` | Shared model choice and firmware-specific motion setup, continuous runtime ramp |
+| Input-shaping frequency/damping | `Plater::calib_input_shaping_freq` / `calib_input_shaping_damp` | Shared model choice, motion setup and firmware-specific shaper choices, per-axis runtime ramps |
 | Four fan towers | `Plater::calib_fan_tower` | Shared tower cutting/nozzle resize, overhang classification overrides and runtime cooling parameters |
 
 The menu dispatch lives in `MainFrame::run_calibration`; recipe geometry/configuration lives in

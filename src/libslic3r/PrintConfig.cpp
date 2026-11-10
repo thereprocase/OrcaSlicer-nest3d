@@ -13179,6 +13179,23 @@ CLIMiscConfigDef::CLIMiscConfigDef()
     def->min = 0.;
     def->set_default_value(new ConfigOptionFloat(0.));
 
+    def = this->add("calibration_test_model", coInt);
+    def->label = L("Calibration model variant");
+    def->tooltip = L("Input shaping: ringing tower (0) or fast tower (1). Cornering also accepts the SCV model (2).");
+    def->min = 0;
+    def->max = 2;
+    def->set_default_value(new ConfigOptionInt(0));
+
+    def = this->add("calibration_shaper", coString);
+    def->label = L("Calibration input shaper");
+    def->tooltip = L("Input shaper name from the firmware-specific GUI choices. Empty uses the first GUI choice.");
+    def->set_default_value(new ConfigOptionString(""));
+
+    def = this->add("calibration_frequencies", coString);
+    def->label = L("Calibration frequencies");
+    def->tooltip = L("Frequency test: X start, X end, optionally Y start and Y end, in Hz. Damping test: fixed X and Y frequencies. Separate values with commas.");
+    def->set_default_value(new ConfigOptionString(""));
+
     def = this->add("retraction_guard", coInt);
     def->label = L("CLI retraction guard");
     def->tooltip = L("Enable local CLI defaults for travel retraction protection (1), or use the supplied profiles without those defaults (0). Explicit retraction flags override individual defaults. GUI defaults are unchanged.");

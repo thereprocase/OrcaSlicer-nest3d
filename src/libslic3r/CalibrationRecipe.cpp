@@ -8,9 +8,11 @@
 #include "Model.hpp"
 #include "PrintConfig.hpp"
 #include "TowerCalibration.hpp"
+#include "ParameterUtils.hpp"
 
 #include <algorithm>
 #include <cmath>
+#include <cstddef>
 #include <stdexcept>
 
 namespace Slic3r {
@@ -29,9 +31,9 @@ const std::vector<CalibrationRecipe> &calibration_recipes()
         {"max-volumetric-speed", CalibrationGenerator::MaxVolumetricSpeed, true, false, 1, CalibMode::Calib_Vol_speed_Tower},
         {"retraction", CalibrationGenerator::Retraction, true, false, 1, CalibMode::Calib_Retraction_tower},
         {"vfa", CalibrationGenerator::VFA, true, false, 1, CalibMode::Calib_VFA_Tower},
-        {"cornering", CalibrationGenerator::Cornering, false},
-        {"input-shaping-frequency", CalibrationGenerator::InputShapingFrequency, false},
-        {"input-shaping-damping", CalibrationGenerator::InputShapingDamping, false},
+        {"cornering", CalibrationGenerator::Cornering, true, false, 1, CalibMode::Calib_Cornering},
+        {"input-shaping-frequency", CalibrationGenerator::InputShapingFrequency, true, false, 1, CalibMode::Calib_Input_shaping_freq},
+        {"input-shaping-damping", CalibrationGenerator::InputShapingDamping, true, false, 1, CalibMode::Calib_Input_shaping_damp},
         {"overhang-fan", CalibrationGenerator::FanTower, true, false, 1, CalibMode::Calib_Overhang_Fan_Tower},
         {"part-fan", CalibrationGenerator::FanTower, true, false, 1, CalibMode::Calib_Part_Fan_Tower},
         {"bridge-fan", CalibrationGenerator::FanTower, true, false, 1, CalibMode::Calib_Bridge_Fan_Tower},
@@ -49,12 +51,12 @@ const CalibrationRecipe *find_calibration_recipe(const std::string &name)
     return it == recipes.end() ? nullptr : &*it;
 }
 
-std::string calibration_recipe_asset(const CalibrationRecipe &recipe)
+std::string calibration_recipe_asset(const CalibrationRecipe &recipe, const Calib_Params &params)
 {
     if (recipe.cli_supported && recipe.generator == CalibrationGenerator::FlowRatio)
         return flow_ratio_calibration_asset(recipe.linear, recipe.pass);
     if (recipe.cli_supported && recipe.mode != CalibMode::Calib_None)
-        return tower_calibration_asset(recipe.mode);
+        return tower_calibration_asset(recipe.mode, params.test_model);
     throw std::invalid_argument("Native CLI calibration generation is unavailable for " + recipe.name);
 }
 
@@ -67,14 +69,20 @@ Calib_Params apply_calibration_recipe(Model &model, DynamicPrintConfig &config, 
     if (config.opt_bool("belt_printer"))
         throw std::invalid_argument("CLI calibration currently requires a flat-bed printer");
     if (recipe.generator != CalibrationGenerator::FlowRatio) {
+        const bool frequency = recipe.generator == CalibrationGenerator::InputShapingFrequency;
+        const bool damping = recipe.generator == CalibrationGenerator::InputShapingDamping;
+        const bool cornering = recipe.generator == CalibrationGenerator::Cornering;
+        const bool continuous = frequency || damping || cornering;
         if (!std::isfinite(params.start) || !std::isfinite(params.end) || !std::isfinite(params.step) ||
-            params.start < 0. || params.end < 0. || params.step <= 0. || params.step > std::abs(params.end - params.start))
-            throw std::invalid_argument("Tower calibration requires a finite nonnegative range and a positive step within the range");
+            params.start < 0. || params.end < 0.)
+            throw std::invalid_argument("Tower calibration requires finite nonnegative values");
+        if (!continuous && (params.step <= 0. || params.step > std::abs(params.end - params.start)))
+            throw std::invalid_argument("Tower calibration requires a positive step within the range");
         if (recipe.generator == CalibrationGenerator::Temperature) {
             if (params.start <= params.end || params.start > 500. || params.end < 155. || params.step != 5. ||
                 std::fmod(params.start, 5.) != 0. || std::fmod(params.end, 5.) != 0.)
                 throw std::invalid_argument("Temperature calibration requires a descending range of multiples of 5 from 155 to 500 C and step 5");
-        } else if (params.end <= params.start) {
+        } else if (!frequency && params.end <= params.start) {
             throw std::invalid_argument("This calibration requires an increasing range");
         }
         if (recipe.generator == CalibrationGenerator::FanTower &&
@@ -97,6 +105,36 @@ Calib_Params apply_calibration_recipe(Model &model, DynamicPrintConfig &config, 
         }
         Calib_Params runtime = params;
         runtime.mode = recipe.mode;
+        if (continuous) {
+            const auto flavor = config.opt_enum<GCodeFlavor>("gcode_flavor");
+            if (flavor != gcfKlipper && flavor != gcfMarlinFirmware && flavor != gcfRepRapFirmware)
+                throw std::invalid_argument("Cornering and input-shaping calibration require Klipper, Marlin 2 or RepRapFirmware");
+            if (params.test_model < 0 || params.test_model > (cornering ? 2 : 1))
+                throw std::invalid_argument("Invalid calibration model variant");
+            if (cornering && params.end > (has_junction_deviation(&config) ? 0.3 : 100.))
+                throw std::invalid_argument("Cornering range exceeds the GUI's firmware-specific limit");
+            if (frequency || damping) {
+                auto valid_frequency = [](double value) { return std::isfinite(value) && value >= 0. && value <= 500.; };
+                if (!valid_frequency(params.freqStartX) || !valid_frequency(params.freqStartY) ||
+                    (frequency && (!valid_frequency(params.freqEndX) || !valid_frequency(params.freqEndY) ||
+                                   params.freqEndX <= params.freqStartX || params.freqEndY <= params.freqStartY)))
+                    throw std::invalid_argument("Input-shaping calibration requires frequencies from 0 to 500 Hz and increasing frequency ramps");
+                if ((frequency && params.start >= 1.) || (damping && params.end > 1.))
+                    throw std::invalid_argument("Input-shaping damping values must lie between 0 and 1");
+                if (flavor == gcfRepRapFirmware && (params.freqStartX != params.freqStartY ||
+                    (frequency && params.freqEndX != params.freqEndY)))
+                    throw std::invalid_argument("RepRapFirmware input shaping requires equal X and Y frequencies");
+                const auto allowed = calibration_input_shaper_types(flavor);
+                const auto &names = print_config_def.get("input_shaping_type")->enum_values;
+                if (runtime.shaper_type.empty())
+                    runtime.shaper_type = names.at(static_cast<size_t>(allowed.front()));
+                const bool valid_type = std::any_of(allowed.begin(), allowed.end(), [&](InputShaperType type) {
+                    return type != InputShaperType::Disable && names.at(static_cast<size_t>(type)) == runtime.shaper_type;
+                });
+                if (!valid_type)
+                    throw std::invalid_argument("Input shaper is not available for the selected firmware");
+            }
+        }
         const CalibrationCut cut = [&model](double z, ModelObjectCutAttributes attributes) {
             cut_calibration_model(model, z, attributes);
         };
@@ -111,6 +149,12 @@ Calib_Params apply_calibration_recipe(Model &model, DynamicPrintConfig &config, 
             return apply_temperature_calibration(model, config, config, config, runtime, cut);
         case CalibrationGenerator::FanTower:
             return apply_fan_tower_calibration(model, config, config, config, runtime, cut);
+        case CalibrationGenerator::InputShapingFrequency:
+            return apply_input_shaping_frequency_calibration(model, config, config, config, runtime);
+        case CalibrationGenerator::InputShapingDamping:
+            return apply_input_shaping_damping_calibration(model, config, config, config, runtime);
+        case CalibrationGenerator::Cornering:
+            return apply_cornering_calibration(model, config, config, config, runtime);
         default: throw std::invalid_argument("Native CLI calibration generation is unavailable for " + recipe.name);
         }
     }

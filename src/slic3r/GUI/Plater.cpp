@@ -390,30 +390,6 @@ static std::string get_diameter_string(float diameter)
     return s;
 }
 
-// Orca: a calibration print sets pressure advance explicitly to 0 on each extruder variant that
-// has it disabled, so the value stored in the printer does not skew the result. Variants with
-// pressure advance enabled keep their own value.
-static void zero_pressure_advance_where_disabled(DynamicPrintConfig *filament_config)
-{
-    auto enable_pa   = filament_config->option<ConfigOptionBools>("enable_pressure_advance");
-    auto pa          = filament_config->option<ConfigOptionFloats>("pressure_advance");
-    auto adaptive_pa = filament_config->option<ConfigOptionBools>("adaptive_pressure_advance");
-    if (!enable_pa || !pa || !adaptive_pa || pa->empty() || adaptive_pa->empty())
-        return;
-    // All variant keys share the variant count; widen a short one rather than index past it.
-    if (pa->size() < enable_pa->size())
-        pa->resize(enable_pa->size());
-    if (adaptive_pa->size() < enable_pa->size())
-        adaptive_pa->resize(enable_pa->size());
-    for (size_t variant = 0; variant < enable_pa->size(); ++variant) {
-        if (enable_pa->get_at(variant))
-            continue;
-        enable_pa->values[variant]   = true;
-        pa->values[variant]          = 0.0;
-        adaptive_pa->values[variant] = false;
-    }
-}
-
 bool Plater::has_illegal_filename_characters(const wxString& wxs_name)
 {
     std::string name = into_u8(wxs_name);
@@ -1394,21 +1370,6 @@ struct DynamicFilamentList : DynamicList
         DynamicList::update();
     }
 };
-
-// Check if the machine supports Junction Deviation (Marlin firmware with machine_max_junction_deviation > 0)
-static bool has_junction_deviation(const DynamicPrintConfig* printer_config)
-{
-    if (!printer_config) {
-        return false;
-    }
-    const auto gcode_flavor = printer_config->option<ConfigOptionEnum<GCodeFlavor>>("gcode_flavor");
-    const auto junction_dev = printer_config->option<ConfigOptionFloats>("machine_max_junction_deviation");
-    return gcode_flavor &&
-           gcode_flavor->value == GCodeFlavor::gcfMarlinFirmware &&
-           junction_dev &&
-           !junction_dev->values.empty() &&
-           junction_dev->values.front() > 0.0;
-}
 
 static DynamicFilamentList dynamic_filament_list;                // every slot, mixed included (per-feature *_filament_id keys)
 static DynamicFilamentList dynamic_physical_filament_list(true); // physical slots only (support_*, wipe_tower_filament)
@@ -17970,55 +17931,13 @@ void Plater::calib_input_shaping_freq(const Calib_Params& params)
     if (params.mode != CalibMode::Calib_Input_shaping_freq)
         return;
 
-    if (!add_model(false, Slic3r::resources_dir() + (params.test_model < 1 ? "/calib/input_shaping/ringing_tower.drc" : "/calib/input_shaping/fast_tower_test.drc")))
+    if (!add_model(false, Slic3r::resources_dir() + "/calib/" + tower_calibration_asset(params.mode, params.test_model)))
         return;
     if (params.test_model < 1)
         belt_calib_flip_ringing_tower(model());
-    auto print_config = &wxGetApp().preset_bundle->prints.get_edited_preset().config;
-    auto filament_config = &wxGetApp().preset_bundle->filaments.get_edited_preset().config;
-    auto printer_config  = &wxGetApp().preset_bundle->printers.get_edited_preset().config;
-    const auto gcode_flavor_option = printer_config->option<ConfigOptionEnum<GCodeFlavor>>("gcode_flavor");
-
-    if (has_junction_deviation(printer_config)) {
-        printer_config->set_key_value("machine_max_junction_deviation", new ConfigOptionFloats {(std::max(printer_config->option<ConfigOptionFloats>("machine_max_junction_deviation")->values.front(), 0.25))});
-        set_config_values<double, ConfigOptionFloatsNullable>(print_config, "default_junction_deviation", 0);
-    } else {
-        const double jerk_value = (gcode_flavor_option && gcode_flavor_option->value == GCodeFlavor::gcfKlipper) ? 5.0 : 10.0;
-        printer_config->set_key_value("machine_max_jerk_x", new ConfigOptionFloats{std::max(printer_config->option<ConfigOptionFloats>("machine_max_jerk_x")->values.front(), jerk_value)});
-        printer_config->set_key_value("machine_max_jerk_y", new ConfigOptionFloats{std::max(printer_config->option<ConfigOptionFloats>("machine_max_jerk_y")->values.front(), jerk_value)});
-        set_config_values<double, ConfigOptionFloatsNullable>(print_config, "default_jerk", 0);
-    }
-
-    zero_pressure_advance_where_disabled(filament_config);
-
-    printer_config->set_key_value("resonance_avoidance", new ConfigOptionBool{false});
-    printer_config->set_key_value("input_shaping_emit", new ConfigOptionBool{false});
-    filament_config->set_key_value("slow_down_layer_time", new ConfigOptionFloats { 0.0 });
-    filament_config->set_key_value("slow_down_min_speed", new ConfigOptionFloats { 0.0 });
-    filament_config->set_key_value("slow_down_for_layer_cooling", new ConfigOptionBools{false});
-    print_config->set_key_value("layer_height", new ConfigOptionFloat(0.2));
-    set_config_values<bool, ConfigOptionBools>(print_config, "enable_overhang_speed", false);
-    // A 100% factor sends Klipper MINIMUM_CRUISE_RATIO=0 with every acceleration change, for the whole test.
-    print_config->set_key_value("accel_to_decel_enable", new ConfigOptionBool(true));
-    print_config->set_key_value("accel_to_decel_factor", new ConfigOptionPercent(100));
-    print_config->set_key_value("timelapse_type", new ConfigOptionEnum<TimelapseType>(tlTraditional));
-    print_config->set_key_value("wall_loops", new ConfigOptionInt(1));
-    print_config->set_key_value("top_shell_layers", new ConfigOptionInt(0));
-    print_config->set_key_value("bottom_shell_layers", new ConfigOptionInt(1));
-    print_config->set_key_value("sparse_infill_density", new ConfigOptionPercent(0));
-    print_config->set_key_value("detect_thin_wall", new ConfigOptionBool(false));
-    print_config->set_key_value("spiral_mode", new ConfigOptionBool(true));
-    print_config->set_key_value("spiral_mode_smooth", new ConfigOptionBool(false));
-    print_config->set_key_value("bottom_surface_pattern", new ConfigOptionEnum<InfillPattern>(ipRectilinear));
-    const double machine_max_speed = std::min(printer_config->option<ConfigOptionFloats>("machine_max_speed_x")->get_at(0), printer_config->option<ConfigOptionFloats>("machine_max_speed_y")->get_at(0));
-    const double machine_max_acceleration = printer_config->option<ConfigOptionFloats>("machine_max_acceleration_extruding")->get_at(0);
-    set_config_values<double, ConfigOptionFloatsNullable>(print_config, "outer_wall_speed", machine_max_speed);
-    set_config_values<double, ConfigOptionFloatsNullable>(print_config, "default_acceleration", machine_max_acceleration);
-    set_config_values<double, ConfigOptionFloatsNullable>(print_config, "outer_wall_acceleration", machine_max_acceleration);
-    print_config->set_key_value("precise_z_height", new ConfigOptionBool(false));
-    model().objects[0]->config.set_key_value("brim_type", new ConfigOptionEnum<BrimType>(btOuterOnly));
-    model().objects[0]->config.set_key_value("brim_width", new ConfigOptionFloat(3.0));
-    model().objects[0]->config.set_key_value("brim_object_gap", new ConfigOptionFloat(0.0));
+    auto &bundle = *wxGetApp().preset_bundle;
+    apply_input_shaping_frequency_calibration(model(), bundle.prints.get_edited_preset().config,
+        bundle.filaments.get_edited_preset().config, bundle.printers.get_edited_preset().config, params);
 
     changed_objects({ 0 });
     wxGetApp().get_tab(Preset::TYPE_PRINT)->update_dirty();
@@ -18038,54 +17957,13 @@ void Plater::calib_input_shaping_damp(const Calib_Params& params)
     if (params.mode != CalibMode::Calib_Input_shaping_damp)
         return;
 
-    if (!add_model(false, Slic3r::resources_dir() + (params.test_model < 1 ? "/calib/input_shaping/ringing_tower.drc" : "/calib/input_shaping/fast_tower_test.drc")))
+    if (!add_model(false, Slic3r::resources_dir() + "/calib/" + tower_calibration_asset(params.mode, params.test_model)))
         return;
     if (params.test_model < 1)
         belt_calib_flip_ringing_tower(model());
-    auto print_config = &wxGetApp().preset_bundle->prints.get_edited_preset().config;
-    auto filament_config = &wxGetApp().preset_bundle->filaments.get_edited_preset().config;
-    auto printer_config  = &wxGetApp().preset_bundle->printers.get_edited_preset().config;
-    const auto gcode_flavor_option = printer_config->option<ConfigOptionEnum<GCodeFlavor>>("gcode_flavor");
-
-    if (has_junction_deviation(printer_config)) {
-        printer_config->set_key_value("machine_max_junction_deviation", new ConfigOptionFloats {(std::max(printer_config->option<ConfigOptionFloats>("machine_max_junction_deviation")->values.front(), 0.25))});
-        set_config_values<double, ConfigOptionFloatsNullable>(print_config, "default_junction_deviation", 0);
-    } else {
-        const double jerk_value = (gcode_flavor_option && gcode_flavor_option->value == GCodeFlavor::gcfKlipper) ? 5.0 : 10.0;
-        printer_config->set_key_value("machine_max_jerk_x", new ConfigOptionFloats{std::max(printer_config->option<ConfigOptionFloats>("machine_max_jerk_x")->values.front(), jerk_value)});
-        printer_config->set_key_value("machine_max_jerk_y", new ConfigOptionFloats{std::max(printer_config->option<ConfigOptionFloats>("machine_max_jerk_y")->values.front(), jerk_value)});
-        set_config_values<double, ConfigOptionFloatsNullable>(print_config, "default_jerk", 0);
-    }
-
-    zero_pressure_advance_where_disabled(filament_config);
-
-    printer_config->set_key_value("resonance_avoidance", new ConfigOptionBool{false});
-    printer_config->set_key_value("input_shaping_emit", new ConfigOptionBool{false});
-    filament_config->set_key_value("slow_down_layer_time", new ConfigOptionFloats { 0.0 });
-    filament_config->set_key_value("slow_down_min_speed", new ConfigOptionFloats { 0.0 });
-    filament_config->set_key_value("slow_down_for_layer_cooling", new ConfigOptionBools{false});
-    set_config_values<bool, ConfigOptionBools>(print_config, "enable_overhang_speed", false);
-    // A 100% factor sends Klipper MINIMUM_CRUISE_RATIO=0 with every acceleration change, for the whole test.
-    print_config->set_key_value("accel_to_decel_enable", new ConfigOptionBool(true));
-    print_config->set_key_value("accel_to_decel_factor", new ConfigOptionPercent(100));
-    print_config->set_key_value("timelapse_type", new ConfigOptionEnum<TimelapseType>(tlTraditional));
-    print_config->set_key_value("wall_loops", new ConfigOptionInt(1));
-    print_config->set_key_value("top_shell_layers", new ConfigOptionInt(0));
-    print_config->set_key_value("bottom_shell_layers", new ConfigOptionInt(1));
-    print_config->set_key_value("sparse_infill_density", new ConfigOptionPercent(0));
-    print_config->set_key_value("detect_thin_wall", new ConfigOptionBool(false));
-    print_config->set_key_value("spiral_mode", new ConfigOptionBool(true));
-    print_config->set_key_value("spiral_mode_smooth", new ConfigOptionBool(false));
-    print_config->set_key_value("bottom_surface_pattern", new ConfigOptionEnum<InfillPattern>(ipRectilinear));
-    const double machine_max_speed = std::min(printer_config->option<ConfigOptionFloats>("machine_max_speed_x")->get_at(0), printer_config->option<ConfigOptionFloats>("machine_max_speed_y")->get_at(0));
-    const double machine_max_acceleration = printer_config->option<ConfigOptionFloats>("machine_max_acceleration_extruding")->get_at(0);
-    set_config_values<double, ConfigOptionFloatsNullable>(print_config, "outer_wall_speed", machine_max_speed);
-    set_config_values<double, ConfigOptionFloatsNullable>(print_config, "default_acceleration", machine_max_acceleration);
-    set_config_values<double, ConfigOptionFloatsNullable>(print_config, "outer_wall_acceleration", machine_max_acceleration);
-    print_config->set_key_value("precise_z_height", new ConfigOptionBool(false));
-    model().objects[0]->config.set_key_value("brim_type", new ConfigOptionEnum<BrimType>(btOuterOnly));
-    model().objects[0]->config.set_key_value("brim_width", new ConfigOptionFloat(3.0));
-    model().objects[0]->config.set_key_value("brim_object_gap", new ConfigOptionFloat(0.0));
+    auto &bundle = *wxGetApp().preset_bundle;
+    apply_input_shaping_damping_calibration(model(), bundle.prints.get_edited_preset().config,
+        bundle.filaments.get_edited_preset().config, bundle.printers.get_edited_preset().config, params);
 
     changed_objects({ 0 });
     wxGetApp().get_tab(Preset::TYPE_PRINT)->update_dirty();
@@ -18105,55 +17983,13 @@ void Plater::Calib_Cornering(const Calib_Params& params)
     if (params.mode != CalibMode::Calib_Cornering)
         return;
 
-    const std::string cornering_model_path = params.test_model == 0
-        ? "/calib/input_shaping/ringing_tower.drc"
-        : (params.test_model == 1 ? "/calib/input_shaping/fast_tower_test.drc" : "/calib/cornering/SCV-V2.drc");
-    if (!add_model(false, Slic3r::resources_dir() + cornering_model_path))
+    if (!add_model(false, Slic3r::resources_dir() + "/calib/" + tower_calibration_asset(params.mode, params.test_model)))
         return;
     if (params.test_model == 0)
         belt_calib_flip_ringing_tower(model());
-    auto print_config = &wxGetApp().preset_bundle->prints.get_edited_preset().config;
-    auto filament_config = &wxGetApp().preset_bundle->filaments.get_edited_preset().config;
-    auto printer_config  = &wxGetApp().preset_bundle->printers.get_edited_preset().config;
-
-    if (has_junction_deviation(printer_config)) {
-        printer_config->set_key_value("machine_max_junction_deviation", new ConfigOptionFloats{params.end});
-        set_config_values<double, ConfigOptionFloatsNullable>(print_config, "default_junction_deviation", 0);
-    } else {
-        printer_config->set_key_value("machine_max_jerk_x", new ConfigOptionFloats{params.end});
-        printer_config->set_key_value("machine_max_jerk_y", new ConfigOptionFloats{params.end});
-        set_config_values<double, ConfigOptionFloatsNullable>(print_config, "default_jerk", 0);
-    }
-
-    zero_pressure_advance_where_disabled(filament_config);
-
-    printer_config->set_key_value("resonance_avoidance", new ConfigOptionBool{false});
-    printer_config->set_key_value("input_shaping_emit", new ConfigOptionBool{true});
-    printer_config->set_key_value("input_shaping_type", new ConfigOptionEnum<InputShaperType>(InputShaperType::Disable));
-    filament_config->set_key_value("slow_down_layer_time", new ConfigOptionFloats { 0.0 });
-    filament_config->set_key_value("slow_down_min_speed", new ConfigOptionFloats { 0.0 });
-    filament_config->set_key_value("slow_down_for_layer_cooling", new ConfigOptionBools{false});
-    const double filament_max_volumetric_speed = filament_config->option<ConfigOptionFloats>("filament_max_volumetric_speed")->get_at(0);
-    filament_config->set_key_value("filament_max_volumetric_speed", new ConfigOptionFloats{std::max(filament_max_volumetric_speed, 200.0)});
-    set_config_values<bool, ConfigOptionBools>(print_config, "enable_overhang_speed", false);
-    print_config->set_key_value("timelapse_type", new ConfigOptionEnum<TimelapseType>(tlTraditional));
-    print_config->set_key_value("wall_loops", new ConfigOptionInt(1));
-    print_config->set_key_value("top_shell_layers", new ConfigOptionInt(0));
-    print_config->set_key_value("bottom_shell_layers", new ConfigOptionInt(1));
-    print_config->set_key_value("sparse_infill_density", new ConfigOptionPercent(0));
-    print_config->set_key_value("detect_thin_wall", new ConfigOptionBool(false));
-    print_config->set_key_value("spiral_mode", new ConfigOptionBool(true));
-    print_config->set_key_value("spiral_mode_smooth", new ConfigOptionBool(false));
-    print_config->set_key_value("bottom_surface_pattern", new ConfigOptionEnum<InfillPattern>(ipRectilinear));
-    const double machine_max_speed = std::min(printer_config->option<ConfigOptionFloats>("machine_max_speed_x")->get_at(0), printer_config->option<ConfigOptionFloats>("machine_max_speed_y")->get_at(0));
-    const double machine_max_acceleration = printer_config->option<ConfigOptionFloats>("machine_max_acceleration_extruding")->get_at(0);
-    set_config_values<double, ConfigOptionFloatsNullable>(print_config, "outer_wall_speed", machine_max_speed);
-    set_config_values<double, ConfigOptionFloatsNullable>(print_config, "default_acceleration", machine_max_acceleration);
-    set_config_values<double, ConfigOptionFloatsNullable>(print_config, "outer_wall_acceleration", machine_max_acceleration);
-    print_config->set_key_value("precise_z_height", new ConfigOptionBool(false));
-    model().objects[0]->config.set_key_value("brim_type", new ConfigOptionEnum<BrimType>(btOuterOnly));
-    model().objects[0]->config.set_key_value("brim_width", new ConfigOptionFloat(3.0));
-    model().objects[0]->config.set_key_value("brim_object_gap", new ConfigOptionFloat(0.0));
+    auto &bundle = *wxGetApp().preset_bundle;
+    apply_cornering_calibration(model(), bundle.prints.get_edited_preset().config,
+        bundle.filaments.get_edited_preset().config, bundle.printers.get_edited_preset().config, params);
 
     changed_objects({ 0 });
     wxGetApp().get_tab(Preset::TYPE_PRINT)->update_dirty();
