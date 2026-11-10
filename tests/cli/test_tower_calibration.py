@@ -9,11 +9,14 @@ import tempfile
 import zipfile
 
 
-def outer_wall_speeds(gcode):
+def outer_wall_speeds(gcode, skip_first_layer=False):
     feature = None
     feed = None
+    layer = 0
     speeds = set()
     for line in gcode.splitlines():
+        if line in ('; CHANGE_LAYER', ';LAYER_CHANGE'):
+            layer += 1
         if line.startswith('; FEATURE: '):
             feature = line[11:]
         if line.startswith(('G0 ', 'G1 ', 'G2 ', 'G3 ')):
@@ -21,6 +24,8 @@ def outer_wall_speeds(gcode):
             if 'F' in values:
                 feed = values['F'] / 60
             if feature == 'Outer wall' and values.get('E', 0) > 0 and any(key in values for key in ('X', 'Y')):
+                if skip_first_layer and layer <= 1:
+                    continue
                 speeds.add(round(feed, 2))
     return speeds
 
@@ -85,7 +90,8 @@ def main():
             elif recipe == 'max-volumetric-speed':
                 assert float(config['filament_max_volumetric_speed'][0]) >= 200
                 assert 'filament_max_volumetric_speed' in changed[1].split(';')
-                speeds = outer_wall_speeds(gcode)
+                # The shared GUI engine uses the profile's first-layer perimeter speed before the ramp.
+                speeds = outer_wall_speeds(gcode, skip_first_layer=True)
                 assert len(speeds) >= 3, speeds
                 # A fixed profile outer-wall speed would never produce this low ramp.
                 bead = (.7 - .32 * (1 - math.pi / 4)) * .32 * .95
