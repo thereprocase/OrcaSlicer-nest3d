@@ -58,7 +58,19 @@ def main():
             assert {1000, 2000}.issubset(accelerations), accelerations
             feeds = {int(float(value)) for value in re.findall(r'\bF([\d.]+)', joined)}
             assert {1800, 3600}.issubset(feeds), feeds
-            assert 'Metadata/custom_gcode_per_layer.xml' in archive.namelist()
+            saved = ET.fromstring(archive.read('Metadata/custom_gcode_per_layer.xml'))
+            saved_plates = saved.findall('plate')
+            assert {int(plate.find('plate_info').get('id')) for plate in saved_plates} == {
+                int(re.search(r'plate_(\d+)\.gcode', name).group(1)) for name in plates}
+            saved_blocks = []
+            for plate in saved_plates:
+                layers = plate.findall('layer')
+                assert len(layers) == 4, len(layers)
+                for layer in layers:
+                    saved_blocks.extend(re.findall(
+                        r'; start pressure advance pattern for layer\n(.*?); end pressure advance pattern for layer',
+                        layer.get('extra'), re.S))
+            assert len(saved_blocks) == len(blocks), (len(saved_blocks), len(blocks))
         print(f'PA pattern: four speed/acceleration combinations, {len(plates)} native plates, custom G-code PASS')
     return 0
 
